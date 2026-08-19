@@ -56,10 +56,79 @@ impl Polygon {
             cy += (p1.y + p2.y) * cross;
         }
 
-        Point::new(
-            cx / (6.0 * signed_area),
-            cy / (6.0 * signed_area),
-        )
+        Point::new(cx / (6.0 * signed_area), cy / (6.0 * signed_area))
+    }
+
+    /// Calculate the second moment of area about the global x-axis.
+    pub fn moment_of_inertia_x(&self) -> f64 {
+        let mut sum = 0.0;
+
+        for i in 0..self.vertices.len() {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % self.vertices.len()];
+
+            let cross = p1.x * p2.y - p2.x * p1.y;
+
+            sum += (p1.y.powi(2) + p1.y * p2.y + p2.y.powi(2)) * cross;
+        }
+
+        sum / 12.0
+    }
+
+    /// Calculate the second moment of area about the global y-axis.
+    pub fn moment_of_inertia_y(&self) -> f64 {
+        let mut sum = 0.0;
+
+        for i in 0..self.vertices.len() {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % self.vertices.len()];
+
+            let cross = p1.x * p2.y - p2.x * p1.y;
+
+            sum += (p1.x.powi(2) + p1.x * p2.x + p2.x.powi(2)) * cross;
+        }
+
+        sum / 12.0
+    }
+
+    /// Calculate the product of area about the global axes.
+    pub fn product_of_inertia_xy(&self) -> f64 {
+        let mut sum = 0.0;
+
+        for i in 0..self.vertices.len() {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % self.vertices.len()];
+
+            let cross = p1.x * p2.y - p2.x * p1.y;
+
+            sum += (p1.x * p2.y + 2.0 * p1.x * p1.y + 2.0 * p2.x * p2.y + p2.x * p1.y) * cross;
+        }
+
+        sum / 24.0
+    }
+
+    /// Calculate the second moment of area about the centroidal x-axis.
+    pub fn centroidal_moment_of_inertia_x(&self) -> f64 {
+        let area = self.area();
+        let centroid = self.centroid();
+
+        self.moment_of_inertia_x() - area * centroid.y.powi(2)
+    }
+
+    /// Calculate the second moment of area about the centroidal y-axis.
+    pub fn centroidal_moment_of_inertia_y(&self) -> f64 {
+        let area = self.area();
+        let centroid = self.centroid();
+
+        self.moment_of_inertia_y() - area * centroid.x.powi(2)
+    }
+
+    /// Calculate the product of area about the centroidal axes.
+    pub fn centroidal_product_of_inertia_xy(&self) -> f64 {
+        let area = self.area();
+        let centroid = self.centroid();
+
+        self.product_of_inertia_xy() - area * centroid.x * centroid.y
     }
 }
 
@@ -132,5 +201,58 @@ mod tests {
 
         assert!((centroid.x - 5.0).abs() < 1e-12);
         assert!((centroid.y - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rectangle_global_moments_of_inertia() {
+        let polygon = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ]);
+
+        let ix = polygon.moment_of_inertia_x();
+        let iy = polygon.moment_of_inertia_y();
+        let ixy = polygon.product_of_inertia_xy();
+
+        assert!((ix - 416.6666666666667).abs() < 1e-10);
+        assert!((iy - 1666.6666666666667).abs() < 1e-10);
+        assert!((ixy - 625.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rectangle_centroidal_moments_of_inertia() {
+        let polygon = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ]);
+
+        let ix = polygon.centroidal_moment_of_inertia_x();
+        let iy = polygon.centroidal_moment_of_inertia_y();
+        let ixy = polygon.centroidal_product_of_inertia_xy();
+
+        assert!((ix - 104.16666666666667).abs() < 1e-10);
+        assert!((iy - 416.6666666666667).abs() < 1e-10);
+        assert!(ixy.abs() < 1e-10);
+    }
+
+    #[test]
+    fn triangle_centroidal_moments_of_inertia() {
+        let polygon = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(0.0, 3.0),
+        ]);
+
+        let ix = polygon.centroidal_moment_of_inertia_x();
+        let iy = polygon.centroidal_moment_of_inertia_y();
+        let ixy = polygon.centroidal_product_of_inertia_xy();
+
+        assert!((ix - 3.0).abs() < 1e-10);
+        assert!((iy - 5.333333333333333).abs() < 1e-10);
+        assert!((ixy + 2.0).abs() < 1e-10);
     }
 }
