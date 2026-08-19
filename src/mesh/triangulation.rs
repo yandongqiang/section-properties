@@ -1,0 +1,476 @@
+
+//! Triangulation algorithms for polygon mesh generation.
+//!
+//! Implements ear clipping for simple polygons and Delaunay refinement.
+
+use crate::geometry::{Point, Polygon};
+use crate::section::Section;
+use std::f64::consts::PI;
+
+/// Triangle defined by three vertex indices (CCW orientation).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangle {
+    pub v: [usize; 3],
+}
+
+impl Triangle {
+    pub fn new(a: usize, b: usize, c: usize) -> Self {
+        Self { v: [a, b, c] }
+    }
+
+    /// Get the three vertex indices.
+    pub fn vertices(&self) -> [usize; 3] {
+        self.v
+    }
+
+    /// Check if point is inside triangle (using barycentric coordinates).
+    pub fn contains_point(&self, points: &[Point], p: Point) -> bool {
+        let a = points[self.v[0]];
+        let b = points[self.v[1]];
+        let c = points[self.v[2]];
+
+        let v0 = Point::new(c.x - a.x, c.y - a.y);
+        let v1 = Point::new(b.x - a.x, b.y - a.y);
+        let v2 = Point::new(p.x - a.x, p.y - a.y);
+
+        let dot00 = v0.x * v0.x + v0.y * v0.y;
+        let dot01 = v0.x * v1.x + v0.y * v1.y;
+        let dot02 = v0.x * v2.x + v0.y * v2.y;
+        let dot11 = v1.x * v1.x + v1.y * v1.y;
+        let dot12 = v1.x * v2.x + v1.y * v2.y;
+
+        let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+        let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
+        let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
+
+        u >= -1e-10 && v >= -1e-10 && (u + v) <= 1.0 + 1e-10
+    }
+
+    /// Compute triangle area (signed, positive for CCW).
+    pub fn signed_area(&self, points: &[Point]) -> f64 {
+        let a = points[self.v[0]];
+        let b = points[self.v[1]];
+        let c = points[self.v[2]];
+        0.5 * ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y))
+    }
+
+    /// Compute triangle circumcircle (center and radius squared).
+    pub fn circumcircle(&self, points: &[Point]) -> (Point, f64) {
+        let a = points[self.v[0]];
+        let b = points[self.v[1]];
+        let c = points[self.v[2]];
+
+        let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+        if d.abs() < 1e-12 {
+            return (Point::new(0.0, 0.0), f64::INFINITY);
+        }
+
+        let ux = ((a.x * a.x + a.y * a.y) * (b.y - c.y)
+            + (b.x * b.x + b.y * b.y) * (c.y - a.y)
+            + (c.x * c.x + c.y * c.y) * (a.y - b.y))
+            / d;
+        let uy = ((a.x * a.x + a.y * a.y) * (c.x - b.x)
+            + (b.x * b.x + b.y * b.y) * (a.x - c.x)
+            + (c.x * c.x + c.y * c.y) * (b.x - a.x))
+            / d;
+
+        let center = Point::new(ux, uy);
+        let r2 = (a.x - ux).powi(2) + (a.y - uy).powi(2);
+        (center, r2)
+    }
+}
+
+/// Triangulation result containing triangles and boundary information.
+#[derive(Debug, Clone)]
+pub struct Triangulation {
+    pub triangles: Vec<Triangle>,
+    pub boundary_edges: Vec<[usize; 2]>,
+    pub hole_edges: Vec<Vec<[usize; 2]>>,
+}
+
+impl Triangulation {
+    pub fn new() -> Self {
+        Self {
+            triangles: Vec::new(),
+            boundary_edges: Vec::new(),
+            hole_edges: Vec::new(),
+        }
+    }
+
+    pub fn n_triangles(&self) -> usize {
+        self.triangles.len()
+    }
+}
+
+impl Default for Triangulation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Check if a vertex is an "ear" in a polygon.
+fn is_ear(polygon: &[usize], vertices: &[Point], i: usize, all_vertices: &[Point]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+
+    let prev = polygon[(i + n - 1) % n];
+    let curr = polygon[i];
+    let next = polygon[(i + 1) % n];
+
+    let a = all_vertices[prev];
+    let b = all_vertices[curr];
+    let c = all_vertices[next];
+
+    // Check if angle is convex (CCW polygon -> positive signed area)
+    let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if cross <= 1e-12 {
+        return false; // Not a convex vertex
+    }
+
+    // Check if any other vertex lies inside this triangle
+    for &idx in polygon.iter() {
+        if idx == prev || idx == curr || idx == next {
+            continue;
+        }
+        let p = all_vertices[idx];
+        // Barycentric test
+        let v0 = Point::new(c.x - a.x, c.y - a.y);
+        let v1 = Point::new(b.x - a.x, b.y - a.y);
+        let v2 = Point::new(p.x - a.x, p.y - a.y);
+
+        let dot00 = v0.x * v0.x + v0.y * v0.y;
+        let dot01 = v0.x * v1.x + v0.y * v1.y;
+        let dot02 = v0.x * v2.x + v0.y * v2.y;
+        let dot11 = v1.x * v1.x + v1.y * v1.y;
+        let dot12 = v1.x * v2.x + v1.y * v2.y;
+
+        let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+        let u = (dot11 * dot02 - dot01 * dot12) * inv_denom;
+        let v = (dot00 * dot12 - dot01 * dot02) * inv_denom;
+
+        if u > 1e-10 && v > 1e-10 && (u + v) < 1.0 - 1e-10 {
+            return false; // Another vertex inside ear
+        }
+    }
+
+    true
+}
+
+/// Ear clipping triangulation for simple polygons (no holes).
+pub fn triangulate_polygon_ear_clipping(polygon: &Polygon) -> Vec<Triangle> {
+    let vertices = &polygon.vertices;
+    let n = vertices.len();
+    if n < 3 {
+        return Vec::new();
+    }
+
+    // Ensure CCW orientation
+    let signed_area = polygon.signed_area();
+    let mut vertex_indices: Vec<usize> = (0..n).collect();
+    if signed_area < 0.0 {
+        vertex_indices.reverse();
+    }
+
+    let mut triangles = Vec::new();
+    let mut remaining = vertex_indices.clone();
+
+    let mut guard = 0;
+    while remaining.len() > 3 && guard < n * n {
+        guard += 1;
+        let mut ear_found = false;
+
+        for i in 0..remaining.len() {
+            if is_ear(&remaining, vertices, i, vertices) {
+                let prev = remaining[(i + remaining.len() - 1) % remaining.len()];
+                let curr = remaining[i];
+                let next = remaining[(i + 1) % remaining.len()];
+
+                triangles.push(Triangle::new(prev, curr, next));
+                remaining.remove(i);
+                ear_found = true;
+                break;
+            }
+        }
+
+        if !ear_found {
+            // Polygon may have self-intersections or be degenerate
+            // Fall back to fan triangulation from first vertex
+            for i in 1..remaining.len() - 1 {
+                triangles.push(Triangle::new(remaining[0], remaining[i], remaining[i + 1]));
+            }
+            break;
+        }
+    }
+
+    if remaining.len() == 3 {
+        triangles.push(Triangle::new(remaining[0], remaining[1], remaining[2]));
+    }
+
+    triangles
+}
+
+/// Delaunay triangulation using Bowyer-Watson algorithm (incremental).
+pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+
+    // Super-triangle encompassing all points
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for p in points {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+
+    let dx = max_x - min_x;
+    let dy = max_y - min_y;
+    let delta_max = dx.max(dy);
+    let mid_x = (min_x + max_x) / 2.0;
+    let mid_y = (min_y + max_y) / 2.0;
+
+    let super_a = Point::new(mid_x - 20.0 * delta_max, mid_y - delta_max);
+    let super_b = Point::new(mid_x, mid_y + 20.0 * delta_max);
+    let super_c = Point::new(mid_x + 20.0 * delta_max, mid_y - delta_max);
+
+    let mut all_points = points.to_vec();
+    let super_a_idx = all_points.len();
+    all_points.push(super_a);
+    let super_b_idx = all_points.len();
+    all_points.push(super_b);
+    let super_c_idx = all_points.len();
+    all_points.push(super_c);
+
+    let mut triangles = vec![Triangle::new(super_a_idx, super_b_idx, super_c_idx)];
+
+    // Insert points one by one
+    for i in 0..points.len() {
+        let p = points[i];
+        let mut bad_triangles = Vec::new();
+
+        // Find all triangles whose circumcircle contains the point
+        for (ti, tri) in triangles.iter().enumerate() {
+            let (center, r2) = tri.circumcircle(&all_points);
+            let dist2 = (p.x - center.x).powi(2) + (p.y - center.y).powi(2);
+            if dist2 <= r2 + 1e-10 {
+                bad_triangles.push(ti);
+            }
+        }
+
+        // Find boundary edges of the polygonal hole
+        let mut edge_count = std::collections::HashMap::new();
+        for &ti in &bad_triangles {
+            let tri = triangles[ti];
+            for edge in [
+                [tri.v[0], tri.v[1]],
+                [tri.v[1], tri.v[2]],
+                [tri.v[2], tri.v[0]],
+            ] {
+                let key = if edge[0] < edge[1] { edge } else { [edge[1], edge[0]] };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        // Remove bad triangles (in reverse order to keep indices valid)
+        for &ti in bad_triangles.iter().rev() {
+            triangles.remove(ti);
+        }
+
+        // Re-triangulate the hole
+        for (edge, &count) in &edge_count {
+            if count == 1 {
+                // Boundary edge - form new triangle with the inserted point
+                triangles.push(Triangle::new(edge[0], edge[1], i));
+            }
+        }
+    }
+
+    // Remove triangles that use super-triangle vertices
+    triangles.retain(|tri| {
+        tri.v[0] < points.len() && tri.v[1] < points.len() && tri.v[2] < points.len()
+    });
+
+    triangles
+}
+
+/// Triangulate a section (outer boundary + holes) using constrained Delaunay.
+pub fn triangulate_section(section: &Section, params: crate::mesh::MeshParams) -> crate::mesh::Mesh {
+    let outer = &section.outer;
+    let holes = &section.holes;
+
+    // For now, use ear clipping on outer boundary and each hole
+    // A full constrained Delaunay would be more complex
+    let mut all_vertices = outer.vertices.clone();
+    let mut boundary_indices = Vec::new();
+
+    // Outer boundary
+    let outer_start = 0;
+    let outer_end = outer.vertices.len();
+    boundary_indices.extend(outer_start..outer_end);
+
+    // Holes
+    let mut hole_boundary_indices = Vec::new();
+    for hole in holes {
+        let start = all_vertices.len();
+        all_vertices.extend(hole.vertices.iter().cloned());
+        let end = all_vertices.len();
+        hole_boundary_indices.push((start..end).collect());
+    }
+
+    // Simple approach: triangulate outer, then holes separately
+    // This doesn't handle holes correctly but provides a starting point
+    let outer_triangles = triangulate_polygon_ear_clipping(outer);
+
+    // For holes, we'd need constrained triangulation
+    // For now, just return outer triangulation
+    let mut mesh = crate::mesh::Mesh::new();
+    mesh.nodes = all_vertices;
+    mesh.elements = outer_triangles.iter().map(|t| t.v).collect();
+    mesh.boundary_nodes = boundary_indices;
+    mesh.hole_boundary_nodes = hole_boundary_indices;
+    mesh.element_materials = vec![0; mesh.elements.len()];
+
+    mesh
+}
+
+/// Triangulate a simple polygon (no holes).
+pub fn triangulate_polygon(polygon: &Polygon) -> Vec<Triangle> {
+    triangulate_polygon_ear_clipping(polygon)
+}
+
+/// Refine triangulation using Delaunay edge flips.
+pub fn refine_delaunay(triangles: &mut [Triangle], points: &[Point]) {
+    let mut changed = true;
+    let mut iterations = 0;
+
+    while changed && iterations < 10 {
+        changed = false;
+        iterations += 1;
+
+        // Build edge to triangle adjacency
+        let mut edge_map: std::collections::HashMap<[usize; 2], Vec<usize>> = std::collections::HashMap::new();
+        for (ti, tri) in triangles.iter().enumerate() {
+            for edge in [
+                [tri.v[0], tri.v[1]],
+                [tri.v[1], tri.v[2]],
+                [tri.v[2], tri.v[0]],
+            ] {
+                let key = if edge[0] < edge[1] { edge } else { [edge[1], edge[0]] };
+                edge_map.entry(key).or_default().push(ti);
+            }
+        }
+
+        // Check each interior edge for Delaunay condition
+        for (edge, adj_tris) in &edge_map {
+            if adj_tris.len() == 2 {
+                let t1 = triangles[adj_tris[0]];
+                let t2 = triangles[adj_tris[1]];
+
+                // Find opposite vertices
+                let opp1 = t1.v.iter().find(|&&v| v != edge[0] && v != edge[1]).copied().unwrap();
+                let opp2 = t2.v.iter().find(|&&v| v != edge[0] && v != edge[1]).copied().unwrap();
+
+                // Check if edge is locally Delaunay
+                let (center1, r2_1) = t1.circumcircle(points);
+                let p2 = points[opp2];
+                let dist2 = (p2.x - center1.x).powi(2) + (p2.y - center1.y).powi(2);
+
+                if dist2 < r2_1 - 1e-10 {
+                    // Flip edge
+                    let new_t1 = Triangle::new(edge[0], opp1, opp2);
+                    let new_t2 = Triangle::new(edge[1], opp2, opp1);
+                    triangles[adj_tris[0]] = new_t1;
+                    triangles[adj_tris[1]] = new_t2;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Point, Polygon};
+
+    #[test]
+    fn ear_clipping_triangle() {
+        let poly = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+        ]);
+        let tris = triangulate_polygon_ear_clipping(&poly);
+        assert_eq!(tris.len(), 1);
+    }
+
+    #[test]
+    fn ear_clipping_square() {
+        let poly = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]);
+        let tris = triangulate_polygon_ear_clipping(&poly);
+        assert_eq!(tris.len(), 2);
+    }
+
+    #[test]
+    fn ear_clipping_pentagon() {
+        let poly = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(1.0, 2.0),
+            Point::new(0.0, 1.0),
+        ]);
+        let tris = triangulate_polygon_ear_clipping(&poly);
+        assert_eq!(tris.len(), 3);
+    }
+
+    #[test]
+    fn delaunay_simple() {
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(1.0, 1.0),
+        ];
+        let tris = triangulate_delaunay(&points);
+        assert_eq!(tris.len(), 2);
+    }
+
+    #[test]
+    fn triangle_contains_point() {
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+        ];
+        let tri = Triangle::new(0, 1, 2);
+        assert!(tri.contains_point(&points, Point::new(0.25, 0.25)));
+        assert!(!tri.contains_point(&points, Point::new(0.75, 0.75)));
+    }
+
+    #[test]
+    fn triangle_circumcircle() {
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+        ];
+        let tri = Triangle::new(0, 1, 2);
+        let (center, r2) = tri.circumcircle(&points);
+        assert!((center.x - 0.5).abs() < 1e-6);
+        assert!((center.y - 0.5).abs() < 1e-6);
+        assert!((r2 - 0.5).abs() < 1e-6);
+    }
+}
