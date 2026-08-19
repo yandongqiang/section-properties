@@ -175,3 +175,52 @@ fn gyration_properties() {
     // rp² = rx² + ry²
     assert!((gyration.polar.powi(2) - gyration.rx.powi(2) - gyration.ry.powi(2)).abs() < 1e-10);
 }
+
+#[test]
+fn asymmetric_section_has_rotated_principal_axes() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+
+    // Remove the upper-right 7 x 7 square,
+    // leaving an L-shaped section.
+    let hole = Polygon::new(vec![
+        Point::new(3.0, 3.0),
+        Point::new(3.0, 10.0),
+        Point::new(10.0, 10.0),
+        Point::new(10.0, 3.0),
+    ]);
+
+    let section = Section::new(outer, vec![hole]);
+    let props = SectionProperties::from_section(&section);
+
+    // The section is asymmetric, so the product of inertia
+    // should not vanish.
+    assert!(props.ixy.abs() > 1e-10);
+
+    let principal = props.principal_properties();
+
+    // Principal moments must be ordered.
+    assert!(principal.i1 >= principal.i2);
+
+    // Principal-axis transformation must preserve the
+    // first invariant.
+    assert!((principal.i1 + principal.i2 - props.ix - props.iy).abs() < 1e-10);
+
+    // And preserve the determinant.
+    assert!(
+        (principal.i1 * principal.i2 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
+    );
+
+    // Since Ixy != 0, this section should not have its
+    // principal axes coincident with the original x/y axes.
+    assert!(
+        principal.angle.abs() > 1e-10
+            && (principal.angle.abs() - std::f64::consts::PI / 2.0).abs() > 1e-10,
+        "principal angle = {}",
+        principal.angle
+    );
+}
