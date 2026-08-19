@@ -120,3 +120,58 @@ fn principal_moments_and_gyration() {
     assert!((ry - ry_exp).abs() < 1e-10);
     assert!((rho - rho_exp).abs() < 1e-10);
 }
+#[test]
+fn principal_properties_invariants() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(8.0, 6.0),
+        Point::new(2.0, 5.0),
+    ]);
+
+    let section = Section::new(outer, Vec::new());
+    let props = SectionProperties::from_section(&section);
+
+    let principal = props.principal_properties();
+
+    // Invariant 1:
+    // I1 + I2 = Ix + Iy
+    assert!((principal.i1 + principal.i2 - props.ix - props.iy).abs() < 1e-10);
+
+    // Invariant 2:
+    // I1 * I2 = Ix * Iy - Ixy²
+    assert!(
+        (principal.i1 * principal.i2 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
+    );
+
+    // Principal moments are ordered.
+    assert!(principal.i1 >= principal.i2);
+
+    // Principal moments must be non-negative for a valid area.
+    assert!(principal.i1 >= 0.0);
+    assert!(principal.i2 >= 0.0);
+}
+#[test]
+fn gyration_properties() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 5.0),
+        Point::new(0.0, 5.0),
+    ]);
+
+    let section = Section::new(outer, Vec::new());
+    let props = SectionProperties::from_section(&section);
+
+    let gyration = props.gyration_properties();
+
+    assert!((gyration.rx - (props.ix / props.area).sqrt()).abs() < 1e-10);
+
+    assert!((gyration.ry - (props.iy / props.area).sqrt()).abs() < 1e-10);
+
+    assert!((gyration.polar - ((props.ix + props.iy) / props.area).sqrt()).abs() < 1e-10);
+
+    // Polar radius identity:
+    // rp² = rx² + ry²
+    assert!((gyration.polar.powi(2) - gyration.rx.powi(2) - gyration.ry.powi(2)).abs() < 1e-10);
+}

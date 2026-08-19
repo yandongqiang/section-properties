@@ -1,12 +1,5 @@
 use crate::geometry::Point;
 use crate::section::Section;
-
-#[derive(Debug, Clone, Copy)]
-pub struct GyrationProperties {
-    pub rx: f64,
-    pub ry: f64,
-    pub polar: f64,
-}
 #[derive(Debug, Clone, Copy)]
 pub struct PrincipalProperties {
     /// Major principal moment of inertia.
@@ -18,6 +11,19 @@ pub struct PrincipalProperties {
     /// Principal axis angle in radians, measured CCW from the x-axis.
     pub angle: f64,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct GyrationProperties {
+    /// Radius of gyration about the centroidal x-axis.
+    pub rx: f64,
+
+    /// Radius of gyration about the centroidal y-axis.
+    pub ry: f64,
+
+    /// Polar radius of gyration.
+    pub polar: f64,
+}
+
 /// Mechanical properties of a section (area, centroid, moments of inertia, etc.).
 #[derive(Debug, Clone, Copy)]
 pub struct SectionProperties {
