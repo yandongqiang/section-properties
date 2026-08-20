@@ -130,6 +130,75 @@ impl Polygon {
 
         self.product_of_inertia_xy() - area * centroid.x * centroid.y
     }
+
+    /// Check if a point is inside the polygon (using winding number algorithm).
+    pub fn contains_point(&self, point: Point) -> bool {
+        let mut inside = false;
+        let n = self.vertices.len();
+
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+
+            // Check if point is on the edge
+            if point_on_segment(point, p1, p2) {
+                return true;
+            }
+
+            // Ray casting algorithm
+            if ((p1.y > point.y) != (p2.y > point.y))
+                && (point.x < (p2.x - p1.x) * (point.y - p1.y) / (p2.y - p1.y) + p1.x)
+            {
+                inside = !inside;
+            }
+        }
+
+        inside
+    }
+
+    /// Calculate the perimeter of the polygon.
+    pub fn perimeter(&self) -> f64 {
+        let mut sum = 0.0;
+        let n = self.vertices.len();
+
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
+            sum += (dx * dx + dy * dy).sqrt();
+        }
+
+        sum
+    }
+
+    /// Maximum fiber distance from centroid in Y direction (for section modulus).
+    pub fn max_fiber_distance_y(&self) -> f64 {
+        let centroid = self.centroid();
+        self.vertices
+            .iter()
+            .map(|v| (v.y - centroid.y).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// Maximum fiber distance from centroid in X direction (for section modulus).
+    pub fn max_fiber_distance_x(&self) -> f64 {
+        let centroid = self.centroid();
+        self.vertices
+            .iter()
+            .map(|v| (v.x - centroid.x).abs())
+            .fold(0.0, f64::max)
+    }
+}
+
+/// Helper function to check if a point is on a line segment.
+fn point_on_segment(p: Point, a: Point, b: Point) -> bool {
+    let cross = (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+    if cross.abs() > 1e-10 {
+        return false;
+    }
+    let dot = (p.x - a.x) * (p.x - b.x) + (p.y - a.y) * (p.y - b.y);
+    dot <= 1e-10
 }
 
 #[cfg(test)]

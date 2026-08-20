@@ -3,10 +3,6 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-pub mod warping;
-
-pub use warping::{ShearCenter, TorsionAnalysis, WarpingProperties};
-
 use crate::geometry::{Point, Polygon};
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -93,35 +89,6 @@ impl ThinWalledCheck for Section {
         let bounds = self.bounds();
         let bbox_area = (bounds.1 - bounds.0) * (bounds.3 - bounds.2);
         props.area / bbox_area < 0.1 // Less than 10% solid
-    }
-}
-
-trait SectionBounds {
-    fn bounds(&self) -> (f64, f64, f64, f64); // min_x, max_x, min_y, max_y
-}
-
-impl SectionBounds for Section {
-    fn bounds(&self) -> (f64, f64, f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_x, max_x, min_y, max_y)
     }
 }
 

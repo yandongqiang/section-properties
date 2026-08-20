@@ -3,12 +3,14 @@
 //! Provides common hot-rolled and cold-formed steel sections, concrete sections,
 //! and primitive shapes. All dimensions in meters (SI base units).
 
+pub mod cold_formed;
 pub mod composite;
 pub mod concrete;
 pub mod primitive;
 pub mod steel;
 pub mod timber;
 
+pub use cold_formed::*;
 pub use composite::*;
 pub use concrete::*;
 pub use primitive::*;

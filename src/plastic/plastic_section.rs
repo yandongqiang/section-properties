@@ -3,16 +3,10 @@
 //! Provides plastic neutral axis search, plastic section modulus,
 //! plastic moment capacity, and interaction diagrams.
 
-pub mod plastic_section;
-pub mod interaction;
-
-pub use plastic_section::{PlasticSection, PlasticProperties, PlasticNeutralAxis};
-pub use interaction::{InteractionDiagram, InteractionPoint, LoadCase3D};
-
 use crate::geometry::{Point, Polygon};
+use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
-use crate::material::Material;
 
 /// Plastic section analysis for a given cross-section.
 #[derive(Debug, Clone)]
@@ -93,7 +87,12 @@ impl PlasticSection {
     }
 
     /// Compute plastic section modulus about an axis given PNA.
-    fn plastic_modulus_about_axis(&self, axis: PlasticAxis, pna: &PlasticNeutralAxis, fy: f64) -> (f64, f64) {
+    fn plastic_modulus_about_axis(
+        &self,
+        axis: PlasticAxis,
+        pna: &PlasticNeutralAxis,
+        fy: f64,
+    ) -> (f64, f64) {
         // Use fiber integration
         let n = self.n_fibers;
         let (min_c, max_c) = self.section_bounds(axis);
@@ -138,10 +137,18 @@ impl PlasticSection {
         // Section modulus
         let (cx, cy) = (props.centroid.x, props.centroid.y);
         let max_dist = match axis {
-            PlasticAxis::X => self.section.outer.vertices.iter()
+            PlasticAxis::X => self
+                .section
+                .outer
+                .vertices
+                .iter()
                 .map(|v| (v.y - cy).abs())
                 .fold(0.0, f64::max),
-            PlasticAxis::Y => self.section.outer.vertices.iter()
+            PlasticAxis::Y => self
+                .section
+                .outer
+                .vertices
+                .iter()
                 .map(|v| (v.x - cx).abs())
                 .fold(0.0, f64::max),
         };
@@ -228,8 +235,10 @@ impl PlasticSection {
         FullPlasticProperties {
             x_axis: props_x,
             y_axis: props_y,
-            shape_factor_x: props_x.plastic_section_modulus / (props_x.yield_moment / self.material.yield_strength),
-            shape_factor_y: props_y.plastic_section_modulus / (props_y.yield_moment / self.material.yield_strength),
+            shape_factor_x: props_x.plastic_section_modulus
+                / (props_x.yield_moment / self.material.yield_strength),
+            shape_factor_y: props_y.plastic_section_modulus
+                / (props_y.yield_moment / self.material.yield_strength),
         }
     }
 }
@@ -253,7 +262,7 @@ impl PlasticAxis {
 /// Plastic neutral axis result.
 #[derive(Debug, Clone, Copy)]
 pub struct PlasticNeutralAxis {
-    pub position: f64,     // Coordinate along the axis
+    pub position: f64, // Coordinate along the axis
     pub axis: PlasticAxis,
     pub area_above: f64,
     pub area_below: f64,
@@ -264,9 +273,9 @@ pub struct PlasticNeutralAxis {
 pub struct PlasticProperties {
     pub axis: PlasticAxis,
     pub plastic_neutral_axis: PlasticNeutralAxis,
-    pub plastic_section_modulus: f64,  // Zpl
-    pub plastic_moment_capacity: f64,  // Mpl = Zpl * fy
-    pub yield_moment: f64,             // My = Z_el * fy
+    pub plastic_section_modulus: f64, // Zpl
+    pub plastic_moment_capacity: f64, // Mpl = Zpl * fy
+    pub yield_moment: f64,            // My = Z_el * fy
 }
 
 /// Full plastic properties for both axes.
@@ -274,7 +283,7 @@ pub struct PlasticProperties {
 pub struct FullPlasticProperties {
     pub x_axis: PlasticProperties,
     pub y_axis: PlasticProperties,
-    pub shape_factor_x: f64,  // Mpl/My
+    pub shape_factor_x: f64, // Mpl/My
     pub shape_factor_y: f64,
 }
 
@@ -327,7 +336,11 @@ pub mod exact {
     }
 
     /// Clip section at plastic neutral axis.
-    fn clip_section_at_pna(section: &Section, axis: PlasticAxis, pna_pos: f64) -> (Option<Polygon>, Option<Polygon>) {
+    fn clip_section_at_pna(
+        section: &Section,
+        axis: PlasticAxis,
+        pna_pos: f64,
+    ) -> (Option<Polygon>, Option<Polygon>) {
         // This would implement polygon clipping (Sutherland-Hodgman)
         // For now, return None to indicate numerical integration should be used
         (None, None)
@@ -338,8 +351,8 @@ pub mod exact {
 mod tests {
     use super::*;
     use crate::geometry::{Point, Polygon};
-    use crate::section::Section;
     use crate::material::presets::STEEL_S355;
+    use crate::section::Section;
 
     #[test]
     fn plastic_rectangular() {
@@ -364,7 +377,12 @@ mod tests {
         assert!((props_y.plastic_section_modulus - expected_zy).abs() / expected_zy < 0.05);
 
         // Shape factor for rectangle = 1.5
-        assert!((props_x.plastic_section_modulus / (props_x.yield_moment / STEEL_S355.yield_strength) - 1.5).abs() < 0.05);
+        assert!(
+            (props_x.plastic_section_modulus / (props_x.yield_moment / STEEL_S355.yield_strength)
+                - 1.5)
+                .abs()
+                < 0.05
+        );
     }
 
     #[test]
@@ -383,7 +401,8 @@ mod tests {
         assert!((props.plastic_section_modulus - expected_z).abs() / expected_z < 0.05);
 
         // Shape factor for circle = 4/pi ≈ 1.273
-        let shape = props.plastic_section_modulus / (props.yield_moment / STEEL_S355.yield_strength);
+        let shape =
+            props.plastic_section_modulus / (props.yield_moment / STEEL_S355.yield_strength);
         assert!((shape - 4.0 / std::f64::consts::PI).abs() < 0.05);
     }
 

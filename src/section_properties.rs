@@ -139,4 +139,14 @@ impl SectionProperties {
             polar: ((self.ix + self.iy) / self.area).sqrt(),
         }
     }
+
+    /// Maximum fiber distance from centroid in Y direction (for section modulus).
+    pub fn max_fiber_distance_y(&self) -> f64 {
+        (self.ix / self.area).sqrt() * 2.0
+    }
+
+    /// Maximum fiber distance from centroid in X direction (for section modulus).
+    pub fn max_fiber_distance_x(&self) -> f64 {
+        (self.iy / self.area).sqrt() * 2.0
+    }
 }

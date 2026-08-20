@@ -6,7 +6,10 @@
 pub mod fem;
 pub mod triangulation;
 
-pub use fem::{ElementType, FemModel, FemSolver, MaterialProps, StressResult};
+pub use fem::{
+    AnalysisResults, ElementType, FemModel, FemSolver, LoadCase, MaterialProps, StressResult,
+    analyze_section,
+};
 pub use triangulation::{Triangle, Triangulation, triangulate_polygon, triangulate_section};
 
 use crate::geometry::{Point, Polygon};

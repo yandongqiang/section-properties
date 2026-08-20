@@ -646,4 +646,3 @@ mod tests {
         assert!(check.utilization > 0.0);
     }
 }
-

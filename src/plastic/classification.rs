@@ -7,8 +7,6 @@
 // Class 3: Elastic moment capacity (first yield)
 // Class 4: Local buckling governs (effective section)
 
-pub mod classification;
-
 pub use classification::{
     ClassLimit, SectionClass, SectionClassification, StressDistribution, classify_section,
 };
@@ -827,35 +825,6 @@ impl SectionSymmetryCheck for Section {
     }
 }
 
-trait SectionBoundsCheck {
-    fn bounds(&self) -> (f64, f64, f64, f64);
-}
-
-impl SectionBoundsCheck for Section {
-    fn bounds(&self) -> (f64, f64, f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_x, max_x, min_y, max_y)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,4 +949,3 @@ mod tests {
         assert_eq!(compression, StressDistribution::UniformCompression);
     }
 }
-

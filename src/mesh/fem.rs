@@ -43,6 +43,7 @@ impl MaterialProps {
     pub fn from_material(material: &Material, plane_stress: bool) -> Self {
         Self {
             youngs_modulus: material.youngs_modulus,
+            shear_modulus: material.shear_modulus,
             poissons_ratio: material.poissons_ratio,
             density: material.density,
             plane_stress,

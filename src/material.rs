@@ -1,9 +1,6 @@
-use crate::geometry::Point;
-use std::fmt;
-
-/// Isotropic linear-elastic material definition.
-///
-/// All values in SI base units (Pa, kg/m³, /K).
+//! Isotropic linear-elastic material definition.
+//!
+//! All values in SI base units (Pa, kg/m³, /K).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Young's modulus [Pa]
@@ -117,7 +114,7 @@ impl fmt::Display for Material {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} (E={:.0f} GPa, ν={:.2}, ρ={:.0f} kg/m³)",
+            "{} (E={:.0} GPa, ν={:.2}, ρ={:.0} kg/m³)",
             self.name,
             self.youngs_modulus / 1e9,
             self.poissons_ratio,
