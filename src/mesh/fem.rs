@@ -7,7 +7,6 @@ use crate::geometry::Point;
 use crate::material::Material;
 use crate::mesh::{Mesh, MeshParams};
 use crate::section::Section;
-use crate::section_library::CompositeSection;
 use std::collections::HashMap;
 
 /// 2D element types.
@@ -43,7 +42,6 @@ impl MaterialProps {
     pub fn from_material(material: &Material, plane_stress: bool) -> Self {
         Self {
             youngs_modulus: material.youngs_modulus,
-            shear_modulus: material.shear_modulus,
             poissons_ratio: material.poissons_ratio,
             density: material.density,
             plane_stress,
@@ -283,7 +281,11 @@ impl FemSolver {
 
         // Assemble element stiffness matrices
         for (elem_idx, element) in model.mesh.elements.iter().enumerate() {
-            let mat_idx = model.mesh.element_materials[elem_idx];
+            let mat_idx = if elem_idx < model.mesh.element_materials.len() {
+                model.mesh.element_materials[elem_idx]
+            } else {
+                0
+            };
             let props = &model.materials[mat_idx];
 
             let ke = element_stiffness_tri3(&model.mesh, element, props);
@@ -315,7 +317,7 @@ impl FemSolver {
         // Element body forces (consistent load vector)
         for (elem_idx, load) in &model.element_loads {
             let element = model.mesh.elements[*elem_idx];
-            let fe = element_body_force_tri3(&model.mesh, element, load);
+            let fe = element_body_force_tri3(&model.mesh, &element, load);
 
             let mut dof_indices = [0; 6];
             for (i, &node) in element.iter().enumerate() {
@@ -331,7 +333,7 @@ impl FemSolver {
         // Apply Dirichlet BCs to force vector
         for (node, dof, value) in &model.dirichlet_bcs {
             if let Some(&idx) = dof_map.get(&(*node, *dof)) {
-                f_global[idx] = value;
+                f_global[idx] = *value;
             }
         }
 
@@ -390,7 +392,7 @@ impl FemSolver {
         }
 
         // Compute B matrix (strain-displacement)
-        let b = strain_displacement_matrix_tri3(&model.mesh, element);
+        let b = strain_displacement_matrix_tri3(&model.mesh, &element);
 
         // Strain = B * u
         let mut strain = [0.0; 3];
@@ -514,7 +516,20 @@ impl SprsMatrix {
 
     /// Set value (replaces existing).
     pub fn set(&mut self, row: usize, col: usize, value: f64) {
-        self.add(row, col, value); // Simplified - just add
+        self.finalize();
+        for i in self.row_ptr[row]..self.row_ptr[row + 1] {
+            if self.col_idx[i] == col {
+                self.values[i] = value;
+                return;
+            }
+        }
+        // Entry doesn't exist — need to insert into CSR
+        let pos = self.row_ptr[row + 1];
+        self.col_idx.insert(pos, col);
+        self.values.insert(pos, value);
+        for r in (row + 1)..=self.n {
+            self.row_ptr[r] += 1;
+        }
     }
 
     /// Get value.
@@ -539,7 +554,7 @@ impl SprsMatrix {
         self.triplets.sort_by_key(|&(r, c, _)| (r, c));
 
         // Combine duplicates
-        let mut combined = Vec::new();
+        let mut combined: Vec<(usize, usize, f64)> = Vec::new();
         for (r, c, v) in self.triplets.drain(..) {
             if let Some(last) = combined.last_mut() {
                 if last.0 == r && last.1 == c {
@@ -697,7 +712,7 @@ pub fn strain_displacement_matrix_tri3(mesh: &Mesh, element: &[usize; 3]) -> [[f
     let p3 = mesh.nodes[element[2]];
 
     let area2 = (p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y);
-    let area = 0.5 * area2.abs();
+    let _area = 0.5 * area2.abs();
 
     // Shape function derivatives (constant for linear triangle)
     let b1 = (p2.y - p3.y) / area2;

@@ -1,0 +1,1014 @@
+//! Finite element analysis core — Tri6 (six-noded quadratic triangular) element.
+//!
+//! Mirrors Python `sectionproperties.analysis.fea`:
+//! shape functions, Gaussian quadrature, stress extrapolation, and element
+//! integration methods for section property computation.
+
+use crate::geometry::Point;
+use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Gaussian quadrature for Tri6
+// ---------------------------------------------------------------------------
+
+/// Gaussian weights and locations for `n`-point integration of a Tri6 element.
+///
+/// Returns `n` tuples of `(weight, eta, xi, zeta)` where `zeta = 1 - eta - xi`.
+/// Supports n = 1, 3, 4, 6.
+pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
+    match n {
+        1 => vec![(1.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)],
+        3 => vec![
+            (1.0 / 3.0, 2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0),
+            (1.0 / 3.0, 1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0),
+            (1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0),
+        ],
+        4 => vec![
+            (-27.0 / 48.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
+            (25.0 / 48.0, 0.6, 0.2, 0.2),
+            (25.0 / 48.0, 0.2, 0.6, 0.2),
+            (25.0 / 48.0, 0.2, 0.2, 0.6),
+        ],
+        6 => {
+            let g1 = 1.0 / 18.0 * (8.0 - (10f64).sqrt() + (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
+            let g2 = 1.0 / 18.0 * (8.0 - (10f64).sqrt() - (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
+            let w1 = (620.0 + (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
+            let w2 = (620.0 - (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
+            vec![
+                (w2, 1.0 - 2.0 * g2, g2, g2),
+                (w2, g2, 1.0 - 2.0 * g2, g2),
+                (w2, g2, g2, 1.0 - 2.0 * g2),
+                (w1, g1, g1, 1.0 - 2.0 * g1),
+                (w1, 1.0 - 2.0 * g1, g1, g1),
+                (w1, g1, 1.0 - 2.0 * g1, g1),
+            ]
+        }
+        _ => panic!("gauss_points: n must be 1, 3, 4 or 6, got {n}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shape functions for Tri6
+// ---------------------------------------------------------------------------
+
+/// Result of evaluating shape functions at a Gauss point.
+pub struct ShapeFunctionResult {
+    /// Shape function values N(i), i=0..6
+    pub n: [f64; 6],
+    /// Shape function derivatives B(i,j): [2][6]
+    /// B[0] = dN/dx, B[1] = dN/dy
+    pub b: [[f64; 6]; 2],
+    /// Jacobian determinant
+    pub j: f64,
+    /// Global x-coordinate at Gauss point
+    pub x: f64,
+    /// Global y-coordinate at Gauss point
+    pub y: f64,
+}
+
+/// Evaluate Tri6 shape functions, derivatives, Jacobian, and global coords.
+///
+/// `coords` is a 2×6 array: coords[0] = x-coords, coords[1] = y-coords.
+/// Node ordering: [v0, v1, v2, mid01, mid12, mid20].
+pub fn shape_function(coords: &[[f64; 6]; 2], gp: (f64, f64, f64)) -> ShapeFunctionResult {
+    let (eta, xi, zeta) = gp;
+
+    // Shape function values
+    let n = [
+        eta * (2.0 * eta - 1.0),
+        xi * (2.0 * xi - 1.0),
+        zeta * (2.0 * zeta - 1.0),
+        4.0 * eta * xi,
+        4.0 * xi * zeta,
+        4.0 * eta * zeta,
+    ];
+
+    // Derivatives wrt isoparametric coords [dN/deta; dN/dxi; dN/dzeta]
+    let b_iso = [
+        [4.0 * eta - 1.0, 0.0, 0.0, 4.0 * xi, 0.0, 4.0 * zeta],
+        [0.0, 4.0 * xi - 1.0, 0.0, 4.0 * eta, 4.0 * zeta, 0.0],
+        [0.0, 0.0, 4.0 * zeta - 1.0, 0.0, 4.0 * xi, 4.0 * eta],
+    ];
+
+    // Jacobian matrix (3×3):
+    // J = | 1   sum(dN/deta * x)   sum(dN/deta * y) |
+    //     | 1   sum(dN/dxi  * x)   sum(dN/dxi  * y) |
+    //     | 1   sum(dN/dzeta* x)   sum(dN/dzeta* y) |
+    let mut j_mat = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    for k in 0..3 {
+        for i in 0..6 {
+            j_mat[k][1] += b_iso[k][i] * coords[0][i];
+            j_mat[k][2] += b_iso[k][i] * coords[1][i];
+        }
+    }
+
+    // Jacobian determinant = 0.5 * det(J)
+    let det_j = j_mat[0][0] * (j_mat[1][1] * j_mat[2][2] - j_mat[1][2] * j_mat[2][1])
+        - j_mat[0][1] * (j_mat[1][0] * j_mat[2][2] - j_mat[1][2] * j_mat[2][0])
+        + j_mat[0][2] * (j_mat[1][0] * j_mat[2][1] - j_mat[1][1] * j_mat[2][0]);
+    let jacobian = 0.5 * det_j;
+
+    // B = tmp_array * J^{-1} * b_iso
+    // tmp_array = [[0,1,0],[0,0,1]]
+    // So B[0] = row 1 of J^{-1} * b_iso, B[1] = row 2 of J^{-1} * b_iso
+    let mut b = [[0.0; 6]; 2];
+    if jacobian.abs() > 1e-15 {
+        let j_inv = inv3x3(&j_mat);
+        // B[0][j] = sum_k j_inv[1][k] * b_iso[k][j]
+        // B[1][j] = sum_k j_inv[2][k] * b_iso[k][j]
+        for j in 0..6 {
+            for k in 0..3 {
+                b[0][j] += j_inv[1][k] * b_iso[k][j];
+                b[1][j] += j_inv[2][k] * b_iso[k][j];
+            }
+        }
+    }
+
+    // Global coordinates
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for i in 0..6 {
+        x += n[i] * coords[0][i];
+        y += n[i] * coords[1][i];
+    }
+
+    ShapeFunctionResult { n, b, j: jacobian, x, y }
+}
+
+/// Inverse of a 3×3 matrix.
+fn inv3x3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let inv_det = 1.0 / det;
+    [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+        ],
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Extrapolation from Gauss points to nodes
+// ---------------------------------------------------------------------------
+
+/// Extrapolation matrix H^{-1} for 6-point Gauss → 6 nodes.
+const H_INV: [[f64; 6]; 6] = [
+    [
+        1.87365927351160,
+        0.138559587411935,
+        0.138559587411935,
+        -0.638559587411936,
+        0.126340726488397,
+        -0.638559587411935,
+    ],
+    [
+        0.138559587411935,
+        1.87365927351160,
+        0.138559587411935,
+        -0.638559587411935,
+        -0.638559587411935,
+        0.126340726488397,
+    ],
+    [
+        0.138559587411935,
+        0.138559587411935,
+        1.87365927351160,
+        0.126340726488396,
+        -0.638559587411935,
+        -0.638559587411935,
+    ],
+    [
+        0.0749010751157440,
+        0.0749010751157440,
+        0.180053080734478,
+        1.36051633430762,
+        -0.345185782636792,
+        -0.345185782636792,
+    ],
+    [
+        0.180053080734478,
+        0.0749010751157440,
+        0.0749010751157440,
+        -0.345185782636792,
+        1.36051633430762,
+        -0.345185782636792,
+    ],
+    [
+        0.0749010751157440,
+        0.180053080734478,
+        0.0749010751157440,
+        -0.345185782636792,
+        -0.345185782636792,
+        1.36051633430762,
+    ],
+];
+
+/// Extrapolate results at six Gauss points to the six nodes of a Tri6 element.
+pub fn extrapolate_to_nodes(w: &[f64; 6]) -> [f64; 6] {
+    let mut result = [0.0; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            result[i] += H_INV[i][j] * w[j];
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Coordinate transformations
+// ---------------------------------------------------------------------------
+
+/// Convert global coordinates to principal coordinates.
+///
+/// `phi` is the principal axis angle in **radians** (unlike Python which uses degrees).
+pub fn principal_coordinate(phi: f64, x: f64, y: f64) -> (f64, f64) {
+    let cos_phi = phi.cos();
+    let sin_phi = phi.sin();
+    (x * cos_phi + y * sin_phi, y * cos_phi - x * sin_phi)
+}
+
+/// Convert principal coordinates to global coordinates.
+///
+/// `phi` is the principal axis angle in **radians**.
+pub fn global_coordinate(phi: f64, x11: f64, y22: f64) -> (f64, f64) {
+    let cos_phi = phi.cos();
+    let sin_phi = phi.sin();
+    (x11 * cos_phi - y22 * sin_phi, x11 * sin_phi + y22 * cos_phi)
+}
+
+// ---------------------------------------------------------------------------
+// Shear parameters
+// ---------------------------------------------------------------------------
+
+/// Compute shear parameters used in shear load vector and coefficient assembly.
+pub fn shear_parameter(nx: f64, ny: f64, ixx: f64, iyy: f64, ixy: f64) -> [f64; 6] {
+    let r = nx * nx - ny * ny;
+    let q = 2.0 * nx * ny;
+    let d1 = ixx * r - ixy * q;
+    let d2 = ixy * r + ixx * q;
+    let h1 = -ixy * r + iyy * q;
+    let h2 = -iyy * r - ixy * q;
+    [r, q, d1, d2, h1, h2]
+}
+
+// ---------------------------------------------------------------------------
+// Tri6 element
+// ---------------------------------------------------------------------------
+
+/// Six-noded quadratic triangular finite element.
+///
+/// Node ordering: [v0, v1, v2, mid01, mid12, mid20] where v0,v1,v2 are
+/// vertices and midXX are mid-edge nodes.
+#[derive(Debug, Clone)]
+pub struct Tri6 {
+    /// Element id
+    pub el_id: usize,
+    /// Coordinates: coords[0] = x[0..6], coords[1] = y[0..6]
+    pub coords: [[f64; 6]; 2],
+    /// Global node ids
+    pub node_ids: [usize; 6],
+    /// Elastic modulus
+    pub elastic_modulus: f64,
+    /// Shear modulus
+    pub shear_modulus: f64,
+    /// Density
+    pub density: f64,
+}
+
+impl Tri6 {
+    /// Create a Tri6 element from 6 points and node ids.
+    pub fn from_points(el_id: usize, points: [Point; 6], node_ids: [usize; 6], em: f64, gm: f64, rho: f64) -> Self {
+        let mut coords = [[0.0; 6]; 2];
+        for i in 0..6 {
+            coords[0][i] = points[i].x;
+            coords[1][i] = points[i].y;
+        }
+        Self { el_id, coords, node_ids, elastic_modulus: em, shear_modulus: gm, density: rho }
+    }
+
+    /// Calculate geometric properties: (area, qx, qy, ixx, iyy, ixy).
+    pub fn geometric_properties(&self) -> (f64, f64, f64, f64, f64, f64) {
+        let mut area = 0.0;
+        let mut qx = 0.0;
+        let mut qy = 0.0;
+        let mut ixx = 0.0;
+        let mut iyy = 0.0;
+        let mut ixy = 0.0;
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j;
+            area += weight;
+            qx += weight * sf.y;
+            qy += weight * sf.x;
+            ixx += weight * sf.y * sf.y;
+            iyy += weight * sf.x * sf.x;
+            ixy += weight * sf.y * sf.x;
+        }
+
+        (area, qx, qy, ixx, iyy, ixy)
+    }
+
+    /// Calculate torsion stiffness matrix (6×6), load vector (6), and constraint vector (6).
+    pub fn torsion_properties(&self) -> ([[f64; 6]; 6], [f64; 6], [f64; 6]) {
+        let mut k_el = [[0.0; 6]; 6];
+        let mut f_el = [0.0; 6];
+        let mut c_el = [0.0; 6];
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j * self.elastic_modulus;
+
+            // k_el += weight * B^T * B
+            for i in 0..6 {
+                for j in 0..6 {
+                    k_el[i][j] += weight * (sf.b[0][i] * sf.b[0][j] + sf.b[1][i] * sf.b[1][j]);
+                }
+                // f_el += weight * B^T * [y, -x]
+                f_el[i] += weight * (sf.b[0][i] * sf.y - sf.b[1][i] * sf.x);
+                // c_el += weight * N
+                c_el[i] += weight * sf.n[i];
+            }
+        }
+
+        (k_el, f_el, c_el)
+    }
+
+    /// Calculate shear load vectors f_psi and f_phi.
+    pub fn shear_load_vectors(&self, ixx: f64, iyy: f64, ixy: f64, nu: f64) -> ([f64; 6], [f64; 6]) {
+        let mut f_psi = [0.0; 6];
+        let mut f_phi = [0.0; 6];
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j * self.elastic_modulus;
+            let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
+
+            for i in 0..6 {
+                // f_psi += weight * (nu/2 * B^T * [d1, d2] + 2*(1+nu) * N * (ixx*x - ixy*y))
+                f_psi[i] += weight * (
+                    nu / 2.0 * (sf.b[0][i] * d1 + sf.b[1][i] * d2)
+                    + 2.0 * (1.0 + nu) * sf.n[i] * (ixx * sf.x - ixy * sf.y)
+                );
+                // f_phi += weight * (nu/2 * B^T * [h1, h2] + 2*(1+nu) * N * (iyy*y - ixy*x))
+                f_phi[i] += weight * (
+                    nu / 2.0 * (sf.b[0][i] * h1 + sf.b[1][i] * h2)
+                    + 2.0 * (1.0 + nu) * sf.n[i] * (iyy * sf.y - ixy * sf.x)
+                );
+            }
+        }
+
+        (f_psi, f_phi)
+    }
+
+    /// Calculate shear centre and warping integrals.
+    ///
+    /// Returns (sc_xint, sc_yint, q_omega, i_omega, i_xomega, i_yomega).
+    pub fn shear_warping_integrals(
+        &self,
+        ixx: f64,
+        iyy: f64,
+        ixy: f64,
+        omega: &[f64; 6],
+    ) -> (f64, f64, f64, f64, f64, f64) {
+        let mut sc_xint = 0.0;
+        let mut sc_yint = 0.0;
+        let mut q_omega = 0.0;
+        let mut i_omega = 0.0;
+        let mut i_xomega = 0.0;
+        let mut i_yomega = 0.0;
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j * self.elastic_modulus;
+
+            let n_omega: f64 = (0..6).map(|i| sf.n[i] * omega[i]).sum();
+            let r2 = sf.x * sf.x + sf.y * sf.y;
+
+            sc_xint += weight * (iyy * sf.x + ixy * sf.y) * r2;
+            sc_yint += weight * (ixx * sf.y + ixy * sf.x) * r2;
+            q_omega += weight * n_omega;
+            i_omega += weight * n_omega * n_omega;
+            i_xomega += weight * sf.x * n_omega;
+            i_yomega += weight * sf.y * n_omega;
+        }
+
+        (sc_xint, sc_yint, q_omega, i_omega, i_xomega, i_yomega)
+    }
+
+    /// Calculate shear deformation coefficients (kappa_x, kappa_y, kappa_xy).
+    pub fn shear_coefficients(
+        &self,
+        ixx: f64,
+        iyy: f64,
+        ixy: f64,
+        psi_shear: &[f64; 6],
+        phi_shear: &[f64; 6],
+        nu: f64,
+    ) -> (f64, f64, f64) {
+        let mut kappa_x = 0.0;
+        let mut kappa_y = 0.0;
+        let mut kappa_xy = 0.0;
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j * self.elastic_modulus;
+            let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
+
+            // B * psi - nu/2 * [d1, d2]
+            let mut b_psi_d = [0.0; 2];
+            let mut b_phi_h = [0.0; 2];
+            for i in 0..6 {
+                b_psi_d[0] += sf.b[0][i] * psi_shear[i];
+                b_psi_d[1] += sf.b[1][i] * psi_shear[i];
+                b_phi_h[0] += sf.b[0][i] * phi_shear[i];
+                b_phi_h[1] += sf.b[1][i] * phi_shear[i];
+            }
+            b_psi_d[0] -= nu / 2.0 * d1;
+            b_psi_d[1] -= nu / 2.0 * d2;
+            b_phi_h[0] -= nu / 2.0 * h1;
+            b_phi_h[1] -= nu / 2.0 * h2;
+
+            kappa_x += weight * (b_psi_d[0] * b_psi_d[0] + b_psi_d[1] * b_psi_d[1]);
+            kappa_y += weight * (b_phi_h[0] * b_phi_h[0] + b_phi_h[1] * b_phi_h[1]);
+            kappa_xy += weight * (b_psi_d[0] * b_phi_h[0] + b_psi_d[1] * b_phi_h[1]);
+        }
+
+        (kappa_x, kappa_y, kappa_xy)
+    }
+
+    /// Calculate monosymmetry integrals (int_x, int_y, int_11, int_22).
+    ///
+    /// `phi` is the principal axis angle in **radians**.
+    pub fn monosymmetry_integrals(&self, phi: f64) -> (f64, f64, f64, f64) {
+        let mut int_x = 0.0;
+        let mut int_y = 0.0;
+        let mut int_11 = 0.0;
+        let mut int_22 = 0.0;
+
+        for &(w, eta, xi, zeta) in &gauss_points(4) {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            let weight = w * sf.j * self.elastic_modulus;
+            let (nx_11, ny_22) = principal_coordinate(phi, sf.x, sf.y);
+
+            int_x += weight * (sf.x * sf.x * sf.y + sf.y * sf.y * sf.y);
+            int_y += weight * (sf.y * sf.y * sf.x + sf.x * sf.x * sf.x);
+            int_11 += weight * (nx_11 * nx_11 * ny_22 + ny_22 * ny_22 * ny_22);
+            int_22 += weight * (ny_22 * ny_22 * nx_11 + nx_11 * nx_11 * nx_11);
+        }
+
+        (int_x, int_y, int_11, int_22)
+    }
+
+    /// Calculate element stresses at the 6 Gauss points, extrapolated to nodes.
+    ///
+    /// Returns 11 nodal stress arrays (each length 6):
+    /// (sig_zz_n, sig_zz_mxx, sig_zz_myy, sig_zz_m11, sig_zz_m22,
+    ///  sig_zx_mzz, sig_zy_mzz, sig_zx_vx, sig_zy_vx, sig_zx_vy, sig_zy_vy)
+    pub fn element_stress(
+        &self,
+        n: f64,
+        mxx: f64,
+        myy: f64,
+        m11: f64,
+        m22: f64,
+        mzz: f64,
+        vx: f64,
+        vy: f64,
+        ea: f64,
+        cx: f64,
+        cy: f64,
+        ixx: f64,
+        iyy: f64,
+        ixy: f64,
+        i11: f64,
+        i22: f64,
+        phi: f64,
+        j: f64,
+        nu: f64,
+        omega: &[f64; 6],
+        psi_shear: &[f64; 6],
+        phi_shear: &[f64; 6],
+        delta_s: f64,
+    ) -> [[f64; 6]; 11] {
+        let em = self.elastic_modulus;
+        let denom = ixx * iyy - ixy * ixy;
+
+        // Axial stress (constant over element)
+        let sig_zz_n = [em * n / ea; 6];
+
+        let mut sig_zz_mxx_gp = [0.0; 6];
+        let mut sig_zz_myy_gp = [0.0; 6];
+        let mut sig_zz_m11_gp = [0.0; 6];
+        let mut sig_zz_m22_gp = [0.0; 6];
+        let mut sig_zx_mzz_gp = [0.0; 6];
+        let mut sig_zy_mzz_gp = [0.0; 6];
+        let mut sig_zx_vx_gp = [0.0; 6];
+        let mut sig_zy_vx_gp = [0.0; 6];
+        let mut sig_zx_vy_gp = [0.0; 6];
+        let mut sig_zy_vy_gp = [0.0; 6];
+
+        // Centroidal coords
+        let coords_c = [
+            [
+                self.coords[0][0] - cx,
+                self.coords[0][1] - cx,
+                self.coords[0][2] - cx,
+                self.coords[0][3] - cx,
+                self.coords[0][4] - cx,
+                self.coords[0][5] - cx,
+            ],
+            [
+                self.coords[1][0] - cy,
+                self.coords[1][1] - cy,
+                self.coords[1][2] - cy,
+                self.coords[1][3] - cy,
+                self.coords[1][4] - cy,
+                self.coords[1][5] - cy,
+            ],
+        ];
+
+        let gps = gauss_points(6);
+        for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+            let sf = shape_function(&coords_c, (eta, xi, zeta));
+            let (nx_11, ny_22) = principal_coordinate(phi, sf.x, sf.y);
+            let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
+
+            // Bending stresses
+            if denom.abs() > 1e-15 {
+                sig_zz_mxx_gp[i] = em * (-ixy * mxx / denom * sf.x + iyy * mxx / denom * sf.y);
+                sig_zz_myy_gp[i] = em * (-ixx * myy / denom * sf.x + ixy * myy / denom * sf.y);
+            }
+            if i11.abs() > 1e-15 {
+                sig_zz_m11_gp[i] = em * m11 / i11 * ny_22;
+            }
+            if i22.abs() > 1e-15 {
+                sig_zz_m22_gp[i] = em * -m22 / i22 * nx_11;
+            }
+
+            // Torsional shear stress
+            if mzz.abs() > 1e-12 && j.abs() > 1e-12 {
+                let mut b_omega = [0.0; 2];
+                for k in 0..6 {
+                    b_omega[0] += sf.b[0][k] * omega[k];
+                    b_omega[1] += sf.b[1][k] * omega[k];
+                }
+                sig_zx_mzz_gp[i] = em * mzz / j * (b_omega[0] - sf.y);
+                sig_zy_mzz_gp[i] = em * mzz / j * (b_omega[1] + sf.x);
+            }
+
+            // Shear stress from Vx
+            if vx.abs() > 1e-12 && delta_s.abs() > 1e-12 {
+                let mut b_psi = [0.0; 2];
+                for k in 0..6 {
+                    b_psi[0] += sf.b[0][k] * psi_shear[k];
+                    b_psi[1] += sf.b[1][k] * psi_shear[k];
+                }
+                sig_zx_vx_gp[i] = em * vx / delta_s * (b_psi[0] - nu / 2.0 * d1);
+                sig_zy_vx_gp[i] = em * vx / delta_s * (b_psi[1] - nu / 2.0 * d2);
+            }
+
+            // Shear stress from Vy
+            if vy.abs() > 1e-12 && delta_s.abs() > 1e-12 {
+                let mut b_phi = [0.0; 2];
+                for k in 0..6 {
+                    b_phi[0] += sf.b[0][k] * phi_shear[k];
+                    b_phi[1] += sf.b[1][k] * phi_shear[k];
+                }
+                sig_zx_vy_gp[i] = em * vy / delta_s * (b_phi[0] - nu / 2.0 * h1);
+                sig_zy_vy_gp[i] = em * vy / delta_s * (b_phi[1] - nu / 2.0 * h2);
+            }
+        }
+
+        // Extrapolate from Gauss points to nodes
+        [
+            sig_zz_n,
+            extrapolate_to_nodes(&sig_zz_mxx_gp),
+            extrapolate_to_nodes(&sig_zz_myy_gp),
+            extrapolate_to_nodes(&sig_zz_m11_gp),
+            extrapolate_to_nodes(&sig_zz_m22_gp),
+            extrapolate_to_nodes(&sig_zx_mzz_gp),
+            extrapolate_to_nodes(&sig_zy_mzz_gp),
+            extrapolate_to_nodes(&sig_zx_vx_gp),
+            extrapolate_to_nodes(&sig_zy_vx_gp),
+            extrapolate_to_nodes(&sig_zx_vy_gp),
+            extrapolate_to_nodes(&sig_zy_vy_gp),
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tri6 mesh generation from Tri3 mesh
+// ---------------------------------------------------------------------------
+
+/// A Tri6 mesh: nodes and 6-noded elements.
+#[derive(Debug, Clone)]
+pub struct Tri6Mesh {
+    /// All nodes (original + mid-edge)
+    pub nodes: Vec<Point>,
+    /// Elements: each is 6 node indices [v0, v1, v2, mid01, mid12, mid20]
+    pub elements: Vec<[usize; 6]>,
+}
+
+/// Convert a Tri3 mesh to a Tri6 mesh by adding mid-edge nodes.
+///
+/// Shared edges between elements share the same mid-node.
+pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6Mesh {
+    let mut nodes: Vec<Point> = tri3_nodes.to_vec();
+    // Map from (min_node, max_node) -> mid_node_index
+    let mut edge_midpoints: HashMap<(usize, usize), usize> = HashMap::new();
+
+    let mut tri6_elements: Vec<[usize; 6]> = Vec::with_capacity(tri3_elements.len());
+
+    for &[n0, n1, n2] in tri3_elements {
+        let mid01 = get_or_create_midpoint(&mut nodes, &mut edge_midpoints, n0, n1);
+        let mid12 = get_or_create_midpoint(&mut nodes, &mut edge_midpoints, n1, n2);
+        let mid20 = get_or_create_midpoint(&mut nodes, &mut edge_midpoints, n2, n0);
+        tri6_elements.push([n0, n1, n2, mid01, mid12, mid20]);
+    }
+
+    Tri6Mesh { nodes, elements: tri6_elements }
+}
+
+fn get_or_create_midpoint(
+    nodes: &mut Vec<Point>,
+    edge_map: &mut HashMap<(usize, usize), usize>,
+    a: usize,
+    b: usize,
+) -> usize {
+    let key = if a < b { (a, b) } else { (b, a) };
+    if let Some(&mid) = edge_map.get(&key) {
+        return mid;
+    }
+    let pa = nodes[a];
+    let pb = nodes[b];
+    let mid = Point::new(0.5 * (pa.x + pb.x), 0.5 * (pa.y + pb.y));
+    let mid_idx = nodes.len();
+    nodes.push(mid);
+    edge_map.insert(key, mid_idx);
+    mid_idx
+}
+
+/// Build a list of Tri6 elements from a Tri6Mesh for a given material.
+pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Vec<Tri6> {
+    mesh.elements
+        .iter()
+        .enumerate()
+        .map(|(i, &elem)| {
+            let mut points = [Point::new(0.0, 0.0); 6];
+            for k in 0..6 {
+                points[k] = mesh.nodes[elem[k]];
+            }
+            Tri6::from_points(i, points, elem, em, gm, rho)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Sparse matrix and conjugate gradient solver
+// ---------------------------------------------------------------------------
+
+/// Sparse matrix in COO (coordinate) format.
+#[derive(Debug, Clone)]
+pub struct SparseMatrix {
+    pub n: usize,
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    vals: Vec<f64>,
+}
+
+impl SparseMatrix {
+    pub fn new(n: usize) -> Self {
+        Self { n, rows: Vec::new(), cols: Vec::new(), vals: Vec::new() }
+    }
+
+    pub fn add(&mut self, row: usize, col: usize, val: f64) {
+        if val.abs() < 1e-20 { return; }
+        self.rows.push(row);
+        self.cols.push(col);
+        self.vals.push(val);
+    }
+
+    /// Matrix-vector product y = A*x.
+    pub fn matvec(&self, x: &[f64]) -> Vec<f64> {
+        let mut y = vec![0.0; self.n];
+        for k in 0..self.rows.len() {
+            y[self.rows[k]] += self.vals[k] * x[self.cols[k]];
+        }
+        y
+    }
+}
+
+/// Conjugate gradient solver with diagonal preconditioning.
+pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f64> {
+    let n = b.len();
+
+    // Diagonal preconditioner: M = diag(A), M_inv = 1/diag(A)
+    let mut m_inv = vec![1.0; n];
+    for k in 0..a.rows.len() {
+        if a.rows[k] == a.cols[k] {
+            let d = a.vals[k];
+            if d.abs() > 1e-15 {
+                m_inv[a.rows[k]] = 1.0 / d;
+            }
+        }
+    }
+
+    let mut x = vec![0.0; n];
+    let mut r = b.to_vec();
+    let mut z: Vec<f64> = r.iter().zip(m_inv.iter()).map(|(a, b)| a * b).collect();
+    let mut p = z.clone();
+    let mut rz_old: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
+
+    if rz_old.abs() < tol * tol {
+        return x;
+    }
+
+    for _ in 0..max_iter {
+        let ap = a.matvec(&p);
+        let p_ap: f64 = p.iter().zip(ap.iter()).map(|(a, b)| a * b).sum();
+        if p_ap.abs() < 1e-20 { break; }
+        let alpha = rz_old / p_ap;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        let rs_new: f64 = r.iter().map(|v| v * v).sum();
+        if rs_new.sqrt() < tol { break; }
+        for i in 0..n {
+            z[i] = r[i] * m_inv[i];
+        }
+        let rz_new: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
+        let beta = rz_new / rz_old;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+        rz_old = rz_new;
+    }
+    x
+}
+
+/// Solve the Lagrangian system using sparse CG + Schur complement.
+///
+/// [K  c] [u]   [f]
+/// [c^T 0] [λ] = [0]
+///
+/// u = K^{-1}*(f - c*λ),  λ = (c^T*K^{-1}*c)^{-1} * c^T*K^{-1}*f
+pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Vec<f64> {
+    let n = k.n;
+
+    // Regularize K to make it positive definite: K_reg = K + ε*I
+    // This handles the zero eigenvalue (constant null space) of the Laplacian.
+    let mut k_reg = k.clone();
+    for i in 0..n {
+        k_reg.add(i, i, 1e-8);
+    }
+
+    let max_iter = (n * 10).max(5000);
+    let tol = 1e-10;
+
+    let w1 = cg_solve(&k_reg, f, max_iter, tol);
+    let w2 = cg_solve(&k_reg, c, max_iter, tol);
+
+    let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(a, b)| a * b).sum();
+    let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
+
+    if ct_w2.abs() < 1e-15 {
+        return w1;
+    }
+    let lambda = ct_w1 / ct_w2;
+
+    let mut u = vec![0.0; n];
+    for i in 0..n {
+        u[i] = w1[i] - lambda * w2[i];
+    }
+    u
+}
+
+// ---------------------------------------------------------------------------
+// Linear solver for Lagrangian system
+// ---------------------------------------------------------------------------
+
+/// Solve the Lagrangian system [K  c; c^T 0] [u; lambda] = [f; 0].
+///
+/// `k` is n×n stiffness matrix, `c` is n constraint vector, `f` is n load vector.
+/// Returns the solution vector u (length n).
+pub fn solve_lagrange(k: &[Vec<f64>], c: &[f64], f: &[f64]) -> Vec<f64> {
+    let n = k.len();
+    // Augmented system (n+1)×(n+1)
+    let mut a = vec![vec![0.0; n + 1]; n + 1];
+    for i in 0..n {
+        for j in 0..n {
+            a[i][j] = k[i][j];
+        }
+        a[i][n] = c[i];
+        a[n][i] = c[i];
+    }
+    let mut rhs = vec![0.0; n + 1];
+    for i in 0..n {
+        rhs[i] = f[i];
+    }
+
+    // Solve using Gaussian elimination with partial pivoting
+    solve_dense(&mut a, &mut rhs);
+    rhs[..n].to_vec()
+}
+
+/// Solve a dense linear system A*x = b in place (Gaussian elimination with partial pivoting).
+pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
+    let n = a.len();
+    for k in 0..n {
+        // Partial pivoting
+        let mut max_row = k;
+        let mut max_val = a[k][k].abs();
+        for i in (k + 1)..n {
+            if a[i][k].abs() > max_val {
+                max_val = a[i][k].abs();
+                max_row = i;
+            }
+        }
+        if max_row != k {
+            a.swap(k, max_row);
+            b.swap(k, max_row);
+        }
+        let pivot = a[k][k];
+        if pivot.abs() < 1e-15 {
+            continue;
+        }
+        for i in (k + 1)..n {
+            let factor = a[i][k] / pivot;
+            for j in k..n {
+                a[i][j] -= factor * a[k][j];
+            }
+            b[i] -= factor * b[k];
+        }
+    }
+    // Back substitution
+    for k in (0..n).rev() {
+        let pivot = a[k][k];
+        if pivot.abs() < 1e-15 {
+            b[k] = 0.0;
+            continue;
+        }
+        let mut sum = 0.0;
+        for j in (k + 1)..n {
+            sum += a[k][j] * b[j];
+        }
+        b[k] = (b[k] - sum) / pivot;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect_tri6() -> Tri6 {
+        // Unit triangle with mid-nodes
+        let points = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(0.5, 0.0),
+            Point::new(0.5, 0.5),
+            Point::new(0.0, 0.5),
+        ];
+        Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0)
+    }
+
+    #[test]
+    fn gauss_points_sum_to_one() {
+        for &n in &[1, 3, 4, 6] {
+            let gps = gauss_points(n);
+            let sum: f64 = gps.iter().map(|&(w, _, _, _)| w).sum();
+            assert!((sum - 1.0).abs() < 1e-12, "gauss({n}): weights sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn tri6_area_unit_triangle() {
+        let tri = rect_tri6();
+        let (area, _, _, _, _, _) = tri.geometric_properties();
+        assert!((area - 0.5).abs() < 1e-10, "area = {area}");
+    }
+
+    #[test]
+    fn tri6_centroid_unit_triangle() {
+        let tri = rect_tri6();
+        let (area, qx, qy, _, _, _) = tri.geometric_properties();
+        let cx = qy / area;
+        let cy = qx / area;
+        assert!((cx - 1.0 / 3.0).abs() < 1e-10, "cx = {cx}");
+        assert!((cy - 1.0 / 3.0).abs() < 1e-10, "cy = {cy}");
+    }
+
+    #[test]
+    fn tri6_moments_unit_triangle() {
+        let tri = rect_tri6();
+        let (_, _, _, ixx, iyy, ixy) = tri.geometric_properties();
+        // For unit triangle about origin:
+        // Ixx = ∫y² dA = 1/12, Iyy = ∫x² dA = 1/12, Ixy = ∫xy dA = 1/24
+        assert!((ixx - 1.0 / 12.0).abs() < 1e-10, "ixx = {ixx}");
+        assert!((iyy - 1.0 / 12.0).abs() < 1e-10, "iyy = {iyy}");
+        assert!((ixy - 1.0 / 24.0).abs() < 1e-10, "ixy = {ixy}");
+    }
+
+    #[test]
+    fn principal_coordinate_zero_phi() {
+        let (x11, y22) = principal_coordinate(0.0, 3.0, 4.0);
+        assert!((x11 - 3.0).abs() < 1e-12);
+        assert!((y22 - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn principal_coordinate_90_degrees() {
+        let (x11, y22) = principal_coordinate(std::f64::consts::FRAC_PI_2, 3.0, 0.0);
+        assert!(x11.abs() < 1e-12);
+        assert!((y22 + 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tri3_to_tri6_creates_midpoints() {
+        let nodes = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+        ];
+        let elements = vec![[0, 1, 2]];
+        let mesh = tri3_to_tri6(&nodes, &elements);
+        assert_eq!(mesh.nodes.len(), 6); // 3 original + 3 mid
+        assert_eq!(mesh.elements.len(), 1);
+        // Check mid-node of edge 0-1
+        let mid01 = mesh.nodes[mesh.elements[0][3]];
+        assert!((mid01.x - 0.5).abs() < 1e-12);
+        assert!(mid01.y.abs() < 1e-12);
+    }
+
+    #[test]
+    fn tri3_to_tri6_shares_midpoints() {
+        let nodes = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(1.0, 1.0),
+        ];
+        let elements = vec![[0, 1, 2], [1, 3, 2]];
+        let mesh = tri3_to_tri6(&nodes, &elements);
+        // 4 original + 5 unique edges (01, 12, 20, 13, 32) = 9 nodes
+        assert_eq!(mesh.nodes.len(), 9);
+        // Edge 1-2 is shared, so mid12 of elem0 == mid20 of elem1
+        assert_eq!(mesh.elements[0][4], mesh.elements[1][5]);
+    }
+
+    #[test]
+    fn solve_dense_simple() {
+        let mut a = vec![vec![2.0, 1.0], vec![1.0, 3.0]];
+        let mut b = vec![5.0, 10.0];
+        solve_dense(&mut a, &mut b);
+        // Solution: x = (5-3y)/2, (5-3y)/2 + 3y = 10 => 5/2 + 3y/2 = 10 => y = 5, x = -5
+        // Wait: 2x + y = 5, x + 3y = 10 => x = 10-3y, 2(10-3y)+y = 5 => 20-5y = 5 => y = 3, x = 1
+        assert!((b[0] - 1.0).abs() < 1e-10, "x = {}", b[0]);
+        assert!((b[1] - 3.0).abs() < 1e-10, "y = {}", b[1]);
+    }
+
+    #[test]
+    fn solve_lagrange_simple() {
+        // Simple test: K = I, c = [1, 1], f = [1, 0]
+        // Solution should satisfy u + lambda * c = f and c^T u = 0
+        let k = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let c = vec![1.0, 1.0];
+        let f = vec![1.0, 0.0];
+        let u = solve_lagrange(&k, &c, &f);
+        // u0 + lambda = 1, u1 + lambda = 0, u0 + u1 = 0
+        // => u0 = -u1, -u1 + lambda = 1, u1 + lambda = 0
+        // => lambda = -u1, -u1 - u1 = 1 => u1 = -0.5, u0 = 0.5, lambda = 0.5
+        assert!((u[0] - 0.5).abs() < 1e-10, "u0 = {}", u[0]);
+        assert!((u[1] + 0.5).abs() < 1e-10, "u1 = {}", u[1]);
+    }
+
+    #[test]
+    fn extrapolate_to_nodes_constant() {
+        // Constant values should extrapolate to the same constant
+        let w = [1.0; 6];
+        let nodes = extrapolate_to_nodes(&w);
+        for &v in &nodes {
+            assert!((v - 1.0).abs() < 1e-10, "v = {v}");
+        }
+    }
+}

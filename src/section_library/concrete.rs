@@ -39,7 +39,7 @@ pub struct CircularConcreteSection {
 
 impl CircularConcreteSection {
     pub fn new(diameter: f64) -> Self {
-        Self::with_vertices(diameter, 64)
+        Self::with_vertices(diameter, 128)
     }
 
     pub fn with_vertices(diameter: f64, n_vertices: usize) -> Self {
@@ -88,33 +88,18 @@ impl ParametricSection for TBeamConcreteSection {
         let bw2 = bw / 2.0;
         let hh = h / 2.0;
 
-        let mut vertices = Vec::new();
+        let vertices = vec![
+            Point::new(-bw2, -hh),
+            Point::new(bw2, -hh),
+            Point::new(bw2, hh - hf),
+            Point::new(bf2, hh - hf),
+            Point::new(bf2, hh),
+            Point::new(-bf2, hh),
+            Point::new(-bf2, hh - hf),
+            Point::new(-bw2, hh - hf),
+        ];
 
-        // Top flange left to right
-        vertices.push(Point::new(-bf2, hh - hf));
-        vertices.push(Point::new(bf2, hh - hf));
-        vertices.push(Point::new(bf2, hh));
-        vertices.push(Point::new(-bf2, hh));
-
-        // Web right side
-        vertices.push(Point::new(bw2, hh - hf));
-        vertices.push(Point::new(bw2, -hh));
-
-        // Bottom
-        vertices.push(Point::new(-bw2, -hh));
-        vertices.push(Point::new(-bw2, hh - hf));
-
-        let mut clean = Vec::new();
-        for v in vertices {
-            if clean.last() != Some(&v) {
-                clean.push(v);
-            }
-        }
-        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
-            clean.pop();
-        }
-
-        Section::new(Polygon::new(clean), Vec::new())
+        Section::new(Polygon::new(vertices), Vec::new())
     }
 
     fn designation(&self) -> String {
@@ -155,31 +140,16 @@ impl ParametricSection for LBeamConcreteSection {
 
         let hh = h / 2.0;
 
-        let mut vertices = Vec::new();
+        let vertices = vec![
+            Point::new(0.0, -hh),
+            Point::new(bw, -hh),
+            Point::new(bw, hh - hf),
+            Point::new(bf, hh - hf),
+            Point::new(bf, hh),
+            Point::new(0.0, hh),
+        ];
 
-        // Top flange (only one side)
-        vertices.push(Point::new(0.0, hh - hf));
-        vertices.push(Point::new(bf, hh - hf));
-        vertices.push(Point::new(bf, hh));
-        vertices.push(Point::new(0.0, hh));
-
-        // Web
-        vertices.push(Point::new(bw, hh - hf));
-        vertices.push(Point::new(bw, -hh));
-        vertices.push(Point::new(0.0, -hh));
-        vertices.push(Point::new(0.0, hh - hf));
-
-        let mut clean = Vec::new();
-        for v in vertices {
-            if clean.last() != Some(&v) {
-                clean.push(v);
-            }
-        }
-        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
-            clean.pop();
-        }
-
-        Section::new(Polygon::new(clean), Vec::new())
+        Section::new(Polygon::new(vertices), Vec::new())
     }
 
     fn designation(&self) -> String {
@@ -274,7 +244,7 @@ impl ParametricSection for BoxConcreteSection {
 }
 
 /// Concrete section with reinforcement (rebar).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ReinforcedConcreteSection {
     pub concrete_section: Box<dyn ParametricSection>,
     pub reinforcement: Vec<RebarLayer>,
@@ -324,7 +294,7 @@ impl ReinforcedConcreteSection {
             let n = layer.material.modular_ratio(&concrete_mat);
             // Create a transformed area polygon (equivalent rectangle)
             let bar_area = PI * (layer.diameter / 2.0).powi(2) * layer.count as f64;
-            let transformed_area = bar_area * n;
+            let _transformed_area = bar_area * n;
             // For now just add to material groups - actual geometry would need mesh
             material_groups.push(crate::material::MaterialGroup::new(
                 layer.material,
@@ -399,7 +369,7 @@ impl ParametricSection for HollowCoreSlab {
             let cx = start_x + i as f64 * spacing;
             let cy = 0.0; // centered vertically
             let mut core_vertices = Vec::new();
-            let nv = 32;
+            let nv = 64;
             for j in (0..nv).rev() { // CW for hole
                 let theta = 2.0 * PI * j as f64 / nv as f64;
                 core_vertices.push(Point::new(cx + d / 2.0 * theta.cos(), cy + d / 2.0 * theta.sin()));
@@ -431,11 +401,11 @@ pub struct ConcretePile {
 
 impl ConcretePile {
     pub fn solid(diameter: f64) -> Self {
-        Self::with_vertices(diameter, 0.0, 64)
+        Self::with_vertices(diameter, 0.0, 128)
     }
 
     pub fn hollow(diameter: f64, wall_thickness: f64) -> Self {
-        Self::with_vertices(diameter, wall_thickness, 64)
+        Self::with_vertices(diameter, wall_thickness, 128)
     }
 
     pub fn with_vertices(diameter: f64, wall_thickness: f64, n_vertices: usize) -> Self {
@@ -473,6 +443,7 @@ impl ParametricSection for ConcretePile {
 mod tests {
     use super::*;
     use crate::material::presets::*;
+    use std::f64::consts::PI;
 
     #[test]
     fn rectangular_concrete() {

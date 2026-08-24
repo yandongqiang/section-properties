@@ -1,11 +1,10 @@
 //! Primitive section shapes (rectangles, circles, triangles, etc.)
 
 use crate::geometry::{Point, Polygon};
-use crate::material::Material;
 use crate::section::Section;
 use crate::section_library::{
-    ParametricSection, circle_polygon, hollow_circle_polygon, rectangle_polygon,
-    rounded_rectangle_polygon,
+    ParametricSection, circle_polygon, draw_radius, hollow_circle_polygon, rectangle_polygon,
+    rotate_point, rounded_rectangle_polygon,
 };
 use std::f64::consts::PI;
 
@@ -237,7 +236,7 @@ pub struct RoundedRectangleSection {
 
 impl RoundedRectangleSection {
     pub fn new(width: f64, height: f64, radius: f64) -> Self {
-        Self::with_vertices(width, height, radius, 8)
+        Self::with_vertices(width, height, radius, 16)
     }
 
     pub fn with_vertices(width: f64, height: f64, radius: f64, n_per_corner: usize) -> Self {
@@ -372,39 +371,25 @@ impl CruciformSection {
 
 impl ParametricSection for CruciformSection {
     fn build(&self) -> Section {
-        let hw = self.width / 2.0;
-        let hh = self.height / 2.0;
         let fw = self.flange_width / 2.0;
         let ft = self.flange_thickness;
         let wt = self.web_thickness / 2.0;
+        let hh = self.height / 2.0;
 
-        // Build as a polygon with cutouts (or as union of rectangles)
-        // We'll build the cross shape directly
-        let mut vertices = Vec::new();
-
-        // Top flange - left to right
-        vertices.push(Point::new(-fw, hh - ft));
-        vertices.push(Point::new(fw, hh - ft));
-        vertices.push(Point::new(fw, hh));
-        vertices.push(Point::new(-fw, hh));
-
-        // Right flange - top to bottom
-        vertices.push(Point::new(hw - wt, hh));
-        vertices.push(Point::new(hw, hh));
-        vertices.push(Point::new(hw, -hh));
-        vertices.push(Point::new(hw - wt, -hh));
-
-        // Bottom flange - right to left
-        vertices.push(Point::new(fw, -hh + ft));
-        vertices.push(Point::new(-fw, -hh + ft));
-        vertices.push(Point::new(-fw, -hh));
-        vertices.push(Point::new(fw, -hh));
-
-        // Left flange - bottom to top
-        vertices.push(Point::new(-hw + wt, -hh));
-        vertices.push(Point::new(-hw, -hh));
-        vertices.push(Point::new(-hw, hh));
-        vertices.push(Point::new(-hw + wt, hh));
+        let vertices = vec![
+            Point::new(-wt, hh),
+            Point::new(wt, hh),
+            Point::new(wt, ft),
+            Point::new(fw, ft),
+            Point::new(fw, -ft),
+            Point::new(wt, -ft),
+            Point::new(wt, -hh),
+            Point::new(-wt, -hh),
+            Point::new(-wt, -ft),
+            Point::new(-fw, -ft),
+            Point::new(-fw, ft),
+            Point::new(-wt, ft),
+        ];
 
         Section::new(Polygon::new(vertices), Vec::new())
     }
@@ -418,10 +403,198 @@ impl ParametricSection for CruciformSection {
     }
 }
 
+/// Elliptical hollow section (EHS) centered at origin.
+///
+/// Mirrors Python `elliptical_hollow_section(d_x, d_y, t, n)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EllipticalHollowSection {
+    pub d_x: f64,
+    pub d_y: f64,
+    pub t: f64,
+    pub n: usize,
+}
+
+impl EllipticalHollowSection {
+    pub fn new(d_x: f64, d_y: f64, t: f64, n: usize) -> Self {
+        assert!(d_x > 0.0 && d_y > 0.0 && t > 0.0, "Dimensions must be positive");
+        assert!(2.0 * t < d_x && 2.0 * t < d_y, "Thickness too large");
+        assert!(n >= 3, "Need at least 3 points");
+        Self { d_x, d_y, t, n }
+    }
+}
+
+impl ParametricSection for EllipticalHollowSection {
+    fn build(&self) -> Section {
+        let n = self.n;
+        let mut outer_pts = Vec::with_capacity(n);
+        let mut inner_pts = Vec::with_capacity(n);
+        for i in 0..n {
+            let theta = 2.0 * PI * i as f64 / n as f64;
+            outer_pts.push(Point::new(
+                0.5 * self.d_x * theta.cos(),
+                0.5 * self.d_y * theta.sin(),
+            ));
+            inner_pts.push(Point::new(
+                (0.5 * self.d_x - self.t) * theta.cos(),
+                (0.5 * self.d_y - self.t) * theta.sin(),
+            ));
+        }
+        // Inner polygon CW for hole
+        inner_pts.reverse();
+        Section::new(Polygon::new(outer_pts), vec![Polygon::new(inner_pts)])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "EHS {:.0}x{:.0}x{:.0}",
+            self.d_x * 1000.0,
+            self.d_y * 1000.0,
+            self.t * 1000.0
+        )
+    }
+}
+
+/// Regular hollow polygon section centered at origin.
+///
+/// Mirrors Python `polygon_hollow_section(d, t, n_sides, r_in, n_r, rot)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PolygonHollowSection {
+    pub d: f64,
+    pub t: f64,
+    pub n_sides: usize,
+    pub r_in: f64,
+    pub n_r: usize,
+    pub rot: f64,
+}
+
+impl PolygonHollowSection {
+    pub fn new(d: f64, t: f64, n_sides: usize) -> Self {
+        Self::with_radius(d, t, n_sides, 0.0, 1, 0.0)
+    }
+
+    pub fn with_radius(
+        d: f64,
+        t: f64,
+        n_sides: usize,
+        r_in: f64,
+        n_r: usize,
+        rot_deg: f64,
+    ) -> Self {
+        assert!(d > 0.0 && t > 0.0, "Dimensions must be positive");
+        assert!(n_sides >= 3, "Need at least 3 sides");
+        Self {
+            d,
+            t,
+            n_sides,
+            r_in,
+            n_r,
+            rot: rot_deg * PI / 180.0,
+        }
+    }
+}
+
+impl ParametricSection for PolygonHollowSection {
+    fn build(&self) -> Section {
+        let alpha = 2.0 * PI / self.n_sides as f64;
+        let a_out = self.d / 2.0 * (alpha / 2.0).cos();
+        let a_in = a_out - self.t;
+        let side_length_out = self.d * (alpha / 2.0).sin();
+        let side_length_in = a_in / a_out * side_length_out;
+
+        let r_in = self.r_in.min(a_in);
+        let (r_out, n_r) = if r_in == 0.0 {
+            (0.0, 1)
+        } else {
+            (r_in + self.t, self.n_r)
+        };
+
+        let c_out = r_out * (side_length_out / 2.0) / a_out;
+        let c_in = r_in * (side_length_in / 2.0) / a_in;
+        let sl_straight_out = side_length_out - 2.0 * c_out;
+        let sl_straight_in = side_length_in - 2.0 * c_in;
+
+        // Build one corner radius, then rotate for each side
+        let mut outer_base = Vec::new();
+        let mut inner_base = Vec::new();
+        for i in 0..n_r {
+            let theta = 0.5 * PI + i as f64 / (n_r.max(1) - 1).max(1) as f64 * alpha;
+            outer_base.push(Point::new(
+                sl_straight_out / 2.0 - r_out * theta.cos(),
+                -a_out + r_out - r_out * theta.sin(),
+            ));
+            inner_base.push(Point::new(
+                sl_straight_in / 2.0 - r_in * theta.cos(),
+                -a_in + r_in - r_in * theta.sin(),
+            ));
+        }
+
+        let mut outer_pts = Vec::new();
+        let mut inner_pts = Vec::new();
+        for i in 0..self.n_sides {
+            let angle = alpha * i as f64 + self.rot;
+            for pt in &outer_base {
+                outer_pts.push(rotate_point(*pt, angle));
+            }
+            for pt in &inner_base {
+                inner_pts.push(rotate_point(*pt, angle));
+            }
+        }
+        inner_pts.reverse();
+        Section::new(Polygon::new(outer_pts), vec![Polygon::new(inner_pts)])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "PHS {}-sides {:.0}x{:.0}",
+            self.n_sides,
+            self.d * 1000.0,
+            self.t * 1000.0
+        )
+    }
+}
+
+/// Right-angled isosceles triangle with concave radius on hypotenuse.
+///
+/// Mirrors Python `triangular_radius_section(b, n_r)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TriangularRadiusSection {
+    pub b: f64,
+    pub n_r: usize,
+}
+
+impl TriangularRadiusSection {
+    pub fn new(b: f64, n_r: usize) -> Self {
+        assert!(b > 0.0, "Base must be positive");
+        assert!(n_r >= 2, "Need at least 2 points for radius");
+        Self { b, n_r }
+    }
+}
+
+impl ParametricSection for TriangularRadiusSection {
+    fn build(&self) -> Section {
+        let mut points = vec![Point::new(0.0, 0.0)];
+        let arc = draw_radius(
+            Point::new(self.b, self.b),
+            self.b,
+            3.0 * PI / 2.0,
+            self.n_r,
+            false,
+            PI / 2.0,
+        );
+        points.extend(arc);
+        Section::new(Polygon::new(points), vec![])
+    }
+
+    fn designation(&self) -> String {
+        format!("TriR {:.0}", self.b * 1000.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::material::presets::STEEL_S355;
+    use std::f64::consts::PI;
 
     #[test]
     fn rectangular_section() {
@@ -481,8 +654,65 @@ mod tests {
     fn cruciform_section() {
         let cross = CruciformSection::new(0.2, 0.2, 0.15, 0.02, 0.01);
         let sec = cross.build();
-        // Area = 2*flange*flange_t + web*web_t - overlap
-        let expected = 2.0 * 0.15 * 0.02 + 0.2 * 0.01 - 0.01 * 0.02;
+        // Area = horizontal bar + vertical bar - overlap
+        let expected = 0.15 * 2.0 * 0.02 + 0.2 * 0.01 - 0.01 * 2.0 * 0.02;
         assert!((sec.area() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn elliptical_hollow_section() {
+        let ehs = EllipticalHollowSection::new(0.05, 0.025, 0.002, 64);
+        let sec = ehs.build();
+        // Outer ellipse area = pi * a * b; inner = pi * (a-t) * (b-t)
+        let a = 0.025_f64;
+        let b = 0.0125_f64;
+        let t = 0.002_f64;
+        let expected = PI * (a * b - (a - t) * (b - t));
+        assert!(
+            (sec.area() - expected).abs() / expected < 0.02,
+            "EHS area: got {}, expected {}",
+            sec.area(),
+            expected
+        );
+    }
+
+    #[test]
+    fn polygon_hollow_octagon() {
+        let phs = PolygonHollowSection::new(0.2, 0.006, 8);
+        let sec = phs.build();
+        assert!(sec.area() > 0.0, "Polygon hollow area should be positive");
+        // Octagon outer area = 2*(1+sqrt(2))*s^2 where s = side length
+        // For circumscribed circle radius R=0.1, s = 2*R*sin(pi/8)
+        let r = 0.1_f64;
+        let s = 2.0 * r * (PI / 8.0).sin();
+        let outer_area = 2.0 * (1.0 + 2.0_f64.sqrt()) * s * s;
+        // Inner is scaled by (a_in/a_out)^2
+        let a_out = r * (PI / 8.0).cos();
+        let a_in = a_out - 0.006;
+        let inner_area = outer_area * (a_in / a_out).powi(2);
+        let expected = outer_area - inner_area;
+        assert!(
+            (sec.area() - expected).abs() / expected < 0.05,
+            "PHS area: got {}, expected {}",
+            sec.area(),
+            expected
+        );
+    }
+
+    #[test]
+    fn polygon_hollow_with_radius() {
+        let phs = PolygonHollowSection::with_radius(0.2, 0.006, 8, 0.02, 12, 0.0);
+        let sec = phs.build();
+        assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn triangular_radius_section() {
+        let tri = TriangularRadiusSection::new(0.06, 16);
+        let sec = tri.build();
+        // Area should be less than the full triangle (b*b/2) due to concave hypotenuse
+        let full_triangle = 0.5 * 0.06 * 0.06;
+        assert!(sec.area() < full_triangle);
+        assert!(sec.area() > 0.0);
     }
 }

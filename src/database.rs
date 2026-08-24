@@ -5,8 +5,9 @@
 
 use crate::material::Material;
 use crate::section::Section;
-use crate::section_library::{CompositeSection, ParametricSection};
+use crate::section_library::ParametricSection;
 use crate::section_properties::SectionProperties;
+use std::rc::Rc;
 
 /// High-level section entry with metadata.
 #[derive(Debug, Clone)]
@@ -14,7 +15,7 @@ pub struct SectionEntry {
     pub name: String,
     pub designation: String,
     pub section: Section,
-    pub parametric: Option<Box<dyn ParametricSection>>,
+    pub parametric: Option<Rc<dyn ParametricSection>>,
     pub material: Option<Material>,
     pub properties: Option<SectionProperties>,
     pub tags: Vec<String>,
@@ -32,7 +33,7 @@ impl SectionEntry {
             name: designation.clone(),
             designation,
             section,
-            parametric: Some(Box::new(parametric)),
+            parametric: Some(Rc::new(parametric)),
             material,
             properties: Some(properties),
             tags: Vec::new(),
@@ -172,19 +173,22 @@ impl SectionDatabase {
             .unwrap_or_default()
     }
 
-    /// Search with filter.
+    /// Search with filter. All specified criteria must match (AND logic).
     pub fn search(&self, filter: &SearchFilter) -> Vec<SearchResult> {
         let mut results = Vec::new();
 
         for entry in &self.entries {
             let mut score = 0.0;
             let mut matched = Vec::new();
+            let mut ok = true;
 
             // Name/designation matching
             if let Some(ref pattern) = filter.name_contains {
                 if entry.name.to_lowercase().contains(&pattern.to_lowercase()) {
                     score += 10.0;
                     matched.push("name".to_string());
+                } else {
+                    ok = false;
                 }
             }
             if let Some(ref pattern) = filter.designation_contains {
@@ -195,6 +199,8 @@ impl SectionDatabase {
                 {
                     score += 10.0;
                     matched.push("designation".to_string());
+                } else {
+                    ok = false;
                 }
             }
 
@@ -204,36 +210,48 @@ impl SectionDatabase {
                     if props.area >= min {
                         score += 1.0;
                         matched.push("area_min".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
                 if let Some(max) = filter.max_area {
                     if props.area <= max {
                         score += 1.0;
                         matched.push("area_max".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
                 if let Some(min) = filter.min_ix {
                     if props.ix >= min {
                         score += 1.0;
                         matched.push("ix_min".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
                 if let Some(max) = filter.max_ix {
                     if props.ix <= max {
                         score += 1.0;
                         matched.push("ix_max".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
                 if let Some(min) = filter.min_iy {
                     if props.iy >= min {
                         score += 1.0;
                         matched.push("iy_min".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
                 if let Some(max) = filter.max_iy {
                     if props.iy <= max {
                         score += 1.0;
                         matched.push("iy_max".to_string());
+                    } else {
+                        ok = false;
                     }
                 }
             }
@@ -243,6 +261,8 @@ impl SectionDatabase {
                 if entry.tags.iter().any(|t| t.contains(typ)) {
                     score += 5.0;
                     matched.push("type".to_string());
+                } else {
+                    ok = false;
                 }
             }
 
@@ -256,6 +276,8 @@ impl SectionDatabase {
                 {
                     score += 5.0;
                     matched.push("material".to_string());
+                } else {
+                    ok = false;
                 }
             }
 
@@ -264,36 +286,46 @@ impl SectionDatabase {
                 if entry.tags.contains(tag) {
                     score += 2.0;
                     matched.push(format!("tag:{}", tag));
+                } else {
+                    ok = false;
                 }
             }
 
             // Bounds check
             let bounds = entry.section.bounds();
-            let depth = bounds.1 - bounds.0;
-            let width = bounds.3 - bounds.2;
+            let depth = bounds.3 - bounds.2;
+            let width = bounds.1 - bounds.0;
 
             if let Some(min) = filter.min_depth {
                 if depth >= min {
                     score += 1.0;
+                } else {
+                    ok = false;
                 }
             }
             if let Some(max) = filter.max_depth {
                 if depth <= max {
                     score += 1.0;
+                } else {
+                    ok = false;
                 }
             }
             if let Some(min) = filter.min_width {
                 if width >= min {
                     score += 1.0;
+                } else {
+                    ok = false;
                 }
             }
             if let Some(max) = filter.max_width {
                 if width <= max {
                     score += 1.0;
+                } else {
+                    ok = false;
                 }
             }
 
-            if score > 0.0 {
+            if ok && score > 0.0 {
                 results.push(SearchResult {
                     entry: entry.clone(),
                     score,
@@ -495,6 +527,7 @@ mod tests {
     use crate::geometry::{Point, Polygon};
     use crate::material::presets::STEEL_S355;
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]
@@ -567,7 +600,7 @@ mod tests {
 
         // Check variety
         let tags: std::collections::HashSet<_> =
-            db.all().flat_map(|e| e.tags.iter().cloned()).collect();
+            db.all().into_iter().flat_map(|e| e.tags.iter().cloned()).collect();
 
         assert!(tags.contains("i-section"));
         assert!(tags.contains("channel"));

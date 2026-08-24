@@ -5,8 +5,7 @@
 use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
-use crate::section_library::{ParametricSection, rectangle_polygon, rounded_rectangle_polygon};
-use std::f64::consts::PI;
+use crate::section_library::ParametricSection;
 
 /// Cold-formed lipped channel (C-section with lips).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,42 +97,36 @@ impl ParametricSection for LippedChannel {
         let b = self.flange_width;
         let c = self.lip_length;
         let t = self.thickness;
-        let r = self.inner_radius;
+        let _r = self.inner_radius;
 
+        let hh = h / 2.0;
+
+        // Lipped channel: web on left (x ∈ [0, t]), flanges extend RIGHT.
+        // Lips fold inward at flange outer ends (x = b).
+        // CCW outline starting from web outer bottom-left.
         let mut vertices = Vec::new();
 
-        // Build from bottom-left, going CCW
-        // Start at web bottom
-        vertices.push(Point::new(t, -h / 2.0));
-        vertices.push(Point::new(0.0, -h / 2.0));
-
-        // Bottom flange with lip
-        vertices.push(Point::new(0.0, -h / 2.0 + t));
+        vertices.push(Point::new(0.0, -hh));
+        vertices.push(Point::new(0.0, hh));
+        vertices.push(Point::new(b, hh));
         if c > 0.0 {
-            vertices.push(Point::new(-c, -h / 2.0 + t));
-            vertices.push(Point::new(-c, -h / 2.0));
-            vertices.push(Point::new(-c + t, -h / 2.0));
-            vertices.push(Point::new(-c + t, -h / 2.0 + t));
+            vertices.push(Point::new(b, hh - t - c));
+            vertices.push(Point::new(b - t, hh - t - c));
+            vertices.push(Point::new(b - t, hh - t));
+        } else {
+            vertices.push(Point::new(b, hh - t));
         }
-        vertices.push(Point::new(b - t, -h / 2.0 + t));
-
-        // Web bottom to top
-        vertices.push(Point::new(b - t, h / 2.0 - t));
-
-        // Top flange with lip
+        vertices.push(Point::new(t, hh - t));
+        vertices.push(Point::new(t, -hh + t));
         if c > 0.0 {
-            vertices.push(Point::new(b - t, h / 2.0 - t));
-            vertices.push(Point::new(-c + t, h / 2.0 - t));
-            vertices.push(Point::new(-c + t, h / 2.0));
-            vertices.push(Point::new(-c, h / 2.0));
-            vertices.push(Point::new(-c, h / 2.0 - t));
+            vertices.push(Point::new(b - t, -hh + t));
+            vertices.push(Point::new(b - t, -hh + t + c));
+            vertices.push(Point::new(b, -hh + t + c));
+        } else {
+            vertices.push(Point::new(b, -hh + t));
         }
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0));
-        vertices.push(Point::new(t, h / 2.0));
-        vertices.push(Point::new(t, -h / 2.0));
+        vertices.push(Point::new(b, -hh));
 
-        // Clean duplicates
         let mut clean = Vec::new();
         for v in vertices {
             if clean.last() != Some(&v) {
@@ -227,42 +220,39 @@ impl ParametricSection for ZSection {
         let b = self.flange_width;
         let c = self.lip_length;
         let t = self.thickness;
-        let r = self.inner_radius;
+        let _r = self.inner_radius;
 
+        let hh = h / 2.0;
+
+        // Z-section: top flange extends LEFT from web, bottom flange extends RIGHT.
+        // Web: x ∈ [0, t], y ∈ [-hh, hh]
+        // Top flange: x ∈ [-b, 0], y ∈ [hh-t, hh]
+        // Bottom flange: x ∈ [t, t+b], y ∈ [-hh, -hh+t]
+        // CCW outline starting from top-left outer corner.
         let mut vertices = Vec::new();
 
-        // Z-section: flanges on opposite sides of web
-        // Start at bottom of left flange
-        vertices.push(Point::new(0.0, -h / 2.0));
-        vertices.push(Point::new(b, -h / 2.0));
-        vertices.push(Point::new(b, -h / 2.0 + t));
+        vertices.push(Point::new(-b, hh));
+        vertices.push(Point::new(0.0, hh));
+        vertices.push(Point::new(t, hh));
+        vertices.push(Point::new(t, -hh + t));
         if c > 0.0 {
-            vertices.push(Point::new(c, -h / 2.0 + t));
-            vertices.push(Point::new(c, -h / 2.0));
-            vertices.push(Point::new(c - t, -h / 2.0));
-            vertices.push(Point::new(c - t, -h / 2.0 + t));
+            vertices.push(Point::new(b, -hh + t));
+            vertices.push(Point::new(b, -hh + t + c));
+            vertices.push(Point::new(t + b, -hh + t + c));
+        } else {
+            vertices.push(Point::new(t + b, -hh + t));
         }
-        vertices.push(Point::new(t, -h / 2.0 + t));
-
-        // Web
-        vertices.push(Point::new(t, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0));
-        vertices.push(Point::new(t, h / 2.0));
-        vertices.push(Point::new(t, h / 2.0 - t));
-
-        // Top flange (opposite side)
+        vertices.push(Point::new(t + b, -hh));
+        vertices.push(Point::new(t, -hh));
+        vertices.push(Point::new(0.0, -hh));
+        vertices.push(Point::new(0.0, hh - t));
         if c > 0.0 {
-            vertices.push(Point::new(b - t, h / 2.0 - t));
-            vertices.push(Point::new(b - c + t, h / 2.0 - t));
-            vertices.push(Point::new(b - c + t, h / 2.0));
-            vertices.push(Point::new(b - c, h / 2.0));
-            vertices.push(Point::new(b - c, h / 2.0 - t));
+            vertices.push(Point::new(-b + t, hh - t));
+            vertices.push(Point::new(-b + t, hh - t - c));
+            vertices.push(Point::new(-b, hh - t - c));
+        } else {
+            vertices.push(Point::new(-b, hh - t));
         }
-        vertices.push(Point::new(b, h / 2.0 - t));
-        vertices.push(Point::new(b, h / 2.0));
-        vertices.push(Point::new(0.0, h / 2.0));
-        vertices.push(Point::new(0.0, -h / 2.0));
 
         let mut clean = Vec::new();
         for v in vertices {
@@ -328,52 +318,38 @@ impl ParametricSection for HatSection {
         let c = self.lip_length;
         let t = self.thickness;
 
-        let mut vertices = Vec::new();
+        let hh = h / 2.0;
 
-        // Bottom flange (wider)
-        vertices.push(Point::new(-bb / 2.0, -h / 2.0));
-        vertices.push(Point::new(bb / 2.0, -h / 2.0));
-        vertices.push(Point::new(bb / 2.0, -h / 2.0 + t));
-        if c > 0.0 {
-            vertices.push(Point::new(c, -h / 2.0 + t));
-            vertices.push(Point::new(c, -h / 2.0));
-            vertices.push(Point::new(c - t, -h / 2.0));
-            vertices.push(Point::new(c - t, -h / 2.0 + t));
-        }
-        vertices.push(Point::new(t, -h / 2.0 + t));
+        // Hat section: bottom flange (wide) + webs + top flange (narrow).
+        // Lips fold upward at bottom flange outer edges.
+        // The shape has a rectangular hole between the webs.
+        let mut outer = Vec::new();
 
-        // Web
-        vertices.push(Point::new(t, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0));
-        vertices.push(Point::new(t, h / 2.0));
-
-        // Top flange (narrower)
-        vertices.push(Point::new(t, h / 2.0 - t));
+        outer.push(Point::new(-bb / 2.0, -hh));
+        outer.push(Point::new(bb / 2.0, -hh));
         if c > 0.0 {
-            vertices.push(Point::new(bt / 2.0 - c + t, h / 2.0 - t));
-            vertices.push(Point::new(bt / 2.0 - c + t, h / 2.0));
-            vertices.push(Point::new(bt / 2.0 - c, h / 2.0));
-            vertices.push(Point::new(bt / 2.0 - c, h / 2.0 - t));
+            outer.push(Point::new(bb / 2.0, -hh + t + c));
+            outer.push(Point::new(bb / 2.0 - t, -hh + t + c));
+            outer.push(Point::new(bb / 2.0 - t, -hh + t));
+        } else {
+            outer.push(Point::new(bb / 2.0, -hh + t));
         }
-        vertices.push(Point::new(bt / 2.0 - t, h / 2.0 - t));
-        vertices.push(Point::new(bt / 2.0 - t, h / 2.0));
-        vertices.push(Point::new(-bt / 2.0 + t, h / 2.0));
-        vertices.push(Point::new(-bt / 2.0 + t, h / 2.0 - t));
+        outer.push(Point::new(bt / 2.0, -hh + t));
+        outer.push(Point::new(bt / 2.0, hh - t));
+        outer.push(Point::new(bt / 2.0, hh));
+        outer.push(Point::new(-bt / 2.0, hh));
+        outer.push(Point::new(-bt / 2.0, hh - t));
+        outer.push(Point::new(-bt / 2.0, -hh + t));
         if c > 0.0 {
-            vertices.push(Point::new(-bt / 2.0 + c - t, h / 2.0 - t));
-            vertices.push(Point::new(-bt / 2.0 + c - t, h / 2.0));
-            vertices.push(Point::new(-bt / 2.0 + c, h / 2.0));
-            vertices.push(Point::new(-bt / 2.0 + c, h / 2.0 - t));
+            outer.push(Point::new(-bb / 2.0 + t, -hh + t));
+            outer.push(Point::new(-bb / 2.0 + t, -hh + t + c));
+            outer.push(Point::new(-bb / 2.0, -hh + t + c));
+        } else {
+            outer.push(Point::new(-bb / 2.0, -hh + t));
         }
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, -h / 2.0 + t));
-        vertices.push(Point::new(-t, -h / 2.0 + t));
-        vertices.push(Point::new(-t, -h / 2.0));
-        vertices.push(Point::new(-bb / 2.0, -h / 2.0));
 
         let mut clean = Vec::new();
-        for v in vertices {
+        for v in outer {
             if clean.last() != Some(&v) {
                 clean.push(v);
             }
@@ -382,7 +358,18 @@ impl ParametricSection for HatSection {
             clean.pop();
         }
 
-        Section::new(Polygon::new(clean), Vec::new())
+        let mut holes = Vec::new();
+        if bt > 2.0 * t {
+            let hole = vec![
+                Point::new(bt / 2.0 - t, -hh + t),
+                Point::new(bt / 2.0 - t, hh - t),
+                Point::new(-bt / 2.0 + t, hh - t),
+                Point::new(-bt / 2.0 + t, -hh + t),
+            ];
+            holes.push(Polygon::new(hole));
+        }
+
+        Section::new(Polygon::new(clean), holes)
     }
 
     fn designation(&self) -> String {
@@ -434,7 +421,6 @@ impl SigmaSection {
 
 impl ParametricSection for SigmaSection {
     fn build(&self) -> Section {
-        // Similar to hat but with lips on both flanges
         let h = self.depth;
         let bt = self.top_flange;
         let bb = self.bottom_flange;
@@ -442,52 +428,38 @@ impl ParametricSection for SigmaSection {
         let cb = self.bottom_lip;
         let t = self.thickness;
 
-        let mut vertices = Vec::new();
+        let hh = h / 2.0;
 
-        // Bottom flange
-        vertices.push(Point::new(-bb / 2.0, -h / 2.0));
-        vertices.push(Point::new(bb / 2.0, -h / 2.0));
-        vertices.push(Point::new(bb / 2.0, -h / 2.0 + t));
+        // Sigma section: like hat but with lips on both flanges.
+        // Bottom lips fold upward at bottom flange outer edges.
+        // Top lips fold downward at top flange outer edges (between webs).
+        let mut outer = Vec::new();
+
+        outer.push(Point::new(-bb / 2.0, -hh));
+        outer.push(Point::new(bb / 2.0, -hh));
         if cb > 0.0 {
-            vertices.push(Point::new(cb, -h / 2.0 + t));
-            vertices.push(Point::new(cb, -h / 2.0));
-            vertices.push(Point::new(cb - t, -h / 2.0));
-            vertices.push(Point::new(cb - t, -h / 2.0 + t));
+            outer.push(Point::new(bb / 2.0, -hh + t + cb));
+            outer.push(Point::new(bb / 2.0 - t, -hh + t + cb));
+            outer.push(Point::new(bb / 2.0 - t, -hh + t));
+        } else {
+            outer.push(Point::new(bb / 2.0, -hh + t));
         }
-        vertices.push(Point::new(t, -h / 2.0 + t));
-
-        // Web
-        vertices.push(Point::new(t, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, h / 2.0));
-        vertices.push(Point::new(t, h / 2.0));
-
-        // Top flange
-        vertices.push(Point::new(t, h / 2.0 - t));
-        if ct > 0.0 {
-            vertices.push(Point::new(bt / 2.0 - ct + t, h / 2.0 - t));
-            vertices.push(Point::new(bt / 2.0 - ct + t, h / 2.0));
-            vertices.push(Point::new(bt / 2.0 - ct, h / 2.0));
-            vertices.push(Point::new(bt / 2.0 - ct, h / 2.0 - t));
+        outer.push(Point::new(bt / 2.0, -hh + t));
+        outer.push(Point::new(bt / 2.0, hh - t));
+        outer.push(Point::new(bt / 2.0, hh));
+        outer.push(Point::new(-bt / 2.0, hh));
+        outer.push(Point::new(-bt / 2.0, hh - t));
+        outer.push(Point::new(-bt / 2.0, -hh + t));
+        if cb > 0.0 {
+            outer.push(Point::new(-bb / 2.0 + t, -hh + t));
+            outer.push(Point::new(-bb / 2.0 + t, -hh + t + cb));
+            outer.push(Point::new(-bb / 2.0, -hh + t + cb));
+        } else {
+            outer.push(Point::new(-bb / 2.0, -hh + t));
         }
-        vertices.push(Point::new(bt / 2.0 - t, h / 2.0 - t));
-        vertices.push(Point::new(bt / 2.0 - t, h / 2.0));
-        vertices.push(Point::new(-bt / 2.0 + t, h / 2.0));
-        vertices.push(Point::new(-bt / 2.0 + t, h / 2.0 - t));
-        if ct > 0.0 {
-            vertices.push(Point::new(-bt / 2.0 + ct - t, h / 2.0 - t));
-            vertices.push(Point::new(-bt / 2.0 + ct - t, h / 2.0));
-            vertices.push(Point::new(-bt / 2.0 + ct, h / 2.0));
-            vertices.push(Point::new(-bt / 2.0 + ct, h / 2.0 - t));
-        }
-        vertices.push(Point::new(0.0, h / 2.0 - t));
-        vertices.push(Point::new(0.0, -h / 2.0 + t));
-        vertices.push(Point::new(-t, -h / 2.0 + t));
-        vertices.push(Point::new(-t, -h / 2.0));
-        vertices.push(Point::new(-bb / 2.0, -h / 2.0));
 
         let mut clean = Vec::new();
-        for v in vertices {
+        for v in outer {
             if clean.last() != Some(&v) {
                 clean.push(v);
             }
@@ -496,7 +468,18 @@ impl ParametricSection for SigmaSection {
             clean.pop();
         }
 
-        Section::new(Polygon::new(clean), Vec::new())
+        let mut holes = Vec::new();
+        if bt > 2.0 * t {
+            let hole = vec![
+                Point::new(bt / 2.0 - t, -hh + t),
+                Point::new(bt / 2.0 - t, hh - t),
+                Point::new(-bt / 2.0 + t, hh - t),
+                Point::new(-bt / 2.0 + t, -hh + t),
+            ];
+            holes.push(Polygon::new(hole));
+        }
+
+        Section::new(Polygon::new(clean), holes)
     }
 
     fn designation(&self) -> String {
@@ -551,7 +534,7 @@ impl DeckProfile {
         top_width: f64,
         bottom_width: f64,
         thickness: f64,
-        reentrant_depth: f64,
+        _reentrant_depth: f64,
     ) -> Self {
         // Reentrant profile has stiffener in web
         Self::new(depth, pitch, top_width, bottom_width, thickness, 45.0)
@@ -565,49 +548,70 @@ impl ParametricSection for DeckProfile {
         let wt = self.top_width;
         let wb = self.bottom_width;
         let t = self.thickness;
-        let angle = self.web_angle.to_radians();
 
-        // Web horizontal projection
-        let web_proj = h / angle.tan();
+        let hh = h / 2.0;
+        let x0 = -w / 2.0;
+        let x1 = x0 + wb;
+        let x2 = x1 + t;
+        let x3 = x2 + wt;
+        let x4 = x3 + t;
+        let x5 = x0 + w;
 
-        let mut vertices = Vec::new();
+        let outer = vec![
+            Point::new(x0, -hh),
+            Point::new(x5, -hh),
+            Point::new(x5, hh),
+            Point::new(x0, hh),
+        ];
 
-        // One wave from left to right, centered
-        let start_x = -w / 2.0;
+        let mut holes = Vec::new();
 
-        // Bottom left
-        vertices.push(Point::new(start_x, -h / 2.0));
-        vertices.push(Point::new(start_x + wb, -h / 2.0));
-        vertices.push(Point::new(start_x + wb, -h / 2.0 + t));
-        vertices.push(Point::new(start_x + wb + t, -h / 2.0 + t));
-
-        // Web up
-        vertices.push(Point::new(start_x + wb + t, h / 2.0 - t));
-
-        // Top
-        vertices.push(Point::new(start_x + wb + t - wt, h / 2.0 - t));
-        vertices.push(Point::new(start_x + wb + t - wt, h / 2.0));
-        vertices.push(Point::new(start_x + wb + t, h / 2.0));
-        vertices.push(Point::new(start_x + wb + t, h / 2.0 - t));
-
-        // Web down (next wave)
-        vertices.push(Point::new(start_x + w + t, h / 2.0 - t));
-        vertices.push(Point::new(start_x + w + t, -h / 2.0 + t));
-        vertices.push(Point::new(start_x + w, -h / 2.0 + t));
-        vertices.push(Point::new(start_x + w, -h / 2.0));
-        vertices.push(Point::new(start_x, -h / 2.0));
-
-        let mut clean = Vec::new();
-        for v in vertices {
-            if clean.last() != Some(&v) {
-                clean.push(v);
-            }
+        holes.push(Polygon::new(vec![
+            Point::new(x0, -hh + t),
+            Point::new(x1, -hh + t),
+            Point::new(x1, hh),
+            Point::new(x0, hh),
+        ]));
+        holes.push(Polygon::new(vec![
+            Point::new(x1, -hh),
+            Point::new(x2, -hh),
+            Point::new(x2, -hh + t),
+            Point::new(x1, -hh + t),
+        ]));
+        holes.push(Polygon::new(vec![
+            Point::new(x1, hh - t),
+            Point::new(x2, hh - t),
+            Point::new(x2, hh),
+            Point::new(x1, hh),
+        ]));
+        holes.push(Polygon::new(vec![
+            Point::new(x2, -hh),
+            Point::new(x3, -hh),
+            Point::new(x3, hh - t),
+            Point::new(x2, hh - t),
+        ]));
+        holes.push(Polygon::new(vec![
+            Point::new(x3, -hh),
+            Point::new(x4, -hh),
+            Point::new(x4, -hh + t),
+            Point::new(x3, -hh + t),
+        ]));
+        holes.push(Polygon::new(vec![
+            Point::new(x3, hh - t),
+            Point::new(x4, hh - t),
+            Point::new(x4, hh),
+            Point::new(x3, hh),
+        ]));
+        if x4 < x5 {
+            holes.push(Polygon::new(vec![
+                Point::new(x4, -hh),
+                Point::new(x5, -hh),
+                Point::new(x5, hh),
+                Point::new(x4, hh),
+            ]));
         }
-        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
-            clean.pop();
-        }
 
-        Section::new(Polygon::new(clean), Vec::new())
+        Section::new(Polygon::new(outer), holes)
     }
 
     fn designation(&self) -> String {
@@ -620,11 +624,13 @@ impl ParametricSection for DeckProfile {
             self.thickness * 1000.0
         )
     }
+}
 
+impl DeckProfile {
     /// Effective section properties per unit width (for slab design).
     pub fn effective_properties_per_width(
         &self,
-        material: &Material,
+        _material: &Material,
     ) -> crate::section_properties::SectionProperties {
         // For deck profiles, properties are typically given per meter width
         let sec = self.build();
@@ -638,6 +644,29 @@ impl ParametricSection for DeckProfile {
             ix: props.ix * scale,
             iy: props.iy * scale,
             ixy: props.ixy * scale,
+            max_fiber_distance_y: props.max_fiber_distance_y,
+            max_fiber_distance_x: props.max_fiber_distance_x,
+            zxx_plus: props.zxx_plus * scale,
+            zxx_minus: props.zxx_minus * scale,
+            zyy_plus: props.zyy_plus * scale,
+            zyy_minus: props.zyy_minus * scale,
+            z11_plus: props.z11_plus * scale,
+            z11_minus: props.z11_minus * scale,
+            z22_plus: props.z22_plus * scale,
+            z22_minus: props.z22_minus * scale,
+            perimeter: props.perimeter * scale,
+            qx: props.qx * scale,
+            qy: props.qy * scale,
+            ixx_g: props.ixx_g * scale,
+            iyy_g: props.iyy_g * scale,
+            ixy_g: props.ixy_g * scale,
+            i11_c: props.i11_c * scale,
+            i22_c: props.i22_c * scale,
+            phi: props.phi,
+            rx_c: props.rx_c,
+            ry_c: props.ry_c,
+            r11_c: props.r11_c,
+            r22_c: props.r22_c,
         }
     }
 }
@@ -701,6 +730,24 @@ mod tests {
     }
 
     #[test]
+    fn lipped_channel_area() {
+        let h = 0.2;
+        let b = 0.07;
+        let c = 0.015;
+        let t = 0.002;
+        let lc = LippedChannel::new(h, b, c, t, 0.003);
+        let sec = lc.build();
+        let area = sec.area();
+        let expected = t * (h + 2.0 * b + 2.0 * c - 2.0 * t);
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "LippedChannel area: got {}, expected {}",
+            area,
+            expected
+        );
+    }
+
+    #[test]
     fn lipped_channel_gb() {
         let lc = LippedChannel::from_designation("LC200X70X25X3.0").unwrap();
         assert!((lc.depth - 0.2).abs() < 1e-6);
@@ -728,6 +775,24 @@ mod tests {
     }
 
     #[test]
+    fn z_section_area_check() {
+        let h = 0.2;
+        let b = 0.07;
+        let c = 0.015;
+        let t = 0.002;
+        let z = ZSection::new(h, b, c, t, 0.003);
+        let sec = z.build();
+        let area = sec.area();
+        let expected = t * (h + 2.0 * b + 2.0 * c);
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "Cold-formed Z area: got {}, expected {}",
+            area,
+            expected
+        );
+    }
+
+    #[test]
     fn z_section_gb() {
         let z = ZSection::from_designation("Z200X75X25X3.0").unwrap();
         assert!((z.depth - 0.2).abs() < 1e-6);
@@ -741,10 +806,49 @@ mod tests {
     }
 
     #[test]
+    fn hat_section_area() {
+        let h = 0.15;
+        let bt = 0.05;
+        let bb = 0.08;
+        let c = 0.015;
+        let t = 0.002;
+        let hat = HatSection::new(h, bt, bb, c, t, 0.003);
+        let sec = hat.build();
+        let area = sec.area();
+        let expected = bb * t + 2.0 * t * (h - 2.0 * t) + bt * t + 2.0 * c * t;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "HatSection area: got {}, expected {}",
+            area,
+            expected
+        );
+    }
+
+    #[test]
     fn sigma_section() {
         let sigma = SigmaSection::new(0.2, 0.06, 0.08, 0.02, 0.02, 0.002, 0.003);
         let sec = sigma.build();
         assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn sigma_section_area() {
+        let h = 0.2;
+        let bt = 0.06;
+        let bb = 0.08;
+        let ct = 0.02;
+        let cb = 0.02;
+        let t = 0.002;
+        let sigma = SigmaSection::new(h, bt, bb, ct, cb, t, 0.003);
+        let sec = sigma.build();
+        let area = sec.area();
+        let expected = bb * t + 2.0 * t * cb + 2.0 * t * (h - 2.0 * t) + bt * t;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "SigmaSection area: got {}, expected {}",
+            area,
+            expected
+        );
     }
 
     #[test]
@@ -756,6 +860,24 @@ mod tests {
         let props = deck.effective_properties_per_width(&STEEL_S355);
         assert!(props.area > 0.0);
         assert!(props.ix > 0.0);
+    }
+
+    #[test]
+    fn deck_profile_area() {
+        let h = 0.05;
+        let wt = 0.1;
+        let wb = 0.15;
+        let t = 0.001;
+        let deck = DeckProfile::new(h, 0.3, wt, wb, t, 45.0);
+        let sec = deck.build();
+        let area = sec.area();
+        let expected = wb * t + 2.0 * t * (h - 2.0 * t) + wt * t;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "DeckProfile area: got {}, expected {}",
+            area,
+            expected
+        );
     }
 
     #[test]

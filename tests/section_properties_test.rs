@@ -1,4 +1,4 @@
-use section_properties::{Point, Polygon, Section, SectionProperties};
+use section_properties::{Point, Polygon, Section, SectionProperties, section_library::steel::ISection, section_library::ParametricSection, plastic::warping::WarpingProperties, section_library::steel::{NastranBar, NastranBox, NastranChan, NastranCross, NastranI, NastranTee, NastranTube, NastranZed, SuperTGirder, SuperTType, IGirder, IGirderType, UGirder}};
 
 #[test]
 fn rectangle_section() {
@@ -115,10 +115,14 @@ fn principal_moments_and_gyration() {
     let (rx, ry, rho) = props.radius_of_gyration();
     let rx_exp = (props.ix / props.area).sqrt();
     let ry_exp = (props.iy / props.area).sqrt();
-    let rho_exp = ((props.ix + props.iy) / (2.0 * props.area)).sqrt();
+    let rho_exp = ((props.ix + props.iy) / props.area).sqrt();
     assert!((rx - rx_exp).abs() < 1e-10);
     assert!((ry - ry_exp).abs() < 1e-10);
     assert!((rho - rho_exp).abs() < 1e-10);
+
+    // Max fiber distances must be measured from the centroid to the boundary
+    assert!((props.max_fiber_distance_y - 2.5).abs() < 1e-10);
+    assert!((props.max_fiber_distance_x - 5.0).abs() < 1e-10);
 }
 #[test]
 fn principal_properties_invariants() {
@@ -223,4 +227,158 @@ fn asymmetric_section_has_rotated_principal_axes() {
         "principal angle = {}",
         principal.angle
     );
+}
+
+#[test]
+fn frame_properties_rectangle() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 5.0),
+        Point::new(0.0, 5.0),
+    ]);
+    let sec = Section::new(outer, Vec::new());
+
+    let (area, ixx, iyy, ixy, j, phi) = sec.frame_properties();
+
+    assert!((area - 50.0).abs() < 1e-10);
+    assert!((ixx - 104.16666666666667).abs() < 1e-10);
+    assert!((iyy - 416.6666666666667).abs() < 1e-10);
+    assert!(ixy.abs() < 1e-10);
+    // For rectangle: J = beta * a * b^3 where a >= b
+    // a=10, b=5, ratio=2, beta≈0.229
+    let expected_j = 0.229 * 10.0 * 5.0_f64.powi(3);
+    assert!((j - expected_j).abs() / expected_j < 0.05);
+    // For a symmetric section, principal angle is 0 or π/2
+    assert!(phi.abs() < 1e-10 || (phi.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+}
+
+#[test]
+fn frame_properties_i_section() {
+    let i = ISection::new(0.3, 0.15, 0.007, 0.01, 0.012);
+    let section = i.build();
+
+    let (area, ixx, iyy, ixy, j, phi) = section.frame_properties();
+
+    assert!(area > 0.0);
+    assert!(ixx > 0.0);
+    assert!(iyy > 0.0);
+    assert!(ixy.abs() < 1e-10); // Doubly symmetric
+    assert!(j > 0.0);
+    assert!(phi.abs() < 1e-10); // Symmetric about both axes
+
+    // Verify J matches WarpingProperties
+    let wp = WarpingProperties::from_section(&section);
+    assert!((j - wp.j).abs() < 1e-12);
+}
+
+#[test]
+fn nastran_bar_section() {
+    let bar = NastranBar::new(25.0); // 25mm diameter
+    let sec = bar.build();
+    let props = SectionProperties::from_section(&sec);
+    let expected_area = std::f64::consts::PI * (0.0125_f64).powi(2);
+    assert!((props.area - expected_area).abs() / expected_area < 0.02);
+}
+
+#[test]
+fn nastran_box_section() {
+    let box_sec = NastranBox::new(100.0, 50.0, 5.0); // 100x50x5mm
+    let sec = box_sec.build();
+    let props = SectionProperties::from_section(&sec);
+    let outer_area = 0.1 * 0.05;
+    let inner_area = 0.09 * 0.04;
+    let expected = outer_area - inner_area;
+    assert!((props.area - expected).abs() / expected < 0.02);
+}
+
+#[test]
+fn nastran_chan_section() {
+    let chan = NastranChan::standard_c10x15_3();
+    let sec = chan.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    assert!(props.ix > 0.0);
+    assert!(props.iy > 0.0);
+}
+
+#[test]
+fn nastran_cross_section() {
+    let cross = NastranCross::new(100.0, 100.0, 10.0); // 100x100x10mm
+    let sec = cross.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    // Cross should be symmetric
+    assert!(props.ixy.abs() < 1e-10);
+}
+
+#[test]
+fn nastran_i_section() {
+    let i = NastranI::standard_w12x26();
+    let sec = i.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    assert!(props.ix > props.iy); // Strong axis > weak axis
+    assert!(props.ixy.abs() < 1e-10);
+}
+
+#[test]
+fn nastran_tee_section() {
+    let tee = NastranTee::new(100.0, 100.0, 6.0, 10.0);
+    let sec = tee.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+}
+
+#[test]
+fn nastran_tube_section() {
+    let tube = NastranTube::standard_51x5(); // 51mm OD x 5mm WT
+    let sec = tube.build();
+    let props = SectionProperties::from_section(&sec);
+    let ro: f64 = 0.051 / 2.0;
+    let ri: f64 = ro - 0.005;
+    let expected = std::f64::consts::PI * (ro.powi(2) - ri.powi(2));
+    assert!((props.area - expected).abs() / expected < 0.02);
+}
+
+#[test]
+fn nastran_zed_section() {
+    let zed = NastranZed::standard_z200();
+    let sec = zed.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+}
+
+#[test]
+fn super_t_girder() {
+    let girder = SuperTGirder::new(SuperTType::Type1400);
+    let sec = girder.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    assert!(props.ix > 0.0);
+    assert!(props.iy > 0.0);
+    // Depth should be ~1.4m
+    assert!((sec.height() - 1.4).abs() < 0.05);
+}
+
+#[test]
+fn i_girder_aashto() {
+    let girder = IGirder::new(IGirderType::TypeIV);
+    let sec = girder.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    assert!(props.ix > 0.0);
+    assert!(props.iy > 0.0);
+    // Depth should be ~1.37m for Type IV
+    assert!((sec.height() - 1.37).abs() < 0.05);
+}
+
+#[test]
+fn u_girder() {
+    let girder = UGirder::new(2000.0, 2000.0, 1500.0, 300.0, 200.0);
+    let sec = girder.build();
+    let props = SectionProperties::from_section(&sec);
+    assert!(props.area > 0.0);
+    assert!(props.ix > 0.0);
+    assert!((sec.height() - 2.0).abs() < 0.05);
 }

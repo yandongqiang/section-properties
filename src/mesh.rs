@@ -4,15 +4,20 @@
 //! linear elastic FEM solver for section analysis.
 
 pub mod fem;
+pub mod fem_analysis;
 pub mod triangulation;
 
 pub use fem::{
     AnalysisResults, ElementType, FemModel, FemSolver, LoadCase, MaterialProps, StressResult,
     analyze_section,
 };
+pub use fem_analysis::{
+    FemCompositeAnalysis, FemGeometricProperties, FemSectionAnalysis, FemWarpingProperties,
+    PropertyComparison, StressPlotData, StressPost,
+};
 pub use triangulation::{Triangle, Triangulation, triangulate_polygon, triangulate_section};
 
-use crate::geometry::{Point, Polygon};
+use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_library::CompositeSection;
 

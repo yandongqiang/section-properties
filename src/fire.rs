@@ -127,16 +127,17 @@ impl TemperatureProfile {
 
     /// Compute temperature profile using heat transfer analysis.
     pub fn from_heat_transfer(
-        section: &Section,
-        material: &Material,
-        section_factor: &SectionFactor,
+        _section: &Section,
+        _material: &Material,
+        _section_factor: &SectionFactor,
+        exposure: FireExposure,
         time: f64,
-        time_step: f64,
+        _time_step: f64,
     ) -> Self {
         // Simplified lumped capacitance method
         // dT/dt = (h_net * A_m/V) * (T_g - T) / (rho * c_a)
 
-        let t_g = section_factor.box_protection {
+        let t_g = match exposure {
             FireExposure::Standard => 345.0 * (8.0 * time + 1.0).log10(),
             _ => 20.0 + 660.0 * (1.0 - (-0.1 * time).exp()),
         };
@@ -144,7 +145,7 @@ impl TemperatureProfile {
         // Use average temperature
         let temp = t_g * (1.0 - (-time / 30.0).exp()) + 20.0;
 
-        Self::uniform(temp, time, section_factor.exposure)
+        Self::uniform(temp, time, exposure)
     }
 }
 
@@ -319,12 +320,12 @@ impl FireAnalysis {
 
     fn unprotected_time(&self, theta_cr: f64, sf: SectionFactor) -> f64 {
         // Numerical integration of temperature rise
-        let dt = 1.0 / 60.0; // 1 second steps
+        let dt = 1.0 / 60.0; // 1 second steps (in minutes)
         let mut t = 0.0;
         let mut theta_a = 20.0;
 
         while theta_a < theta_cr && t < 300.0 { // Max 5 hours
-            let theta_g = self.exposure.temperature(t / 60.0); // Convert to minutes
+            let theta_g = self.exposure.temperature(t); // t is in minutes
 
             // Net heat flux
             let h_net = 25.0; // W/m²K (convection + radiation)
@@ -339,7 +340,7 @@ impl FireAnalysis {
             t += dt;
         }
 
-        t * 60.0 // Return in minutes
+        t // Return in minutes
     }
 
     fn protected_time(&self, theta_cr: f64, sf: SectionFactor, prot: &FireProtection) -> f64 {
@@ -385,7 +386,7 @@ impl FireAnalysis {
 
         // Section temperature
         let temp_profile = TemperatureProfile::from_heat_transfer(
-            &self.section, &self.material, &section_factor, t_min, 1.0
+            &self.section, &self.material, &section_factor, self.exposure, t_min, 1.0
         );
 
         let theta_a = temp_profile.avg_temp;
@@ -503,7 +504,7 @@ pub mod composite {
             }
         }
 
-        fn critical_temperature_composite(&self, n_ed: f64) -> f64 {
+        fn critical_temperature_composite(&self, _n_ed: f64) -> f64 {
             // Concrete contribution delays steel heating
             // Approximate: 500-600°C for typical concrete-filled tubes
             550.0
@@ -536,45 +537,28 @@ trait SectionFireProps {
 
 impl SectionFireProps for Section {
     fn heated_perimeter_3sided(&self) -> f64 {
-        // Perimeter exposed on 3 sides (bottom flange not exposed)
+        // Perimeter exposed on 3 sides (bottom not exposed)
         let bounds = self.bounds();
-        let h = bounds.1 - bounds.0;
-        let b = bounds.3 - bounds.2;
+        let h = bounds.3 - bounds.2; // max_y - min_y = height
 
-        // Approximate: 2*h + b (three sides)
-        // More accurate: sum of exposed edges
         let mut perimeter = 0.0;
 
-        // Find edges not on bottom
         for i in 0..self.outer.vertices.len() {
             let v1 = self.outer.vertices[i];
             let v2 = self.outer.vertices[(i + 1) % self.outer.vertices.len()];
 
-            // Check if edge is on bottom
             let mid_y = (v1.y + v2.y) / 2.0;
-            if mid_y > bounds.2 + 0.01 * h { // Not on bottom
+            if mid_y > bounds.2 + 0.01 * h {
                 let dx = v2.x - v1.x;
                 let dy = v2.y - v1.y;
                 perimeter += (dx * dx + dy * dy).sqrt();
             }
         }
 
-        // Add hole perimeters (fully exposed)
-        for hole in &self.holes {
-            for i in 0..hole.vertices.len() {
-                let v1 = hole.vertices[i];
-                let v2 = hole.vertices[(i + 1) % hole.vertices.len()];
-                let dx = v2.x - v1.x;
-                let dy = v2.y - v1.y;
-                perimeter += (dx * dx + dy * dy).sqrt();
-            }
-        }
-
-        perimeter.max(0.01) // Minimum
+        perimeter.max(0.01)
     }
 
     fn heated_perimeter_4sided(&self) -> f64 {
-        // Full perimeter
         let mut perimeter = 0.0;
 
         for i in 0..self.outer.vertices.len() {
@@ -585,16 +569,6 @@ impl SectionFireProps for Section {
             perimeter += (dx * dx + dy * dy).sqrt();
         }
 
-        for hole in &self.holes {
-            for i in 0..hole.vertices.len() {
-                let v1 = hole.vertices[i];
-                let v2 = hole.vertices[(i + 1) % hole.vertices.len()];
-                let dx = v2.x - v1.x;
-                let dy = v2.y - v1.y;
-                perimeter += (dx * dx + dy * dy).sqrt();
-            }
-        }
-
         perimeter
     }
 
@@ -602,8 +576,8 @@ impl SectionFireProps for Section {
         // k_sh for I-sections (shadow effect)
         // k_sh = 1 - (b / h) * (t_f / t_w) * 0.25 (simplified)
         let bounds = self.bounds();
-        let h = bounds.1 - bounds.0;
-        let b = bounds.3 - bounds.2;
+        let h = bounds.3 - bounds.2;
+        let b = bounds.1 - bounds.0;
 
         if h > b * 2.0 {
             // I-section like
@@ -614,58 +588,13 @@ impl SectionFireProps for Section {
     }
 }
 
-trait SectionBounds {
-    fn bounds(&self) -> (f64, f64, f64, f64);
-}
-
-impl SectionBounds for Section {
-    fn bounds(&self) -> (f64, f64, f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_x, max_x, min_y, max_y)
-    }
-}
-
-trait SectionPropertiesMaxFiber {
-    fn max_fiber_distance_y(&self) -> f64;
-    fn max_fiber_distance_x(&self) -> f64;
-}
-
-impl SectionPropertiesMaxFiber for crate::section_properties::SectionProperties {
-    fn max_fiber_distance_y(&self) -> f64 {
-        // Approximate: max distance from centroid in Y
-        // Would need actual section geometry
-        (self.ix / self.area).sqrt() * 2.0
-    }
-
-    fn max_fiber_distance_x(&self) -> f64 {
-        (self.iy / self.area).sqrt() * 2.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geometry::{Point, Polygon};
     use crate::section::Section;
     use crate::material::presets::STEEL_S355;
+    use crate::section_library::ParametricSection;
 
     #[test]
     fn section_factor_i_section() {
@@ -771,5 +700,20 @@ mod tests {
 
         let result = cft.fire_resistance(500e3, 10e3);
         assert!(result.time > 0.0);
+    }
+
+    #[test]
+    fn shadow_factor_i_section_depth_gt_2x_width() {
+        // Regression test: h and b were swapped in shadow_factor.
+        // For I-section with depth=0.3, width=0.1: h > 2*b -> 0.3 > 0.2 -> true -> 0.9
+        // With bug: h=0.1 (width), b=0.3 (depth) -> 0.1 > 0.6 -> false -> 1.0
+        let i = crate::section_library::steel::ISection::new(0.3, 0.1, 0.008, 0.01, 0.012);
+        let section = i.build();
+        let sf = section.shadow_factor();
+        assert!(
+            (sf - 0.9).abs() < 1e-10,
+            "shadow_factor should be 0.9 for I-section with depth > 2*width, got {}",
+            sf
+        );
     }
 }

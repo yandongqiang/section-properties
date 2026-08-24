@@ -7,17 +7,13 @@
 // Class 3: Elastic moment capacity (first yield)
 // Class 4: Local buckling governs (effective section)
 
-pub use classification::{
-    ClassLimit, SectionClass, SectionClassification, StressDistribution, classify_section,
-};
-
-use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
 
 /// Cross-section class per EN 1993-1-1 Table 5.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Ordering: Class1 > Class2 > Class3 > Class4 (Class1 is most favorable)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionClass {
     /// Class 1 - Plastic (full plastic moment + rotation capacity)
     Class1 = 1,
@@ -27,6 +23,19 @@ pub enum SectionClass {
     Class3 = 3,
     /// Class 4 - Slender (local buckling, effective section)
     Class4 = 4,
+}
+
+impl PartialOrd for SectionClass {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SectionClass {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse: Class1 > Class2 > Class3 > Class4
+        (*self as u8).cmp(&(*other as u8)).reverse()
+    }
 }
 
 impl SectionClass {
@@ -57,14 +66,14 @@ impl SectionClass {
 }
 
 /// Stress distribution in the element per EN 1993-1-1 Table 5.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StressDistribution {
     /// Uniform compression (e.g., flange in pure compression)
     UniformCompression,
     /// Linear varying stress (e.g., web in bending)
     Bending,
     /// Web in combined bending and axial
-    BendingAndCompression { alpha: f64 }, // α = (σ_max - σ_min) / σ_max
+    BendingAndCompression { alpha: f64 }, // α = plastic compression zone ratio (0=pure tension, 0.5=pure bending, 1=pure compression)
     /// Flange in combined bending and axial
     FlangeBendingAndCompression { psi: f64 }, // ψ = σ_2/σ_1
 }
@@ -80,7 +89,12 @@ impl StressDistribution {
         StressDistribution::UniformCompression
     }
 
-    /// For web with axial + bending (α parameter)
+    /// For web with axial + bending (α parameter).
+    ///
+    /// α is the plastic compression zone ratio (0 to 1):
+    /// - α = 1.0: pure compression
+    /// - α = 0.5: pure bending (doubly-symmetric section)
+    /// - α = 0.0: pure tension (no compression zone)
     pub fn web_bending_compression(alpha: f64) -> Self {
         StressDistribution::BendingAndCompression { alpha }
     }
@@ -128,22 +142,24 @@ fn web_limits(eps: f64, stress: StressDistribution) -> ClassLimit {
             class3: 124.0 * eps,
         },
         StressDistribution::BendingAndCompression { alpha } => {
-            // EN 1993-1-1 Table 5.2, sheet 2
-            // α = (σ_max - σ_min) / σ_max for compression part
-            let class1 = if alpha > 0.5 {
-                33.0 * eps / (1.0 - 0.5 * alpha)
+            // EN 1993-1-1 Table 5.2 (sheet 2), web subject to bending and axial compression
+            // α = plastic compression zone ratio (0=pure tension, 0.5=pure bending, 1=pure compression)
+            // ψ = stress ratio = σ_min/σ_max; for doubly-symmetric sections ψ = 4α - 3
+            let alpha = alpha.clamp(0.0, 1.0);
+            let psi = 4.0 * alpha - 3.0;
+            let (class1, class2) = if alpha > 0.5 {
+                (396.0 * eps / (13.0 * alpha - 1.0), 456.0 * eps / (13.0 * alpha - 1.0))
+            } else if alpha > 0.0 {
+                (36.0 * eps / alpha, 41.5 * eps / alpha)
             } else {
-                72.0 * eps / (1.0 + 2.0 * alpha)
+                (f64::MAX, f64::MAX)
             };
-            let class2 = if alpha > 0.5 {
-                38.0 * eps / (1.0 - 0.5 * alpha)
+            // Class 3: 42ε / (0.67 + 0.33ψ); guard against non-positive denominator
+            let class3_denom = 0.67 + 0.33 * psi;
+            let class3 = if class3_denom > 0.0 {
+                42.0 * eps / class3_denom
             } else {
-                83.0 * eps / (1.0 + 1.5 * alpha)
-            };
-            let class3 = if alpha > 0.5 {
-                42.0 * eps / (1.0 - 0.5 * alpha)
-            } else {
-                124.0 * eps / (1.0 + 2.0 * alpha)
+                f64::MAX
             };
             ClassLimit {
                 class1,
@@ -201,9 +217,9 @@ fn outstand_flange_limits(eps: f64, stress: StressDistribution) -> ClassLimit {
 /// Get class limits for internal flanges (e.g., box section flanges).
 fn internal_flange_limits(eps: f64) -> ClassLimit {
     ClassLimit {
-        class1: 9.0 * eps,
-        class2: 10.0 * eps,
-        class3: 14.0 * eps,
+        class1: 33.0 * eps,
+        class2: 38.0 * eps,
+        class3: 42.0 * eps,
     }
 }
 
@@ -283,8 +299,8 @@ pub fn classify_i_section(
     // Get geometric properties
     let props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0; // depth
-    let b = bounds.3 - bounds.2; // width
+    let _h = bounds.3 - bounds.2; // depth (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
 
     // Estimate web and flange dimensions from section geometry
     // For I-section: find web thickness and flange thickness
@@ -307,10 +323,10 @@ pub fn classify_i_section(
     // Tension flange (same geometry, but tension is always Class 1 for ductile steel)
     let tension_flange_class = SectionClass::Class1;
 
-    // Overall class = max of all elements
+    // Overall class = min of all elements (worst class governs, with reversed Ord)
     let overall_class = [web_class, flange_class, tension_flange_class]
         .iter()
-        .max()
+        .min()
         .copied()
         .unwrap_or(SectionClass::Class4);
 
@@ -339,8 +355,8 @@ pub fn classify_hollow_section(
 
     let props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
 
     // Check if circular or rectangular
     let is_circular = (h - b).abs() / h.max(b) < 0.05;
@@ -353,23 +369,12 @@ pub fn classify_hollow_section(
         let t = area / (std::f64::consts::PI * d);
         let d_t = d / t;
 
-        // CHS limits per Table 5.2
-        let limits = match stress {
-            StressDistribution::UniformCompression => ClassLimit {
-                class1: 50.0 * eps,
-                class2: 70.0 * eps,
-                class3: 90.0 * eps,
-            },
-            StressDistribution::Bending => ClassLimit {
-                class1: 50.0 * eps,
-                class2: 70.0 * eps,
-                class3: 90.0 * eps,
-            },
-            _ => ClassLimit {
-                class1: 50.0 * eps,
-                class2: 70.0 * eps,
-                class3: 90.0 * eps,
-            },
+        // CHS limits per EN 1993-1-1 Table 5.2 (d): 50ε², 70ε², 90ε²
+        // (same for all stress distributions)
+        let limits = ClassLimit {
+            class1: 50.0 * eps * eps,
+            class2: 70.0 * eps * eps,
+            class3: 90.0 * eps * eps,
         };
 
         let overall_class = limits.classify(d_t);
@@ -398,16 +403,8 @@ pub fn classify_hollow_section(
         let flange_c_t = (b - 2.0 * t) / t;
 
         // Internal compression parts (Table 5.2)
-        let web_limits = ClassLimit {
-            class1: 33.0 * eps,
-            class2: 38.0 * eps,
-            class3: 42.0 * eps,
-        };
-        let flange_limits = ClassLimit {
-            class1: 9.0 * eps,
-            class2: 10.0 * eps,
-            class3: 14.0 * eps,
-        };
+        let web_limits = web_limits(eps, stress);
+        let flange_limits = internal_flange_limits(eps);
 
         let web_class = web_limits.classify(web_c_t);
         let flange_class = flange_limits.classify(flange_c_t);
@@ -415,7 +412,7 @@ pub fn classify_hollow_section(
 
         let overall_class = [web_class, flange_class, tension_flange_class]
             .iter()
-            .max()
+            .min()
             .copied()
             .unwrap_or(SectionClass::Class4);
 
@@ -440,13 +437,13 @@ pub fn classify_angle_section(section: &Section, material: &Material) -> Section
     let eps = (235e6 / fy).sqrt();
 
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
 
     // For angles, classify each leg as outstand flange
     let props = SectionProperties::from_section(section);
     let area = props.area;
-    let peri = section.outer.vertices.len() as f64; // rough
+    let _peri = section.outer.vertices.len() as f64; // rough
     let t = area / (h + b); // approximate
 
     let c_t_leg1 = h / t;
@@ -458,7 +455,7 @@ pub fn classify_angle_section(section: &Section, material: &Material) -> Section
 
     let overall_class = [class1, class2]
         .iter()
-        .max()
+        .min()
         .copied()
         .unwrap_or(SectionClass::Class4);
 
@@ -489,8 +486,8 @@ pub fn classify_channel_section(
 
     let props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let _h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
 
     let (tw, tf, hw) = estimate_i_section_dimensions(section, &props);
 
@@ -506,7 +503,7 @@ pub fn classify_channel_section(
 
     let overall_class = [web_class, flange_class, tension_flange_class]
         .iter()
-        .max()
+        .min()
         .copied()
         .unwrap_or(SectionClass::Class4);
 
@@ -536,8 +533,8 @@ pub fn classify_tee_section(
 
     let props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let _h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
 
     let (tw, tf, hw) = estimate_i_section_dimensions(section, &props);
 
@@ -555,7 +552,7 @@ pub fn classify_tee_section(
 
     let overall_class = [web_class, flange_class, tension_flange_class]
         .iter()
-        .max()
+        .min()
         .copied()
         .unwrap_or(SectionClass::Class4);
 
@@ -582,8 +579,8 @@ pub fn classify_section(
     // Try to detect section type from geometry
     let props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
     let area = props.area;
 
     // Check if hollow (has holes)
@@ -592,8 +589,8 @@ pub fn classify_section(
     }
 
     // Check aspect ratio and area to guess type
-    let peri = section.outer.vertices.len() as f64;
-    let t_est = area / (2.0 * (h + b)); // rough thickness
+    let _peri = section.outer.vertices.len() as f64;
+    let _t_est = area / (2.0 * (h + b)); // rough thickness
 
     // If very thin-walled and closed -> hollow
     if area / (h * b) < 0.15 && section.holes.is_empty() {
@@ -629,9 +626,9 @@ pub fn classify_section(
 /// Estimate I-section dimensions (tw, tf, hw) from geometry.
 fn estimate_i_section_dimensions(section: &Section, props: &SectionProperties) -> (f64, f64, f64) {
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
-    let area = props.area;
+    let h = bounds.3 - bounds.2; // height (max_y - min_y)
+    let b = bounds.1 - bounds.0; // width (max_x - min_x)
+    let _area = props.area;
 
     // For I-section: area ≈ 2*b*tf + (h-2*tf)*tw
     // We need to estimate tw and tf from the polygon vertices
@@ -642,27 +639,23 @@ fn estimate_i_section_dimensions(section: &Section, props: &SectionProperties) -
     x_coords.sort_by(|a, b| a.partial_cmp(b).unwrap());
     y_coords.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    // Web thickness = minimum x-distance at mid-height
-    let mid_y = (bounds.0 + bounds.1) / 2.0;
-    let web_vertices: Vec<f64> = section
+    // Web thickness: find the smallest non-zero |x| among vertices near center
+    // This correctly handles root radii: web vertices have |x| = sw (smallest),
+    // radius vertices have |x| in [sw, sw+r] (larger)
+    let center_x = (bounds.0 + bounds.1) / 2.0;
+    let mut x_abs: Vec<f64> = section
         .outer
         .vertices
         .iter()
-        .filter(|v| (v.y - mid_y).abs() < h * 0.1)
-        .map(|v| v.x)
+        .filter(|v| (v.x - center_x).abs() < b * 0.25)
+        .map(|v| (v.x - center_x).abs())
+        .filter(|x| *x > 1e-9)
         .collect();
+    x_abs.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let tw = if web_vertices.len() >= 2 {
-        web_vertices
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            - web_vertices
-                .iter()
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap()
+    let tw = if !x_abs.is_empty() {
+        x_abs[0] * 2.0
     } else {
-        // Fallback: assume web is 1/10 of width
         b * 0.1
     };
 
@@ -671,7 +664,7 @@ fn estimate_i_section_dimensions(section: &Section, props: &SectionProperties) -
         .outer
         .vertices
         .iter()
-        .filter(|v| v.y > bounds.1 - h * 0.1)
+        .filter(|v| v.y > bounds.3 - h * 0.1)
         .map(|v| v.y)
         .collect();
     let tf = if top_vertices.len() >= 2 {
@@ -695,7 +688,7 @@ fn estimate_i_section_dimensions(section: &Section, props: &SectionProperties) -
 /// Effective section properties for Class 4 sections (EN 1993-1-5).
 pub mod effective {
     use super::*;
-    use crate::geometry::{Point, Polygon};
+    use crate::geometry::Point;
     use crate::section::Section;
     use crate::section_properties::SectionProperties;
 
@@ -831,6 +824,7 @@ mod tests {
     use crate::geometry::{Point, Polygon};
     use crate::material::presets::STEEL_S355;
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]
@@ -842,7 +836,7 @@ mod tests {
             classify_i_section(&section, &STEEL_S355, StressDistribution::pure_bending());
 
         // IPE300 in S355 should be Class 1 or 2
-        assert!(classification.overall_class <= SectionClass::Class2);
+        assert!(classification.overall_class >= SectionClass::Class2);
         assert!(classification.can_plastic_moment());
     }
 
@@ -866,8 +860,8 @@ mod tests {
         let classification =
             classify_hollow_section(&section, &STEEL_S355, StressDistribution::pure_bending());
 
-        // d/t = 219/8 = 27.4, limit Class 1 = 50*ε = 50*0.81 = 40.5 -> Class 1
-        assert!(classification.overall_class <= SectionClass::Class2);
+        // d/t = 219/8 = 27.4, limit Class 1 = 50*ε² = 50*0.81² = 33.1 -> Class 1
+        assert!(classification.overall_class >= SectionClass::Class2);
     }
 
     #[test]
@@ -881,7 +875,7 @@ mod tests {
             classify_hollow_section(&section, &STEEL_S355, StressDistribution::pure_bending());
 
         // h/t = 200/8 = 25, limit Class 1 = 33*ε = 26.7 -> Class 1/2
-        assert!(classification.overall_class <= SectionClass::Class2);
+        assert!(classification.overall_class >= SectionClass::Class2);
     }
 
     #[test]
@@ -891,21 +885,21 @@ mod tests {
         let classification = classify_angle_section(&section, &STEEL_S355);
 
         // c/t = 100/10 = 10, limit Class 1 = 9*ε = 7.3 -> Class 2 or 3
-        assert!(classification.overall_class >= SectionClass::Class1);
+        assert!(classification.overall_class <= SectionClass::Class1);
     }
 
     #[test]
     fn epsilon_calculation() {
         // S235: ε = 1.0
-        let eps_s235 = (235e6 / 235e6).sqrt();
+        let eps_s235: f64 = (235.0e6_f64 / 235.0e6_f64).sqrt();
         assert!((eps_s235 - 1.0).abs() < 1e-6);
 
         // S355: ε = sqrt(235/355) = 0.814
-        let eps_s355 = (235e6 / 355e6).sqrt();
+        let eps_s355: f64 = (235.0e6_f64 / 355.0e6_f64).sqrt();
         assert!((eps_s355 - 0.814).abs() < 0.01);
 
         // S460: ε = sqrt(235/460) = 0.715
-        let eps_s460 = (235e6 / 460e6).sqrt();
+        let eps_s460: f64 = (235.0e6_f64 / 460.0e6_f64).sqrt();
         assert!((eps_s460 - 0.715).abs() < 0.01);
     }
 
@@ -947,5 +941,48 @@ mod tests {
 
         assert_eq!(bending, StressDistribution::Bending);
         assert_eq!(compression, StressDistribution::UniformCompression);
+    }
+
+    #[test]
+    fn web_bending_compression_limits_pure_compression() {
+        // α = 1.0 (pure compression) should match UniformCompression: 33ε, 38ε, 42ε
+        let eps = 1.0;
+        let bc = web_limits(eps, StressDistribution::web_bending_compression(1.0));
+        let uc = web_limits(eps, StressDistribution::pure_compression());
+        assert!((bc.class1 - uc.class1).abs() < 1e-10);
+        assert!((bc.class2 - uc.class2).abs() < 1e-10);
+        assert!((bc.class3 - uc.class3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn web_bending_compression_limits_pure_bending() {
+        // α = 0.5 (pure bending) should match Bending: 72ε, 83ε, 124ε
+        let eps = 1.0;
+        let bc = web_limits(eps, StressDistribution::web_bending_compression(0.5));
+        let bending = web_limits(eps, StressDistribution::pure_bending());
+        assert!((bc.class1 - bending.class1).abs() < 1e-10);
+        assert!((bc.class2 - bending.class2).abs() < 1e-10);
+        assert!((bc.class3 - bending.class3).abs() < 1.0); // 123.5 vs 124 (rounding)
+    }
+
+    #[test]
+    fn web_bending_compression_limits_intermediate() {
+        // α = 0.75: Class 1 = 396/(13*0.75-1) = 45.26ε
+        //           Class 2 = 456/(13*0.75-1) = 52.11ε
+        //           ψ = 0, Class 3 = 42/0.67 = 62.69ε
+        let eps = 1.0;
+        let bc = web_limits(eps, StressDistribution::web_bending_compression(0.75));
+        assert!((bc.class1 - 396.0 / 8.75).abs() < 1e-10);
+        assert!((bc.class2 - 456.0 / 8.75).abs() < 1e-10);
+        assert!((bc.class3 - 42.0 / 0.67).abs() < 1e-10);
+    }
+
+    #[test]
+    fn web_bending_compression_limits_zero_alpha() {
+        // α = 0 (pure tension) should return f64::MAX (no compression zone)
+        let eps = 1.0;
+        let bc = web_limits(eps, StressDistribution::web_bending_compression(0.0));
+        assert_eq!(bc.class1, f64::MAX);
+        assert_eq!(bc.class2, f64::MAX);
     }
 }

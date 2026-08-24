@@ -7,6 +7,7 @@ pub mod classification;
 pub mod interaction;
 pub mod plastic_section;
 pub mod warping;
+pub mod warping_fem;
 
 pub use classification::{
     ClassLimit, SectionClass, SectionClassification, StressDistribution, classify_section,
@@ -18,9 +19,8 @@ pub use interaction::{
 pub use plastic_section::{
     FullPlasticProperties, PlasticAxis, PlasticNeutralAxis, PlasticProperties, PlasticSection,
 };
-pub use warping::{ShearCenter, TorsionAnalysis, WarpingProperties, exact};
+pub use warping::{TorsionAnalysis, WarpingProperties, exact};
 
-use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
 
@@ -145,6 +145,7 @@ mod tests {
     use crate::geometry::{Point, Polygon};
     use crate::material::presets::STEEL_S355;
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
 
     #[test]
     fn plastic_analysis_i_section() {
@@ -217,7 +218,7 @@ mod tests {
         let analysis = PlasticAnalysis::new(section, STEEL_S355);
 
         let class = analysis.classification(StressDistribution::pure_bending());
-        assert!(class.overall_class <= crate::plastic::SectionClass::Class2);
+        assert!(class.overall_class >= crate::plastic::SectionClass::Class2);
         assert!(class.can_plastic_moment());
     }
 }

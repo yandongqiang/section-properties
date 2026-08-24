@@ -11,14 +11,13 @@ pub use direct_strength::{
     DsmParams, DsmStrengths, dsm_analysis, dsm_nominal_capacity_distortional,
     dsm_nominal_capacity_global, dsm_nominal_capacity_local,
 };
-pub use distortional::{DistortionalBuckling, DistortionalParams, distortional_buckling_stress};
+pub use distortional::{DistortionalBuckling, DistortionalParams};
 pub use effective_width::{
-    BucklingCurve, EffectiveSectionProperties, EffectiveWidth, EffectiveWidthParams, ElementType,
-    effective_width_corner, effective_width_flat, effective_width_stiffened,
-    reduced_section_properties,
+    effective_width_corner, effective_width_flat, effective_width_flat_simple,
+    effective_width_stiffened, reduced_section_properties,
 };
 
-use crate::geometry::{Point, Polygon};
+use crate::geometry::Point;
 use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -140,8 +139,8 @@ impl EffectiveSectionProperties {
     pub fn z_eff_compression(&self, section: &Section, axis: crate::plastic::PlasticAxis) -> f64 {
         let bounds = section.bounds();
         let max_dist = match axis {
-            crate::plastic::PlasticAxis::X => (bounds.1 - self.centroid_eff.y).abs(),
-            crate::plastic::PlasticAxis::Y => (bounds.3 - self.centroid_eff.x).abs(),
+            crate::plastic::PlasticAxis::X => (bounds.3 - self.centroid_eff.y).abs(),
+            crate::plastic::PlasticAxis::Y => (bounds.1 - self.centroid_eff.x).abs(),
         };
         if max_dist > 1e-12 {
             match axis {
@@ -161,34 +160,6 @@ impl EffectiveSectionProperties {
         axis: crate::plastic::PlasticAxis,
     ) -> f64 {
         self.z_eff_compression(section, axis) * material.yield_strength
-    }
-}
-
-trait SectionBoundsExt {
-    fn bounds(&self) -> (f64, f64, f64, f64);
-}
-
-impl SectionBoundsExt for Section {
-    fn bounds(&self) -> (f64, f64, f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_x, max_x, min_y, max_y)
     }
 }
 
@@ -248,5 +219,44 @@ mod tests {
     #[test]
     fn element_types() {
         assert_eq!(ElementType::Flat as u8, 0);
+    }
+
+    #[test]
+    fn z_eff_compression_uses_correct_coordinates() {
+        // Regression test: bounds.1 (max_x) was used with centroid.y,
+        // and bounds.3 (max_y) was used with centroid.x.
+        // For PlasticAxis::X: max_dist should be max_y - centroid_y
+        // For PlasticAxis::Y: max_dist should be max_x - centroid_x
+        let rect = crate::section_library::rectangle_polygon(0.1, 0.2);
+        let section = Section::new(rect, vec![]);
+        let props = SectionProperties::from_section(&section);
+
+        let eff = EffectiveSectionProperties {
+            area_eff: props.area,
+            ix_eff: props.ix,
+            iy_eff: props.iy,
+            ixy_eff: props.ixy,
+            centroid_eff: props.centroid,
+            element_reductions: vec![],
+        };
+
+        let zx = eff.z_eff_compression(&section, crate::plastic::PlasticAxis::X);
+        let zy = eff.z_eff_compression(&section, crate::plastic::PlasticAxis::Y);
+
+        // For 0.1 wide x 0.2 deep rectangle centered at origin:
+        // X-axis: max_dist = max_y - 0 = 0.1, Zx = Ix / 0.1
+        // Y-axis: max_dist = max_x - 0 = 0.05, Zy = Iy / 0.05
+        let bounds = section.bounds();
+        let expected_zx = props.ix / (bounds.3 - props.centroid.y).abs();
+        let expected_zy = props.iy / (bounds.1 - props.centroid.x).abs();
+
+        assert!(
+            (zx - expected_zx).abs() / expected_zx < 0.01,
+            "Zx should use max_y - centroid_y"
+        );
+        assert!(
+            (zy - expected_zy).abs() / expected_zy < 0.01,
+            "Zy should use max_x - centroid_x"
+        );
     }
 }

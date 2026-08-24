@@ -103,7 +103,7 @@ pub fn to_json(
             thermal_expansion: m.thermal_expansion,
             yield_strength: m.yield_strength,
             ultimate_strength: m.ultimate_strength,
-            color: m.color,
+            color: m.color.map(|c| [c.0, c.1, c.2]),
         }),
     };
 
@@ -151,7 +151,7 @@ impl JsonMaterial {
             yield_strength: self.yield_strength,
             ultimate_strength: self.ultimate_strength,
             name: Box::leak(self.name.into_boxed_str()), // TODO: Use owned string in Material
-            color: self.color,
+            color: self.color.map(|c| (c[0], c[1], c[2])),
         }
     }
 }
@@ -202,6 +202,7 @@ mod tests {
     use crate::geometry::{Point, Polygon};
     use crate::material::presets::STEEL_S355;
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]

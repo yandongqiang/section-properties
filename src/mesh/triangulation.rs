@@ -5,7 +5,6 @@
 
 use crate::geometry::{Point, Polygon};
 use crate::section::Section;
-use std::f64::consts::PI;
 
 /// Triangle defined by three vertex indices (CCW orientation).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,7 +108,7 @@ impl Default for Triangulation {
 }
 
 /// Check if a vertex is an "ear" in a polygon.
-fn is_ear(polygon: &[usize], vertices: &[Point], i: usize, all_vertices: &[Point]) -> bool {
+fn is_ear(polygon: &[usize], _vertices: &[Point], i: usize, all_vertices: &[Point]) -> bool {
     let n = polygon.len();
     if n < 3 {
         return false;
@@ -301,7 +300,7 @@ pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
 }
 
 /// Triangulate a section (outer boundary + holes) using constrained Delaunay.
-pub fn triangulate_section(section: &Section, params: crate::mesh::MeshParams) -> crate::mesh::Mesh {
+pub fn triangulate_section(section: &Section, _params: crate::mesh::MeshParams) -> crate::mesh::Mesh {
     let outer = &section.outer;
     let holes = &section.holes;
 

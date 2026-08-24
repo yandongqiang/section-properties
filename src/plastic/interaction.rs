@@ -3,9 +3,9 @@
 //! Provides PMM (axial-moment-moment) interaction surfaces,
 //! section capacity checks per EN 1993, AISC 360, etc.
 
-use crate::geometry::Point;
+use crate::geometry::{Point, Polygon};
 use crate::material::Material;
-use crate::plastic::plastic_section::{PlasticAxis, PlasticNeutralAxis, PlasticSection};
+use crate::plastic::plastic_section::PlasticSection;
 use crate::section::Section;
 
 /// 3D load case (axial + biaxial moments).
@@ -109,7 +109,7 @@ impl InteractionDiagram {
             self.surface_points.extend(m_points);
         }
 
-        // Also generate pure bending points (n=0) with finer resolution
+        // Generate pure bending points (n=0) with finer resolution
         let m_points = self.moment_interaction_at_n(&plastic, 0.0, fy);
         self.surface_points.extend(m_points);
     }
@@ -122,7 +122,7 @@ impl InteractionDiagram {
         fy: f64,
     ) -> Vec<InteractionPoint> {
         let mut points = Vec::new();
-        let area = self.section.area();
+        let _area = self.section.area();
 
         // Area in compression
         let a_c = n / fy;
@@ -165,7 +165,7 @@ impl InteractionDiagram {
         n_x: f64,
         n_y: f64,
         a_c: f64,
-        fy: f64,
+        _fy: f64,
     ) -> Option<f64> {
         // Get bounds in PNA normal direction
         let mut min_proj = f64::INFINITY;
@@ -199,59 +199,113 @@ impl InteractionDiagram {
         Some((low + high) / 2.0)
     }
 
-    /// Compute area in half-space n·x <= c (or >= c).
+    /// Points inside test for half-space clipping.
+    fn inside_halfspace(p: Point, n_x: f64, n_y: f64, c: f64, below: bool) -> bool {
+        let proj = n_x * p.x + n_y * p.y;
+        if below { proj <= c } else { proj >= c }
+    }
+
+    /// Intersect segment (a, b) with line n·x = c.
+    fn line_intersection(
+        a: Point,
+        b: Point,
+        n_x: f64,
+        n_y: f64,
+        c: f64,
+    ) -> Point {
+        let proj_a = n_x * a.x + n_y * a.y;
+        let proj_b = n_x * b.x + n_y * b.y;
+        let t = (c - proj_a) / (proj_b - proj_a);
+
+        Point::new(
+            a.x + t * (b.x - a.x),
+            a.y + t * (b.y - a.y),
+        )
+    }
+
+    /// Clip a polygon by the half-space n·x &lt;= c (or >= c when below=false).
+    /// Sutherland–Hodgman.
+    fn clip_polygon_halfspace(
+        poly: &Polygon,
+        n_x: f64,
+        n_y: f64,
+        c: f64,
+        below: bool,
+    ) -> Option<Polygon> {
+        let mut out: Vec<Point> = Vec::new();
+        let verts = &poly.vertices;
+
+        if verts.is_empty() {
+            return None;
+        }
+
+        let s = verts.len();
+        let mut prev = verts[s - 1];
+        let mut prev_inside = Self::inside_halfspace(prev, n_x, n_y, c, below);
+
+        for i in 0..s {
+            let curr = verts[i];
+            let curr_inside = Self::inside_halfspace(curr, n_x, n_y, c, below);
+
+            if prev_inside != curr_inside {
+                out.push(Self::line_intersection(
+                    prev, curr, n_x, n_y, c,
+                ));
+            }
+
+            if curr_inside {
+                out.push(curr);
+            }
+
+            prev = curr;
+            prev_inside = curr_inside;
+        }
+
+        out.pop(); // remove duplicate closing vertex
+
+        if out.len() < 3 {
+            return None;
+        }
+        Some(Polygon::new(out))
+    }
+
+    /// Compute area in half
+    /// Uses exact polygon clipping for speed.
     fn area_in_halfspace(
         &self,
-        plastic: &PlasticSection,
+        _plastic: &PlasticSection,
         n_x: f64,
         n_y: f64,
         c: f64,
         below: bool,
     ) -> f64 {
-        let n = 200;
-        let bounds = plastic.section_bounds(PlasticAxis::X); // Use X bounds as approximation
-
-        // Better: use section bounding box
-        let (min_x, max_x) = self.section.bounds_x();
-        let (min_y, max_y) = self.section.bounds_y();
-
-        let dx = (max_x - min_x) / n as f64;
-        let dy = (max_y - min_y) / n as f64;
-
-        let mut area = 0.0;
-
-        for i in 0..n {
-            for j in 0..n {
-                let x = min_x + (i as f64 + 0.5) * dx;
-                let y = min_y + (j as f64 + 0.5) * dy;
-                let point = Point::new(x, y);
-
-                if self.section.contains_point(point) {
-                    let proj = n_x * x + n_y * y;
-                    let in_compression = if below { proj <= c } else { proj >= c };
-
-                    if in_compression {
-                        area += dx * dy;
-                    }
-                }
+        // Clip each polygon (outer + holes) by the half-plane
+        let mut clipped_outer = Vec::new();
+        for poly in std::iter::once(&self.section.outer).chain(self.section.holes.iter()) {
+            if let Some(clipped) = Self::clip_polygon_halfspace(poly, n_x, n_y, c, below) {
+                clipped_outer.push(clipped);
             }
         }
 
-        area
+        // Sum signed areas (outer CCW positive, holes CW negative)
+        clipped_outer
+            .iter()
+            .map(|p| p.signed_area())
+            .sum::<f64>()
+            .abs()
     }
 
     /// Compute moments from PNA definition.
     fn moments_from_pna(
         &self,
-        plastic: &PlasticSection,
+        _plastic: &PlasticSection,
         n_x: f64,
         n_y: f64,
         c: f64,
         fy: f64,
     ) -> (f64, f64) {
         let n = 200;
-        let (min_x, max_x) = self.section.bounds_x();
-        let (min_y, max_y) = self.section.bounds_y();
+        let (min_x, max_x, min_y, max_y) = self.section.bounds();
 
         let dx = (max_x - min_x) / n as f64;
         let dy = (max_y - min_y) / n as f64;
@@ -300,7 +354,7 @@ impl InteractionDiagram {
         let my_ratio = load.my.abs() / m_y_rd;
 
         // Conservative linear interaction
-        let interaction = n_ratio + mx_ratio + my_ratio;
+        let _interaction = n_ratio + mx_ratio + my_ratio;
 
         // For biaxial bending, use ellipse approximation
         let bending_interaction = if mx_ratio > 0.0 || my_ratio > 0.0 {
@@ -356,48 +410,8 @@ impl InteractionDiagram {
     }
 }
 
-/// Section bounds helper.
-trait SectionBounds {
-    fn bounds_x(&self) -> (f64, f64);
-    fn bounds_y(&self) -> (f64, f64);
-}
-
-impl SectionBounds for Section {
-    fn bounds_x(&self) -> (f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-            }
-        }
-        (min_x, max_x)
-    }
-
-    fn bounds_y(&self) -> (f64, f64) {
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for v in &self.outer.vertices {
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_y, max_y)
-    }
-}
-
 /// Capacity check result.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CapacityCheck {
     pub utilization: f64,
     pub n_ratio: f64,
@@ -419,7 +433,7 @@ pub mod en1993 {
         m_y_ed: f64,
         m_z_ed: f64,
         gamma_m0: f64,
-        gamma_m1: f64,
+        _gamma_m1: f64,
     ) -> CapacityCheck {
         let props = crate::section_properties::SectionProperties::from_section(section);
         let fy = material.yield_strength;
@@ -537,6 +551,7 @@ mod tests {
     use crate::geometry::{Point, Polygon};
     use crate::material::presets::STEEL_S355;
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
 
     #[test]
     fn interaction_rectangular() {

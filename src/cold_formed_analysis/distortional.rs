@@ -2,7 +2,6 @@
 //!
 //! Per EN 1993-1-3 Annex B, AS/NZS 4600, AISI S100 Appendix 1.
 
-use crate::geometry::Point;
 use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -94,21 +93,21 @@ fn compute_open_section_distortional(
     params: &DistortionalParams,
 ) -> (f64, f64, f64) {
     let props = SectionProperties::from_section(section);
-    let area = props.area;
+    let _area = props.area;
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0; // depth
-    let b = bounds.3 - bounds.2; // width
+    let h = bounds.3 - bounds.2; // depth
+    let _b = bounds.1 - bounds.0; // width
 
     // For C/Z sections, use simplified formula from Hancock et al.
     // σ_crd = (k_φ * E * I_w / (A * L^2) + G * J / A) / (1 + ...)
 
     // Get warping and torsion constants
-    let iw = if params.iw > 0.0 {
+    let _iw = if params.iw > 0.0 {
         params.iw
     } else {
         estimate_warping_constant(section, &props)
     };
-    let j = if params.j > 0.0 {
+    let _j = if params.j > 0.0 {
         params.j
     } else {
         estimate_torsion_constant(section)
@@ -169,8 +168,8 @@ fn compute_closed_section_distortional(
 /// Distortional buckling coefficient for common sections.
 fn distortional_buckling_coefficient(section: &Section) -> f64 {
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2;
+    let b = bounds.1 - bounds.0;
     let aspect = h / b;
 
     // Simplified coefficients based on section type
@@ -197,8 +196,8 @@ fn estimate_thickness(section: &Section) -> f64 {
 /// Estimate warping constant for open section.
 fn estimate_warping_constant(section: &Section, props: &SectionProperties) -> f64 {
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2;
+    let _b = bounds.1 - bounds.0;
 
     // For C-section: I_w ≈ I_y * (h - t_f)^2 / 4
     props.iy * h.powi(2) / 4.0
@@ -206,10 +205,10 @@ fn estimate_warping_constant(section: &Section, props: &SectionProperties) -> f6
 
 /// Estimate St. Venant torsion constant.
 fn estimate_torsion_constant(section: &Section) -> f64 {
-    let props = SectionProperties::from_section(section);
+    let _props = SectionProperties::from_section(section);
     let bounds = section.bounds();
-    let h = bounds.1 - bounds.0;
-    let b = bounds.3 - bounds.2;
+    let h = bounds.3 - bounds.2;
+    let b = bounds.1 - bounds.0;
 
     // Thin-walled open: J = Σ(1/3 * b * t^3)
     // Rough estimate
@@ -236,37 +235,11 @@ pub fn local_distortional_interaction(local_capacity: f64, distortional_capacity
     }
 }
 
-trait SectionPerimeter {
-    fn perimeter(&self) -> f64;
-}
-
-impl SectionPerimeter for Section {
-    fn perimeter(&self) -> f64 {
-        let mut peri = 0.0;
-        let v = &self.outer.vertices;
-        for i in 0..v.len() {
-            let j = (i + 1) % v.len();
-            let dx = v[j].x - v[i].x;
-            let dy = v[j].y - v[i].y;
-            peri += (dx * dx + dy * dy).sqrt();
-        }
-        for hole in &self.holes {
-            let v = &hole.vertices;
-            for i in 0..v.len() {
-                let j = (i + 1) % v.len();
-                let dx = v[j].x - v[i].x;
-                let dy = v[j].y - v[i].y;
-                peri += (dx * dx + dy * dy).sqrt();
-            }
-        }
-        peri
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::material::presets::STEEL_S355;
+    use crate::section_library::ParametricSection;
 
     #[test]
     fn distortional_c_section() {
@@ -312,7 +285,52 @@ mod tests {
         let local = 100e3;
         let distortional = 120e3;
         let combined = local_distortional_interaction(local, distortional);
+        // Combined capacity must be less than the minimum individual capacity
         assert!(combined < local);
-        assert!(combined > distortional);
+        assert!(combined < distortional);
+        assert!(combined > 0.0);
+    }
+
+    #[test]
+    fn distortional_c_section_depth_gt_width() {
+        // Regression test: h (depth) and b (width) were swapped.
+        // C-section: depth=0.2, width=0.07 -> h=0.2, b=0.07
+        // sigma_crd = k_d * E * (t/h)^2
+        // With correct h=0.2: lower sigma_crd (larger h)
+        // With buggy h=0.07: higher sigma_crd (smaller h)
+        let c =
+            crate::section_library::steel::ChannelSection::new(0.2, 0.07, 0.002, 0.002, 0.0, 0.015);
+        let section = c.build();
+
+        let params = DistortionalParams {
+            fy: STEEL_S355.yield_strength,
+            e: STEEL_S355.youngs_modulus,
+            g: STEEL_S355.shear_modulus,
+            nu: STEEL_S355.poissons_ratio,
+            length: 3.0,
+            iw: 0.0,
+            j: 0.0,
+        };
+
+        let db = DistortionalBuckling::analyze(&section, &STEEL_S355, &params);
+
+        // Also compute with a section that has swapped dimensions
+        let c2 =
+            crate::section_library::steel::ChannelSection::new(0.07, 0.2, 0.002, 0.002, 0.0, 0.015);
+        let section2 = c2.build();
+        let db2 = DistortionalBuckling::analyze(&section2, &STEEL_S355, &params);
+
+        // With correct code: section1 (depth=0.2) uses h=0.2 -> lower sigma_crd
+        //                    section2 (depth=0.07) uses h=0.07 -> higher sigma_crd
+        // So sigma_crd1 < sigma_crd2
+        // With buggy code: section1 uses h=0.07 (width) -> higher sigma_crd
+        //                  section2 uses h=0.2 (width) -> lower sigma_crd
+        // So sigma_crd1 > sigma_crd2 (inverted!)
+        assert!(
+            db.sigma_crd < db2.sigma_crd,
+            "sigma_crd for depth=0.2 should be < sigma_crd for depth=0.07; got {} vs {}",
+            db.sigma_crd,
+            db2.sigma_crd
+        );
     }
 }

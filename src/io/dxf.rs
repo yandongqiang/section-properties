@@ -64,15 +64,15 @@ impl Default for DxfExportOptions {
 /// DXF color specification.
 #[derive(Debug, Clone, Copy)]
 pub enum DxfColor {
-    ByLayer = 256,
-    ByBlock = 0,
-    Red = 1,
-    Yellow = 2,
-    Green = 3,
-    Cyan = 4,
-    Blue = 5,
-    Magenta = 6,
-    White = 7,
+    ByLayer,
+    ByBlock,
+    Red,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Magenta,
+    White,
     Custom(u8),
 }
 
@@ -210,12 +210,12 @@ fn entity_polyline(
     s.push_str(" 70\n"); // Closed flag
     s.push_str(&format!("{}\n", if closed { 1 } else { 0 }));
 
-    let fmt_str = format!("{{:.{}e}}", precision);
+    let fmt_val = |v: f64| format!("{:.p$e}", v, p = precision);
     for v in vertices {
         s.push_str(" 10\n");
-        s.push_str(&format!("{}\n", fmt_str.format(&v.x)));
+        s.push_str(&format!("{}\n", fmt_val(v.x)));
         s.push_str(" 20\n");
-        s.push_str(&format!("{}\n", fmt_str.format(&v.y)));
+        s.push_str(&format!("{}\n", fmt_val(v.y)));
     }
 
     s
@@ -247,7 +247,7 @@ fn entity_centroid_marker(centroid: &Point, options: &DxfExportOptions) -> Strin
 fn entity_principal_axes(props: &SectionProperties, options: &DxfExportOptions) -> String {
     let mut s = String::new();
 
-    let (i1, i2, angle) = props.principal_moments();
+    let (_i1, _i2, angle) = props.principal_moments();
     let cx = props.centroid.x;
     let cy = props.centroid.y;
 
@@ -397,6 +397,7 @@ mod tests {
     use super::*;
     use crate::geometry::{Point, Polygon};
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]

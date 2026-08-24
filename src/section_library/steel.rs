@@ -5,19 +5,22 @@
 use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
-use crate::section_library::{ParametricSection, rectangle_polygon, rounded_rectangle_polygon};
+use crate::section_library::{
+    ParametricSection, draw_radius, rectangle_polygon, rounded_rectangle_polygon,
+};
 use std::f64::consts::PI;
 
 /// I-section / H-section / W-section (universal beam/column).
 ///
 /// Standard designation: IPE, HE, HD, HL, HP, W, UB, UC, etc.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ISection {
     pub height: f64,           // h - overall depth
     pub flange_width: f64,     // b - flange width
     pub web_thickness: f64,    // s - web thickness
     pub flange_thickness: f64, // t - flange thickness
     pub root_radius: f64,      // r - fillet radius (optional)
+    label: Option<String>,     // original standard designation if created from one
 }
 
 impl ISection {
@@ -50,6 +53,7 @@ impl ISection {
             web_thickness,
             flange_thickness,
             root_radius,
+            label: None,
         }
     }
 
@@ -279,13 +283,15 @@ impl ISection {
 
         // Convert mm to meters
         let (h, b, s, t, r) = dims;
-        Some(Self::new(
+        let mut section = Self::new(
             h / 1000.0,
             b / 1000.0,
             s / 1000.0,
             t / 1000.0,
             r / 1000.0,
-        ))
+        );
+        section.label = Some(designation.to_uppercase());
+        Some(section)
     }
 }
 
@@ -300,61 +306,84 @@ impl ParametricSection for ISection {
         let hw = b / 2.0;
         let hh = h / 2.0;
         let sw = s / 2.0;
+        let n_r = 8usize;
 
-        // Build I-section as a single polygon with fillets
-        // For simplicity, we'll create a polygon without fillets first
-        // and use rounded rectangle approach for fillets if needed
         let mut vertices = Vec::new();
 
-        // Top flange - left to right (CCW from bottom-left of top flange)
+        // CCW outline starting from bottom-left corner
+        // Bottom flange
+        vertices.push(Point::new(-hw, -hh));
+        vertices.push(Point::new(hw, -hh));
+        vertices.push(Point::new(hw, -hh + t));
+
         if r > 0.0 {
-            // With fillets - more complex, use straight segments for now
-            // Top-left corner of top flange
-            vertices.push(Point::new(-hw, hh - t));
-            vertices.push(Point::new(-hw + r, hh - t));
-            // ... fillet arc would go here
+            // Bottom right root radius: center (sw+r, -hh+t+r), theta from -pi/2 to -pi
+            let (cx, cy) = (sw + r, -hh + t + r);
+            for i in 0..=n_r {
+                let theta = -std::f64::consts::FRAC_PI_2
+                    - i as f64 / n_r as f64 * std::f64::consts::FRAC_PI_2;
+                vertices.push(Point::new(cx + r * theta.cos(), cy + r * theta.sin()));
+            }
+            // Web right side (endpoint of radius is (sw, -hh+t+r), already added)
+            // Top right root radius: center (sw+r, hh-t-r), theta from pi to pi/2
+            let (cx, cy) = (sw + r, hh - t - r);
+            for i in 0..=n_r {
+                let theta = std::f64::consts::PI
+                    - i as f64 / n_r as f64 * std::f64::consts::FRAC_PI_2;
+                vertices.push(Point::new(cx + r * theta.cos(), cy + r * theta.sin()));
+            }
         } else {
-            // Sharp corners - simple polygon
-            vertices.push(Point::new(-hw, hh - t));
-            vertices.push(Point::new(hw, hh - t));
-            vertices.push(Point::new(hw, hh));
-            vertices.push(Point::new(-hw, hh));
+            vertices.push(Point::new(sw, -hh + t));
+            vertices.push(Point::new(sw, hh - t));
         }
 
-        // Web - top to bottom (right side)
-        vertices.push(Point::new(sw, hh - t));
-        vertices.push(Point::new(sw, -hh + t));
+        // Top flange
+        vertices.push(Point::new(hw, hh - t));
+        vertices.push(Point::new(hw, hh));
+        vertices.push(Point::new(-hw, hh));
+        vertices.push(Point::new(-hw, hh - t));
 
-        // Bottom flange - right to left
-        vertices.push(Point::new(hw, -hh + t));
-        vertices.push(Point::new(hw, -hh));
-        vertices.push(Point::new(-hw, -hh));
+        if r > 0.0 {
+            // Top left root radius: center (-sw-r, hh-t-r), theta from pi/2 to 0
+            let (cx, cy) = (-sw - r, hh - t - r);
+            for i in 0..=n_r {
+                let theta = std::f64::consts::FRAC_PI_2
+                    - i as f64 / n_r as f64 * std::f64::consts::FRAC_PI_2;
+                vertices.push(Point::new(cx + r * theta.cos(), cy + r * theta.sin()));
+            }
+            // Web left side
+            // Bottom left root radius: center (-sw-r, -hh+t+r), theta from 0 to -pi/2
+            let (cx, cy) = (-sw - r, -hh + t + r);
+            for i in 0..=n_r {
+                let theta = -(i as f64) / n_r as f64 * std::f64::consts::FRAC_PI_2;
+                vertices.push(Point::new(cx + r * theta.cos(), cy + r * theta.sin()));
+            }
+        } else {
+            vertices.push(Point::new(-sw, hh - t));
+            vertices.push(Point::new(-sw, -hh + t));
+        }
+
         vertices.push(Point::new(-hw, -hh + t));
 
-        // Web - bottom to top (left side)
-        vertices.push(Point::new(-sw, -hh + t));
-        vertices.push(Point::new(-sw, hh - t));
-
-        // Close back to start (already closed by polygon)
-
         // Remove duplicate consecutive points
-        let mut clean_vertices = Vec::new();
+        let mut clean = Vec::new();
         for v in vertices {
-            if clean_vertices.last() != Some(&v) {
-                clean_vertices.push(v);
+            if clean.last() != Some(&v) {
+                clean.push(v);
             }
         }
-        // Also remove if last == first
-        if clean_vertices.len() > 1 && clean_vertices[0] == clean_vertices[clean_vertices.len() - 1]
-        {
-            clean_vertices.pop();
+        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
+            clean.pop();
         }
 
-        let outer = Polygon::new(clean_vertices);
+        let outer = Polygon::new(clean);
         Section::new(outer, Vec::new())
     }
 
     fn designation(&self) -> String {
+        if let Some(ref label) = self.label {
+            return label.clone();
+        }
         format!(
             "I {:.0}x{:.0}x{:.1}x{:.1}",
             self.height * 1000.0,
@@ -538,7 +567,7 @@ impl ParametricSection for ChannelSection {
         let b = self.flange_width;
         let s = self.web_thickness;
         let t = self.flange_thickness;
-        let r = self.root_radius;
+        let _r = self.root_radius;
         let lip = self.lip_length;
 
         let hh = h / 2.0;
@@ -546,38 +575,49 @@ impl ParametricSection for ChannelSection {
 
         let mut vertices = Vec::new();
 
-        // Start from bottom of web, go CCW
-        // Web bottom
+        // CCW polygon tracing the actual thin-walled material boundary.
+        // Web is on the left (x=0 to x=sw), flanges extend right.
+        //
+        // Start at outer bottom-left of web, go CCW:
+        //   up the inner web face, out along bottom flange inner edge,
+        //   around the bottom flange outer edge, up to top flange,
+        //   around the top flange outer edge, back along inner web to start.
+
+        // Web outer bottom
         vertices.push(Point::new(0.0, -hh));
+        // Web inner bottom
         vertices.push(Point::new(sw, -hh));
 
-        // Bottom flange - right to left (including lip if any)
-        vertices.push(Point::new(sw, -hh + t));
+        // Bottom flange: out to outer tip, up, back along inner edge
+        vertices.push(Point::new(sw + b, -hh));
         if lip > 0.0 {
+            // Lip extends upward (toward section centre) from flange outer end
+            vertices.push(Point::new(sw + b, -hh + t + lip));
+            vertices.push(Point::new(sw + b - t, -hh + t + lip));
+            vertices.push(Point::new(sw + b - t, -hh + t));
+        } else {
             vertices.push(Point::new(sw + b, -hh + t));
-            vertices.push(Point::new(sw + b, -hh));
-            vertices.push(Point::new(sw + lip, -hh));
-            vertices.push(Point::new(sw + lip, -hh + t));
         }
-        vertices.push(Point::new(sw + b, -hh + t));
-        vertices.push(Point::new(sw + b, -hh + t)); // corner
+        vertices.push(Point::new(sw, -hh + t));
 
-        // Web - bottom to top (right side)
-        vertices.push(Point::new(sw + b, hh - t));
+        // Inner web face: bottom to top
+        vertices.push(Point::new(sw, hh - t));
 
-        // Top flange - right to left (including lip if any)
+        // Top flange: out along inner edge, around outer tip, back
+        vertices.push(Point::new(sw + b - t, hh - t));
         if lip > 0.0 {
+            // Lip extends downward (toward section centre) from flange outer end
+            vertices.push(Point::new(sw + b - t, hh - t - lip));
+            vertices.push(Point::new(sw + b, hh - t - lip));
+            vertices.push(Point::new(sw + b, hh));
+        } else {
             vertices.push(Point::new(sw + b, hh - t));
             vertices.push(Point::new(sw + b, hh));
-            vertices.push(Point::new(sw + lip, hh));
-            vertices.push(Point::new(sw + lip, hh - t));
         }
-        vertices.push(Point::new(sw, hh - t));
         vertices.push(Point::new(sw, hh));
 
-        // Top of web
+        // Web outer top
         vertices.push(Point::new(0.0, hh));
-        vertices.push(Point::new(0.0, -hh));
 
         // Clean up
         let mut clean = Vec::new();
@@ -881,42 +921,20 @@ impl ParametricSection for AngleSection {
         let a = self.leg_a;
         let b = self.leg_b;
         let t = self.thickness;
-        let r = self.root_radius;
-        let rt = self.toe_radius;
 
-        // Simple angle without fillets - CCW from origin
-        let mut vertices = Vec::new();
-
-        // Leg A along +X, Leg B along +Y
-        // Start at inner corner (0,0) but shifted to center
-        // We'll center the angle around origin
         let cx = a / 2.0;
         let cy = b / 2.0;
 
-        // Build angle centered at origin
-        // Bottom leg (along X)
-        vertices.push(Point::new(-cx, -cy));
-        vertices.push(Point::new(cx, -cy));
-        vertices.push(Point::new(cx, -cy + t));
-        vertices.push(Point::new(t, -cy + t));
+        let vertices = vec![
+            Point::new(-cx, -cy),
+            Point::new(a - cx, -cy),
+            Point::new(a - cx, t - cy),
+            Point::new(t - cx, t - cy),
+            Point::new(t - cx, b - cy),
+            Point::new(-cx, b - cy),
+        ];
 
-        // Vertical leg
-        vertices.push(Point::new(t, cy - t));
-        vertices.push(Point::new(t, cy));
-        vertices.push(Point::new(0.0, cy));
-        vertices.push(Point::new(0.0, -cy));
-
-        let mut clean = Vec::new();
-        for v in vertices {
-            if clean.last() != Some(&v) {
-                clean.push(v);
-            }
-        }
-        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
-            clean.pop();
-        }
-
-        let outer = Polygon::new(clean);
+        let outer = Polygon::new(vertices);
         Section::new(outer, Vec::new())
     }
 
@@ -1000,31 +1018,20 @@ impl ParametricSection for TeeSection {
         let hh = h / 2.0;
         let sw = s / 2.0;
 
-        let mut vertices = Vec::new();
+        // CCW polygon tracing the T-section material boundary.
+        // Flange at top, web extends downward from flange centre.
+        let vertices = vec![
+            Point::new(-hw, hh),       // flange top-left
+            Point::new(hw, hh),        // flange top-right
+            Point::new(hw, hh - t),    // flange bottom-right
+            Point::new(sw, hh - t),    // web top-right
+            Point::new(sw, -hh),       // web bottom-right
+            Point::new(-sw, -hh),      // web bottom-left
+            Point::new(-sw, hh - t),   // web top-left
+            Point::new(-hw, hh - t),   // flange bottom-left
+        ];
 
-        // Top flange
-        vertices.push(Point::new(-hw, hh - t));
-        vertices.push(Point::new(hw, hh - t));
-        vertices.push(Point::new(hw, hh));
-        vertices.push(Point::new(-hw, hh));
-
-        // Web
-        vertices.push(Point::new(-sw, hh - t));
-        vertices.push(Point::new(-sw, -hh));
-        vertices.push(Point::new(sw, -hh));
-        vertices.push(Point::new(sw, hh - t));
-
-        let mut clean = Vec::new();
-        for v in vertices {
-            if clean.last() != Some(&v) {
-                clean.push(v);
-            }
-        }
-        if clean.len() > 1 && clean[0] == clean[clean.len() - 1] {
-            clean.pop();
-        }
-
-        let outer = Polygon::new(clean);
+        let outer = Polygon::new(vertices);
         Section::new(outer, Vec::new())
     }
 
@@ -1154,6 +1161,24 @@ impl CircularHollowSectionLib {
         Self::with_vertices(outer_diameter, wall_thickness, 64)
     }
 
+    pub fn from_designation(designation: &str) -> Option<Self> {
+        // Format: "CHS60X3" (outer diameter [mm] x wall thickness [mm])
+        let upper = designation.to_uppercase();
+        let rest = upper
+            .strip_prefix("CHS")?
+            .trim_start_matches('Ø');
+        let parts: Vec<&str> = rest.split('X').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let d = parts[0].parse::<f64>().ok()? / 1000.0;
+        let t = parts[1].parse::<f64>().ok()? / 1000.0;
+        if d <= 0.0 || t <= 0.0 || 2.0 * t >= d {
+            return None;
+        }
+        Some(Self::new(d, t))
+    }
+
     pub fn with_vertices(outer_diameter: f64, wall_thickness: f64, n_vertices: usize) -> Self {
         assert!(outer_diameter > 0.0, "Diameter must be positive");
         assert!(wall_thickness > 0.0, "Thickness must be positive");
@@ -1172,7 +1197,7 @@ impl CircularHollowSectionLib {
 
 impl ParametricSection for CircularHollowSectionLib {
     fn build(&self) -> Section {
-        use crate::section_library::{circle_polygon, hollow_circle_polygon};
+        use crate::section_library::hollow_circle_polygon;
         let ro = self.outer_diameter / 2.0;
         let ri = ro - self.wall_thickness;
         let (outer, inner) = hollow_circle_polygon(ro, ri, self.n_vertices);
@@ -1235,36 +1260,35 @@ impl ParametricSection for ZSection {
 
         let hh = h / 2.0;
 
+        // Z-section: top flange extends LEFT from web, bottom flange extends RIGHT.
+        // Web: x ∈ [0, s], y ∈ [-hh, hh]
+        // Top flange: x ∈ [-b, 0], y ∈ [hh-t, hh]
+        // Bottom flange: x ∈ [s, s+b], y ∈ [-hh, -hh+t]
+        // CCW outline starting from top-left outer corner.
         let mut vertices = Vec::new();
 
-        // Start bottom left
-        vertices.push(Point::new(0.0, -hh));
-        vertices.push(Point::new(s, -hh));
+        vertices.push(Point::new(-b, hh));
+        vertices.push(Point::new(0.0, hh));
+        vertices.push(Point::new(s, hh));
         vertices.push(Point::new(s, -hh + t));
         if lip > 0.0 {
-            vertices.push(Point::new(s + b, -hh + t));
-            vertices.push(Point::new(s + b, -hh));
-            vertices.push(Point::new(s + lip, -hh));
-            vertices.push(Point::new(s + lip, -hh + t));
-            vertices.push(Point::new(s + b, -hh + t));
+            vertices.push(Point::new(s + b - t, -hh + t));
+            vertices.push(Point::new(s + b - t, -hh + t + lip));
+            vertices.push(Point::new(s + b, -hh + t + lip));
         } else {
             vertices.push(Point::new(s + b, -hh + t));
         }
-
-        // Web
-        vertices.push(Point::new(s + b, hh - t));
-
-        // Top flange - on opposite side
-        if lip > 0.0 {
-            vertices.push(Point::new(s + b, hh - t));
-            vertices.push(Point::new(s + b, hh));
-            vertices.push(Point::new(s + lip, hh));
-            vertices.push(Point::new(s + lip, hh - t));
-        }
-        vertices.push(Point::new(s, hh - t));
-        vertices.push(Point::new(s, hh));
-        vertices.push(Point::new(0.0, hh));
+        vertices.push(Point::new(s + b, -hh));
+        vertices.push(Point::new(s, -hh));
         vertices.push(Point::new(0.0, -hh));
+        vertices.push(Point::new(0.0, hh - t));
+        if lip > 0.0 {
+            vertices.push(Point::new(-b + t, hh - t));
+            vertices.push(Point::new(-b + t, hh - t - lip));
+            vertices.push(Point::new(-b, hh - t - lip));
+        } else {
+            vertices.push(Point::new(-b, hh - t));
+        }
 
         let mut clean = Vec::new();
         for v in vertices {
@@ -1292,7 +1316,7 @@ impl ParametricSection for ZSection {
 }
 
 /// Built-up section: multiple sections combined.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct BuiltUpSection {
     pub components: Vec<(Box<dyn ParametricSection>, Point, Material)>, // section, offset, material
 }
@@ -1328,6 +1352,7 @@ impl BuiltUpSection {
                 v.x += offset.x;
                 v.y += offset.y;
             }
+            let n_holes = built.holes.len();
             let mut holes = built.holes;
             for h in &mut holes {
                 for v in &mut h.vertices {
@@ -1339,9 +1364,9 @@ impl BuiltUpSection {
             all_polygons.extend(holes);
             material_groups.push(crate::material::MaterialGroup::new(
                 material.clone(),
-                (current_index..current_index + 1 + built.holes.len()).collect(),
+                (current_index..current_index + 1 + n_holes).collect(),
             ));
-            current_index += 1 + built.holes.len();
+            current_index += 1 + n_holes;
         }
 
         // For simplicity, just use first polygon as outer, rest as holes
@@ -1360,10 +1385,579 @@ impl Default for BuiltUpSection {
     }
 }
 
+/// Monosymmetric I section (different top/bottom flanges).
+///
+/// Mirrors Python `mono_i_section(d, b_t, b_b, t_ft, t_fb, t_w, r, n_r)`.
+/// Centered at `(max(b_t, b_b)/2, d/2)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonosymmetricISection {
+    pub depth: f64,
+    pub top_flange_width: f64,
+    pub bottom_flange_width: f64,
+    pub top_flange_thickness: f64,
+    pub bottom_flange_thickness: f64,
+    pub web_thickness: f64,
+    pub root_radius: f64,
+    pub n_r: usize,
+}
+
+impl MonosymmetricISection {
+    pub fn new(
+        depth: f64,
+        top_flange_width: f64,
+        bottom_flange_width: f64,
+        top_flange_thickness: f64,
+        bottom_flange_thickness: f64,
+        web_thickness: f64,
+        root_radius: f64,
+        n_r: usize,
+    ) -> Self {
+        assert!(depth > 0.0, "Depth must be positive");
+        assert!(web_thickness > 0.0, "Web thickness must be positive");
+        assert!(n_r >= 1, "Need at least 1 point for radius");
+        Self {
+            depth,
+            top_flange_width,
+            bottom_flange_width,
+            top_flange_thickness,
+            bottom_flange_thickness,
+            web_thickness,
+            root_radius,
+            n_r,
+        }
+    }
+}
+
+impl ParametricSection for MonosymmetricISection {
+    fn build(&self) -> Section {
+        let d = self.depth;
+        let b_t = self.top_flange_width;
+        let b_b = self.bottom_flange_width;
+        let t_ft = self.top_flange_thickness;
+        let t_fb = self.bottom_flange_thickness;
+        let t_w = self.web_thickness;
+        let r = self.root_radius;
+        let n_r = self.n_r;
+
+        let x_c = b_t.max(b_b) * 0.5;
+        let mut points = Vec::new();
+
+        points.push(Point::new(x_c - b_b * 0.5, 0.0));
+        points.push(Point::new(x_c + b_b * 0.5, 0.0));
+        points.push(Point::new(x_c + b_b * 0.5, t_fb));
+
+        if r > 0.0 {
+            let pt = Point::new(x_c + t_w * 0.5 + r, t_fb + r);
+            points.extend(draw_radius(pt, r, 1.5 * PI, n_r, false, PI / 2.0));
+            let pt = Point::new(x_c + t_w * 0.5 + r, d - t_ft - r);
+            points.extend(draw_radius(pt, r, PI, n_r, false, PI / 2.0));
+        } else {
+            points.push(Point::new(x_c + t_w * 0.5, t_fb));
+            points.push(Point::new(x_c + t_w * 0.5, d - t_ft));
+        }
+
+        points.push(Point::new(x_c + b_t * 0.5, d - t_ft));
+        points.push(Point::new(x_c + b_t * 0.5, d));
+        points.push(Point::new(x_c - b_t * 0.5, d));
+        points.push(Point::new(x_c - b_t * 0.5, d - t_ft));
+
+        if r > 0.0 {
+            let pt = Point::new(x_c - t_w * 0.5 - r, d - t_ft - r);
+            points.extend(draw_radius(pt, r, 0.5 * PI, n_r, false, PI / 2.0));
+            let pt = Point::new(x_c - t_w * 0.5 - r, t_fb + r);
+            points.extend(draw_radius(pt, r, 0.0, n_r, false, PI / 2.0));
+        } else {
+            points.push(Point::new(x_c - t_w * 0.5, d - t_ft));
+            points.push(Point::new(x_c - t_w * 0.5, t_fb));
+        }
+
+        points.push(Point::new(x_c - b_b * 0.5, t_fb));
+
+        Section::new(Polygon::new(points), vec![])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "Mono-I {:.0}x{:.0}/{:.0}",
+            self.depth * 1000.0,
+            self.top_flange_width * 1000.0,
+            self.bottom_flange_width * 1000.0
+        )
+    }
+}
+
+/// Tapered flange I section.
+///
+/// Mirrors Python `tapered_flange_i_section(d, b, t_f, t_w, r_r, r_f, alpha, n_r)`.
+/// Centered at `(b/2, d/2)`. `alpha` is in degrees.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaperedFlangeISection {
+    pub depth: f64,
+    pub width: f64,
+    pub mid_flange_thickness: f64,
+    pub web_thickness: f64,
+    pub root_radius: f64,
+    pub flange_radius: f64,
+    pub alpha: f64,
+    pub n_r: usize,
+}
+
+impl TaperedFlangeISection {
+    pub fn new(
+        depth: f64,
+        width: f64,
+        mid_flange_thickness: f64,
+        web_thickness: f64,
+        root_radius: f64,
+        flange_radius: f64,
+        alpha_deg: f64,
+        n_r: usize,
+    ) -> Self {
+        assert!(depth > 0.0 && width > 0.0, "Dimensions must be positive");
+        assert!(n_r >= 1, "Need at least 1 point for radius");
+        Self {
+            depth,
+            width,
+            mid_flange_thickness,
+            web_thickness,
+            root_radius,
+            flange_radius,
+            alpha: alpha_deg,
+            n_r,
+        }
+    }
+}
+
+impl ParametricSection for TaperedFlangeISection {
+    fn build(&self) -> Section {
+        let d = self.depth;
+        let b = self.width;
+        let t_f = self.mid_flange_thickness;
+        let t_w = self.web_thickness;
+        let r_r = self.root_radius;
+        let r_f = self.flange_radius;
+        let n_r = self.n_r;
+        let alpha = self.alpha * PI / 180.0;
+
+        let x1 = b * 0.25 - t_w * 0.25 - r_f * (1.0 - alpha.sin());
+        let y1 = x1 * alpha.tan();
+        let x2 = b * 0.25 - t_w * 0.25 - r_r * (1.0 - alpha.sin());
+        let y2 = x2 * alpha.tan();
+        let y_t = t_f - y1 - r_f * alpha.cos();
+
+        let mut points = Vec::new();
+        points.push(Point::new(0.0, 0.0));
+        points.push(Point::new(b, 0.0));
+
+        // Bottom right flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(b, y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(b - r_f + r_f * theta.cos(), y_t + r_f * theta.sin()));
+            }
+        }
+        // Bottom right root radius
+        if r_r == 0.0 {
+            points.push(Point::new(b * 0.5 + t_w * 0.5, t_f + y2));
+        } else {
+            for i in 0..n_r {
+                let theta = (1.5 * PI - alpha)
+                    - i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    b * 0.5 + t_w * 0.5 + r_r + r_r * theta.cos(),
+                    t_f + y2 + r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Top right root radius
+        if r_r == 0.0 {
+            points.push(Point::new(b * 0.5 + t_w * 0.5, d - t_f - y2));
+        } else {
+            for i in 0..n_r {
+                let theta = PI - i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    b * 0.5 + t_w * 0.5 + r_r + r_r * theta.cos(),
+                    d - t_f - y2 - r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Top right flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(b, d - y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = (1.5 * PI + alpha)
+                    + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(b - r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+            }
+        }
+        points.push(Point::new(b, d));
+        points.push(Point::new(0.0, d));
+
+        // Top left flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(0.0, d - y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = PI + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+            }
+        }
+        // Top left root radius
+        if r_r == 0.0 {
+            points.push(Point::new(b * 0.5 - t_w * 0.5, d - t_f - y2));
+        } else {
+            for i in 0..n_r {
+                let theta = (PI / 2.0 - alpha)
+                    - i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    b * 0.5 - t_w * 0.5 - r_r + r_r * theta.cos(),
+                    d - t_f - y2 - r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Bottom left root radius
+        if r_r == 0.0 {
+            points.push(Point::new(b * 0.5 - t_w * 0.5, t_f + y2));
+        } else {
+            for i in 0..n_r {
+                let theta = -(i as f64) / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    b * 0.5 - t_w * 0.5 - r_r + r_r * theta.cos(),
+                    t_f + y2 + r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Bottom left flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(0.0, y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = (PI / 2.0 + alpha)
+                    + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(r_f + r_f * theta.cos(), y_t + r_f * theta.sin()));
+            }
+        }
+
+        Section::new(Polygon::new(points), vec![])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "Tapered-I {:.0}x{:.0}",
+            self.depth * 1000.0,
+            self.width * 1000.0
+        )
+    }
+}
+
+/// Tapered flange channel section.
+///
+/// Mirrors Python `tapered_flange_channel(d, b, t_f, t_w, r_r, r_f, alpha, n_r)`.
+/// Bottom left corner at origin. `alpha` is in degrees.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaperedFlangeChannel {
+    pub depth: f64,
+    pub width: f64,
+    pub mid_flange_thickness: f64,
+    pub web_thickness: f64,
+    pub root_radius: f64,
+    pub flange_radius: f64,
+    pub alpha: f64,
+    pub n_r: usize,
+}
+
+impl TaperedFlangeChannel {
+    pub fn new(
+        depth: f64,
+        width: f64,
+        mid_flange_thickness: f64,
+        web_thickness: f64,
+        root_radius: f64,
+        flange_radius: f64,
+        alpha_deg: f64,
+        n_r: usize,
+    ) -> Self {
+        assert!(depth > 0.0 && width > 0.0, "Dimensions must be positive");
+        assert!(n_r >= 1, "Need at least 1 point for radius");
+        Self {
+            depth,
+            width,
+            mid_flange_thickness,
+            web_thickness,
+            root_radius,
+            flange_radius,
+            alpha: alpha_deg,
+            n_r,
+        }
+    }
+}
+
+impl ParametricSection for TaperedFlangeChannel {
+    fn build(&self) -> Section {
+        let d = self.depth;
+        let b = self.width;
+        let t_f = self.mid_flange_thickness;
+        let t_w = self.web_thickness;
+        let r_r = self.root_radius;
+        let r_f = self.flange_radius;
+        let n_r = self.n_r;
+        let alpha = self.alpha * PI / 180.0;
+
+        let x1 = b * 0.5 - t_w * 0.5 - r_f * (1.0 - alpha.sin());
+        let y1 = x1 * alpha.tan();
+        let x2 = b * 0.5 - t_w * 0.5 - r_r * (1.0 - alpha.sin());
+        let y2 = x2 * alpha.tan();
+        let y_t = t_f - y1 - r_f * alpha.cos();
+
+        let mut points = Vec::new();
+        points.push(Point::new(0.0, 0.0));
+        points.push(Point::new(b, 0.0));
+
+        // Bottom right flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(b, y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(b - r_f + r_f * theta.cos(), y_t + r_f * theta.sin()));
+            }
+        }
+        // Bottom right root radius
+        if r_r == 0.0 {
+            points.push(Point::new(t_w, t_f + y2));
+        } else {
+            for i in 0..n_r {
+                let theta = (1.5 * PI - alpha)
+                    - i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    t_w + r_r + r_r * theta.cos(),
+                    t_f + y2 + r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Top right root radius
+        if r_r == 0.0 {
+            points.push(Point::new(t_w, d - t_f - y2));
+        } else {
+            for i in 0..n_r {
+                let theta = PI - i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(
+                    t_w + r_r + r_r * theta.cos(),
+                    d - t_f - y2 - r_r * alpha.cos() + r_r * theta.sin(),
+                ));
+            }
+        }
+        // Top right flange toe radius
+        if r_f == 0.0 {
+            points.push(Point::new(b, d - y_t));
+        } else {
+            for i in 0..n_r {
+                let theta = (1.5 * PI + alpha)
+                    + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
+                points.push(Point::new(b - r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+            }
+        }
+        points.push(Point::new(b, d));
+        points.push(Point::new(0.0, d));
+
+        Section::new(Polygon::new(points), vec![])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "Tapered-C {:.0}x{:.0}",
+            self.depth * 1000.0,
+            self.width * 1000.0
+        )
+    }
+}
+
+/// Box girder section (trapezoidal box with hole).
+///
+/// Mirrors Python `box_girder_section(d, b_t, b_b, t_ft, t_fb, t_w)`.
+/// Centered at `(max(b_t, b_b)/2, d/2)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxGirderSection {
+    pub depth: f64,
+    pub top_width: f64,
+    pub bottom_width: f64,
+    pub top_thickness: f64,
+    pub bottom_thickness: f64,
+    pub web_thickness: f64,
+}
+
+impl BoxGirderSection {
+    pub fn new(
+        depth: f64,
+        top_width: f64,
+        bottom_width: f64,
+        top_thickness: f64,
+        bottom_thickness: f64,
+        web_thickness: f64,
+    ) -> Self {
+        assert!(depth > 0.0, "Depth must be positive");
+        assert!(top_thickness + bottom_thickness < depth, "Flanges too thick");
+        Self {
+            depth,
+            top_width,
+            bottom_width,
+            top_thickness,
+            bottom_thickness,
+            web_thickness,
+        }
+    }
+}
+
+impl ParametricSection for BoxGirderSection {
+    fn build(&self) -> Section {
+        let d = self.depth;
+        let b_t = self.top_width;
+        let b_b = self.bottom_width;
+        let t_ft = self.top_thickness;
+        let t_fb = self.bottom_thickness;
+        let t_w = self.web_thickness;
+        let x_c = b_t.max(b_b) * 0.5;
+
+        let (phi_b, phi_t) = if b_t < b_b {
+            let phi_b = (d).atan2(0.5 * (b_b - b_t));
+            (phi_b, PI - phi_b)
+        } else {
+            let phi_t = (d).atan2(0.5 * (b_t - b_b));
+            (PI - phi_t, phi_t)
+        };
+
+        let x_bot = t_fb / (PI - phi_b).tan();
+        let x_top = t_ft / (PI - phi_t).tan();
+        let web_x = (t_w / (PI - phi_b).sin()).abs();
+
+        let outer = Polygon::new(vec![
+            Point::new(x_c - 0.5 * b_b, 0.0),
+            Point::new(x_c + 0.5 * b_b, 0.0),
+            Point::new(x_c + 0.5 * b_t, d),
+            Point::new(x_c - 0.5 * b_t, d),
+        ]);
+
+        let inner = Polygon::new(vec![
+            Point::new(x_c - 0.5 * b_b - x_bot + web_x, t_fb),
+            Point::new(x_c + 0.5 * b_b + x_bot - web_x, t_fb),
+            Point::new(x_c + 0.5 * b_t + x_top - web_x, d - t_ft),
+            Point::new(x_c - 0.5 * b_t - x_top + web_x, d - t_ft),
+        ]);
+
+        Section::new(outer, vec![inner])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "BoxGirder {:.0}x{:.0}/{:.0}",
+            self.depth * 1000.0,
+            self.top_width * 1000.0,
+            self.bottom_width * 1000.0
+        )
+    }
+}
+
+/// Bulb section (for shipbuilding).
+///
+/// Mirrors Python `bulb_section(d, b, t, r, n_r, d_b)`.
+/// Bottom left corner at `(-t/2, 0)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BulbSection {
+    pub depth: f64,
+    pub bulb_width: f64,
+    pub web_thickness: f64,
+    pub radius: f64,
+    pub n_r: usize,
+    pub bulb_depth: Option<f64>,
+}
+
+impl BulbSection {
+    pub fn new(depth: f64, bulb_width: f64, web_thickness: f64, radius: f64, n_r: usize) -> Self {
+        assert!(depth > 0.0 && web_thickness > 0.0, "Dimensions must be positive");
+        assert!(n_r >= 2, "Need at least 2 points for radius");
+        Self {
+            depth,
+            bulb_width,
+            web_thickness,
+            radius,
+            n_r,
+            bulb_depth: None,
+        }
+    }
+
+    pub fn with_bulb_depth(
+        depth: f64,
+        bulb_width: f64,
+        web_thickness: f64,
+        radius: f64,
+        n_r: usize,
+        bulb_depth: f64,
+    ) -> Self {
+        Self {
+            depth,
+            bulb_width,
+            web_thickness,
+            radius,
+            n_r,
+            bulb_depth: Some(bulb_depth),
+        }
+    }
+}
+
+impl ParametricSection for BulbSection {
+    fn build(&self) -> Section {
+        let d = self.depth;
+        let b = self.bulb_width;
+        let t = self.web_thickness;
+        let r = self.radius;
+        let n_r = self.n_r;
+
+        let d_b = self.bulb_depth.unwrap_or_else(|| {
+            r * (PI / 3.0).cos() / (PI / 6.0).cos() + r + b * (PI / 6.0).tan()
+        });
+
+        let mut points = Vec::new();
+        points.push(Point::new(-t * 0.5, 0.0));
+        points.push(Point::new(t * 0.5, 0.0));
+
+        // Additional radius at bulb start
+        let dc = r / (2.0 / 3.0 * PI / 2.0).sin();
+        let ptb0 = Point::new(
+            t * 0.5 + dc * (PI / 6.0).cos(),
+            d - d_b - dc * (PI / 3.0).cos(),
+        );
+        points.extend(draw_radius(ptb0, r, PI, n_r, false, PI / 3.0));
+
+        // Bulb radius
+        let ptb = Point::new(b + t * 0.5 - r, d - r);
+        let mut arc1 = draw_radius(ptb, r, -PI / 3.0, n_r, true, PI / 3.0);
+        arc1.pop(); // remove duplicate
+        points.extend(arc1);
+        points.extend(draw_radius(ptb, r, 0.0, n_r, true, PI / 2.0));
+
+        points.push(Point::new(-t * 0.5, d));
+
+        Section::new(Polygon::new(points), vec![])
+    }
+
+    fn designation(&self) -> String {
+        format!(
+            "Bulb {:.0}x{:.0}x{:.0}",
+            self.depth * 1000.0,
+            self.bulb_width * 1000.0,
+            self.web_thickness * 1000.0
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::material::presets::STEEL_S355;
+    use std::f64::consts::PI;
 
     #[test]
     fn i_section_basic() {
@@ -1389,6 +1983,31 @@ mod tests {
         let c = ChannelSection::new(0.2, 0.07, 0.006, 0.009, 0.008, 0.0);
         let sec = c.build();
         assert!(sec.area() > 0.0);
+
+        // Polygon area = web (tw*h) + 2 flanges (b*tf)
+        // Note: this is the exact polygon area, not the thin-walled approximation
+        // which would be 2*b*tf + (h-2*tf)*tw.
+        let expected_area = 0.006 * 0.2 + 2.0 * 0.07 * 0.009;
+        assert!(
+            (sec.area() - expected_area).abs() / expected_area < 0.01,
+            "channel area = {}, expected {}",
+            sec.area(),
+            expected_area
+        );
+    }
+
+    #[test]
+    fn channel_section_with_lip_area() {
+        // Lipped channel: area = tw*h + 2*b*tf + 2*lip*tf
+        let c = ChannelSection::new(0.2, 0.07, 0.003, 0.005, 0.0, 0.015);
+        let sec = c.build();
+        let expected_area = 0.003 * 0.2 + 2.0 * 0.07 * 0.005 + 2.0 * 0.015 * 0.005;
+        assert!(
+            (sec.area() - expected_area).abs() / expected_area < 0.05,
+            "lipped channel area = {}, expected {}",
+            sec.area(),
+            expected_area
+        );
     }
 
     #[test]
@@ -1418,7 +2037,7 @@ mod tests {
 
     #[test]
     fn rhs_section() {
-        let rhs = RectangularHollowSection::new(0.2, 0.1, 0.005, 0.008, 0.003);
+        let rhs = RectangularHollowSection::new(0.2, 0.1, 0.005, 0.0, 0.0);
         let sec = rhs.build();
         assert!(sec.area() > 0.0);
         // Area = outer - inner
@@ -1439,5 +2058,793 @@ mod tests {
         let z = ZSection::new(0.2, 0.07, 0.002, 0.002, 0.015);
         let sec = z.build();
         assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn z_section_area_and_centroid() {
+        let h = 0.2;
+        let b = 0.07;
+        let s = 0.002;
+        let t = 0.002;
+        let lip = 0.015;
+        let z = ZSection::new(h, b, s, t, lip);
+        let sec = z.build();
+        let area = sec.area();
+        let expected = s * h + 2.0 * b * t + 2.0 * lip * t;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "Z-section area: got {}, expected {}",
+            area,
+            expected
+        );
+        let c = sec.centroid();
+        assert!(
+            (c.x - s / 2.0).abs() < 1e-9,
+            "Z-section cx: got {}, expected {}",
+            c.x,
+            s / 2.0
+        );
+        assert!(
+            c.y.abs() < 1e-9,
+            "Z-section cy: got {}, expected 0",
+            c.y
+        );
+    }
+
+    #[test]
+    fn z_section_no_lip_area() {
+        let h = 0.2;
+        let b = 0.07;
+        let s = 0.002;
+        let t = 0.002;
+        let z = ZSection::new(h, b, s, t, 0.0);
+        let sec = z.build();
+        let area = sec.area();
+        let expected = s * h + 2.0 * b * t;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "Z-section (no lip) area: got {}, expected {}",
+            area,
+            expected
+        );
+    }
+
+    #[test]
+    fn nastran_chan_area() {
+        let chan = NastranChan::new(200.0, 50.0, 5.0, 10.0);
+        let sec = chan.build();
+        let area = sec.area();
+        let h = 0.2;
+        let b = 0.05;
+        let tw = 0.005;
+        let tf = 0.01;
+        let expected = tw * h + 2.0 * b * tf;
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "NastranChan area: got {}, expected {}",
+            area,
+            expected
+        );
+    }
+
+    #[test]
+    fn monosymmetric_i_section() {
+        let mono = MonosymmetricISection::new(0.2, 0.05, 0.13, 0.012, 0.008, 0.006, 0.008, 16);
+        let sec = mono.build();
+        assert!(sec.area() > 0.0);
+        // Area = web + top flange + bottom flange (neglecting radii)
+        let expected = 0.006 * 0.2 + 0.05 * 0.012 + 0.13 * 0.008;
+        assert!(
+            (sec.area() - expected).abs() / expected < 0.1,
+            "Mono-I area: got {}, expected {}",
+            sec.area(),
+            expected
+        );
+    }
+
+    #[test]
+    fn tapered_flange_i_section() {
+        let tfi = TaperedFlangeISection::new(0.588, 0.191, 0.0272, 0.0152, 0.0178, 0.0089, 8.0, 16);
+        let sec = tfi.build();
+        assert!(sec.area() > 0.0);
+        let props = crate::section_properties::SectionProperties::from_section(&sec);
+        assert!(props.ix > 0.0);
+        assert!(props.iy > 0.0);
+    }
+
+    #[test]
+    fn tapered_flange_i_no_radius() {
+        let tfi = TaperedFlangeISection::new(0.2, 0.1, 0.01, 0.006, 0.0, 0.0, 8.0, 1);
+        let sec = tfi.build();
+        assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn tapered_flange_channel() {
+        let tfc = TaperedFlangeChannel::new(0.254, 0.089, 0.0146, 0.0061, 0.0178, 0.0089, 8.0, 16);
+        let sec = tfc.build();
+        assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn tapered_flange_channel_no_radius() {
+        let tfc = TaperedFlangeChannel::new(0.2, 0.1, 0.01, 0.006, 0.0, 0.0, 8.0, 1);
+        let sec = tfc.build();
+        assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn box_girder_section() {
+        let bg = BoxGirderSection::new(1.2, 1.2, 0.4, 0.1, 0.08, 0.05);
+        let sec = bg.build();
+        assert!(sec.area() > 0.0);
+        // Outer trapezoid area
+        let outer = 0.5 * (1.2 + 0.4) * 1.2;
+        // Inner trapezoid (approximate)
+        assert!(sec.area() < outer);
+    }
+
+    #[test]
+    fn box_girder_symmetric() {
+        let bg = BoxGirderSection::new(1.0, 0.6, 0.6, 0.05, 0.05, 0.03);
+        let sec = bg.build();
+        // For symmetric box: outer = b*d, inner = (b-2*tw)*(d-2*tf)
+        let expected = 0.6 * 1.0 - (0.6 - 2.0 * 0.03) * (1.0 - 2.0 * 0.05);
+        assert!(
+            (sec.area() - expected).abs() / expected < 0.01,
+            "Box girder symm: got {}, expected {}",
+            sec.area(),
+            expected
+        );
+    }
+
+    #[test]
+    fn bulb_section() {
+        let bulb = BulbSection::new(0.24, 0.034, 0.012, 0.01, 16);
+        let sec = bulb.build();
+        assert!(sec.area() > 0.0);
+        // Area should be at least the web area
+        assert!(sec.area() > 0.012 * 0.24);
+    }
+
+    #[test]
+    fn bulb_section_with_depth() {
+        let bulb = BulbSection::with_bulb_depth(0.24, 0.034, 0.012, 0.01, 16, 0.05);
+        let sec = bulb.build();
+        assert!(sec.area() > 0.0);
+    }
+}
+
+// ============================================================================
+// NASTRAN Standard Sections (Aerospace)
+// ============================================================================
+// Based on NASTRAN PBAR/PBARL/PROD section definitions
+// All dimensions in mm, converted to meters internally
+
+/// NASTRAN BAR section (solid rod)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranBar {
+    pub diameter: f64, // Diameter [mm]
+}
+
+impl NastranBar {
+    pub fn new(diameter: f64) -> Self {
+        assert!(diameter > 0.0);
+        Self { diameter }
+    }
+}
+
+impl ParametricSection for NastranBar {
+    fn build(&self) -> Section {
+        use crate::section_library::circle_polygon;
+        Section::new(circle_polygon(self.diameter / 2000.0, 32), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN BAR Ø{:.1}", self.diameter)
+    }
+}
+
+/// NASTRAN BOX section (rectangular tube)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranBox {
+    pub width: f64,       // Width [mm]
+    pub height: f64,      // Height [mm]
+    pub thickness: f64,   // Wall thickness [mm]
+}
+
+impl NastranBox {
+    pub fn new(width: f64, height: f64, thickness: f64) -> Self {
+        assert!(width > 0.0 && height > 0.0 && thickness > 0.0);
+        assert!(2.0 * thickness < width.min(height));
+        Self { width, height, thickness }
+    }
+}
+
+impl ParametricSection for NastranBox {
+    fn build(&self) -> Section {
+        use crate::section_library::rectangle_polygon;
+        let outer = rectangle_polygon(self.width / 1000.0, self.height / 1000.0);
+        let inner = rectangle_polygon(
+            (self.width - 2.0 * self.thickness) / 1000.0,
+            (self.height - 2.0 * self.thickness) / 1000.0,
+        );
+        Section::new(outer, vec![inner])
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN BOX {:.1}x{:.1}x{:.1}", self.width, self.height, self.thickness)
+    }
+}
+
+/// NASTRAN CHAN section (channel)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranChan {
+    pub height: f64,        // Height [mm]
+    pub width: f64,         // Flange width [mm]
+    pub web_thick: f64,     // Web thickness [mm]
+    pub flange_thick: f64,  // Flange thickness [mm]
+}
+
+impl NastranChan {
+    pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
+        assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
+        Self { height, width, web_thick, flange_thick }
+    }
+}
+
+impl ParametricSection for NastranChan {
+    fn build(&self) -> Section {
+        // Build channel section similar to ChannelSection
+        let h = self.height / 1000.0;
+        let b = self.width / 1000.0;
+        let tw = self.web_thick / 1000.0;
+        let tf = self.flange_thick / 1000.0;
+
+        let hh = h / 2.0;
+        let vertices = vec![
+            crate::geometry::Point::new(0.0, -hh),
+            crate::geometry::Point::new(tw, -hh),
+            crate::geometry::Point::new(tw + b, -hh),
+            crate::geometry::Point::new(tw + b, -hh + tf),
+            crate::geometry::Point::new(tw, -hh + tf),
+            crate::geometry::Point::new(tw, hh - tf),
+            crate::geometry::Point::new(tw + b, hh - tf),
+            crate::geometry::Point::new(tw + b, hh),
+            crate::geometry::Point::new(tw, hh),
+            crate::geometry::Point::new(0.0, hh),
+        ];
+
+        Section::new(crate::geometry::Polygon::new(vertices), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN CHAN {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+    }
+}
+
+/// NASTRAN CROSS section (cruciform)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranCross {
+    pub height: f64,      // Overall height [mm]
+    pub width: f64,       // Overall width [mm]
+    pub thickness: f64,   // Arm thickness [mm]
+}
+
+impl NastranCross {
+    pub fn new(height: f64, width: f64, thickness: f64) -> Self {
+        assert!(height > 0.0 && width > 0.0 && thickness > 0.0);
+        assert!(thickness < height.min(width));
+        Self { height, width, thickness }
+    }
+}
+
+impl ParametricSection for NastranCross {
+    fn build(&self) -> Section {
+        // Cruciform: two rectangles crossing at center
+        let h = self.height / 1000.0;
+        let b = self.width / 1000.0;
+        let t = self.thickness / 1000.0;
+
+        let mut vertices = Vec::new();
+
+        // Vertical arm (centered)
+        let vw = t / 2.0;
+        let vh = h / 2.0;
+        // Horizontal arm (centered)
+        let hw = b / 2.0;
+        let hh = t / 2.0;
+
+        // Build as polygon with hole (cross shape)
+        // Outer boundary - approximate as octagon
+        vertices.push(crate::geometry::Point::new(-vw, -vh));
+        vertices.push(crate::geometry::Point::new(vw, -vh));
+        vertices.push(crate::geometry::Point::new(vw, -hh));
+        vertices.push(crate::geometry::Point::new(hw, -hh));
+        vertices.push(crate::geometry::Point::new(hw, hh));
+        vertices.push(crate::geometry::Point::new(vw, hh));
+        vertices.push(crate::geometry::Point::new(vw, vh));
+        vertices.push(crate::geometry::Point::new(-vw, vh));
+        vertices.push(crate::geometry::Point::new(-vw, hh));
+        vertices.push(crate::geometry::Point::new(-hw, hh));
+        vertices.push(crate::geometry::Point::new(-hw, -hh));
+        vertices.push(crate::geometry::Point::new(-vw, -hh));
+
+        Section::new(crate::geometry::Polygon::new(vertices), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN CROSS {:.1}x{:.1}x{:.1}", self.height, self.width, self.thickness)
+    }
+}
+
+/// NASTRAN I section (I-beam)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranI {
+    pub height: f64,        // Overall depth [mm]
+    pub width: f64,         // Flange width [mm]
+    pub web_thick: f64,     // Web thickness [mm]
+    pub flange_thick: f64,  // Flange thickness [mm]
+}
+
+impl NastranI {
+    pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
+        assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
+        assert!(2.0 * flange_thick < height);
+        assert!(web_thick < width);
+        Self { height, width, web_thick, flange_thick }
+    }
+}
+
+impl ParametricSection for NastranI {
+    fn build(&self) -> Section {
+        // Reuse ISection logic
+        let i_sec = ISection::new(
+            self.height / 1000.0,
+            self.width / 1000.0,
+            self.web_thick / 1000.0,
+            self.flange_thick / 1000.0,
+            0.0, // No root radius for NASTRAN
+        );
+        i_sec.build()
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN I {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+    }
+}
+
+/// NASTRAN TEE section (T-beam)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranTee {
+    pub height: f64,        // Overall height [mm]
+    pub width: f64,         // Flange width [mm]
+    pub web_thick: f64,     // Web thickness [mm]
+    pub flange_thick: f64,  // Flange thickness [mm]
+}
+
+impl NastranTee {
+    pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
+        assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
+        assert!(flange_thick < height);
+        Self { height, width, web_thick, flange_thick }
+    }
+}
+
+impl ParametricSection for NastranTee {
+    fn build(&self) -> Section {
+        let t_sec = TeeSection::new(
+            self.height / 1000.0,
+            self.width / 1000.0,
+            self.web_thick / 1000.0,
+            self.flange_thick / 1000.0,
+            0.0,
+        );
+        t_sec.build()
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN TEE {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+    }
+}
+
+/// NASTRAN TUBE section (circular hollow)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranTube {
+    pub outer_diameter: f64, // Outer diameter [mm]
+    pub wall_thickness: f64, // Wall thickness [mm]
+}
+
+impl NastranTube {
+    pub fn new(outer_diameter: f64, wall_thickness: f64) -> Self {
+        assert!(outer_diameter > 0.0 && wall_thickness > 0.0);
+        assert!(2.0 * wall_thickness < outer_diameter);
+        Self { outer_diameter, wall_thickness }
+    }
+}
+
+impl ParametricSection for NastranTube {
+    fn build(&self) -> Section {
+        use crate::section_library::hollow_circle_polygon;
+        let ro = self.outer_diameter / 2000.0;
+        let ri = ro - self.wall_thickness / 1000.0;
+        let (outer, inner) = hollow_circle_polygon(ro, ri, 48);
+        Section::new(outer, vec![inner])
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN TUBE Ø{:.1}x{:.1}", self.outer_diameter, self.wall_thickness)
+    }
+}
+
+/// NASTRAN ZED section (Z-purlin)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NastranZed {
+    pub height: f64,        // Overall depth [mm]
+    pub width: f64,         // Flange width [mm]
+    pub web_thick: f64,     // Web thickness [mm]
+    pub flange_thick: f64,  // Flange thickness [mm]
+}
+
+impl NastranZed {
+    pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
+        assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
+        Self { height, width, web_thick, flange_thick }
+    }
+}
+
+impl ParametricSection for NastranZed {
+    fn build(&self) -> Section {
+        let z_sec = ZSection::new(
+            self.height / 1000.0,
+            self.width / 1000.0,
+            self.web_thick / 1000.0,
+            self.flange_thick / 1000.0,
+            0.0, // No lip for basic NASTRAN ZED
+        );
+        z_sec.build()
+    }
+
+    fn designation(&self) -> String {
+        format!("NASTRAN ZED {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+    }
+}
+
+// Convenience constructors for common NASTRAN sections
+impl NastranChan {
+    /// Standard channel sizes (approximate)
+    pub fn standard_c3x4_1() -> Self { Self::new(76.2, 34.9, 4.4, 6.9) } // C3x4.1
+    pub fn standard_c4x5_4() -> Self { Self::new(101.6, 38.1, 4.8, 8.1) } // C4x5.4
+    pub fn standard_c5x6_7() -> Self { Self::new(127.0, 41.3, 5.1, 8.9) } // C5x6.7
+    pub fn standard_c6x8_2() -> Self { Self::new(152.4, 44.5, 5.1, 9.7) } // C6x8.2
+    pub fn standard_c7x9_8() -> Self { Self::new(177.8, 47.6, 5.3, 10.4) } // C7x9.8
+    pub fn standard_c8x11_5() -> Self { Self::new(203.2, 50.8, 5.6, 11.2) } // C8x11.5
+    pub fn standard_c9x13_4() -> Self { Self::new(228.6, 53.3, 6.1, 11.9) } // C9x13.4
+    pub fn standard_c10x15_3() -> Self { Self::new(254.0, 55.9, 6.4, 12.7) } // C10x15.3
+    pub fn standard_c12x20_7() -> Self { Self::new(304.8, 63.5, 7.1, 14.5) } // C12x20.7
+    pub fn standard_c15x33_9() -> Self { Self::new(381.0, 76.2, 10.2, 16.8) } // C15x33.9
+}
+
+impl NastranI {
+    /// Standard I-beam sizes (approximate W-shapes)
+    pub fn standard_w4x13() -> Self { Self::new(101.6, 101.6, 5.8, 6.4) } // W4x13
+    pub fn standard_w6x15() -> Self { Self::new(152.4, 101.6, 5.8, 6.6) } // W6x15
+    pub fn standard_w8x18() -> Self { Self::new(203.2, 133.4, 6.1, 7.4) } // W8x18
+    pub fn standard_w10x22() -> Self { Self::new(254.0, 146.1, 6.1, 8.6) } // W10x22
+    pub fn standard_w12x26() -> Self { Self::new(304.8, 165.1, 6.4, 9.7) } // W12x26
+    pub fn standard_w14x30() -> Self { Self::new(355.6, 177.8, 6.9, 9.7) } // W14x30
+    pub fn standard_w16x31() -> Self { Self::new(406.4, 203.2, 7.4, 9.9) } // W16x31
+    pub fn standard_w18x35() -> Self { Self::new(457.2, 203.2, 7.6, 10.4) } // W18x35
+    pub fn standard_w21x44() -> Self { Self::new(533.4, 203.2, 8.9, 11.2) } // W21x44
+    pub fn standard_w24x55() -> Self { Self::new(609.6, 203.2, 9.7, 12.7) } // W24x55
+}
+
+impl NastranTube {
+    /// Standard tube sizes (OD x WT in mm)
+    pub fn standard_25x3() -> Self { Self::new(25.0, 3.0) }
+    pub fn standard_32x3() -> Self { Self::new(32.0, 3.0) }
+    pub fn standard_38x4() -> Self { Self::new(38.0, 4.0) }
+    pub fn standard_51x5() -> Self { Self::new(51.0, 5.0) }
+    pub fn standard_63x6() -> Self { Self::new(63.0, 6.0) }
+    pub fn standard_76x6() -> Self { Self::new(76.0, 6.0) }
+    pub fn standard_102x8() -> Self { Self::new(102.0, 8.0) }
+    pub fn standard_152x10() -> Self { Self::new(152.0, 10.0) }
+}
+
+impl NastranZed {
+    /// Standard Z-purlin sizes
+    pub fn standard_z100() -> Self { Self::new(100.0, 50.0, 2.0, 2.0) }
+    pub fn standard_z150() -> Self { Self::new(150.0, 60.0, 2.5, 2.5) }
+    pub fn standard_z200() -> Self { Self::new(200.0, 70.0, 3.0, 3.0) }
+    pub fn standard_z250() -> Self { Self::new(250.0, 80.0, 3.5, 3.5) }
+    pub fn standard_z300() -> Self { Self::new(300.0, 90.0, 4.0, 4.0) }
+}
+
+// ============================================================================
+// Bridge Girder Sections (AS 5100, AASHTO, EN 1992)
+// ============================================================================
+
+/// Super-T Girder (Australian standard per AS 5100)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SuperTGirder {
+    /// Girder type: 1000, 1200, 1400, 1600, 1800, 2000 (depth in mm)
+    pub girder_type: SuperTType,
+    /// Top flange width [mm]
+    pub top_flange_width: f64,
+    /// Top flange thickness [mm]
+    pub top_flange_thick: f64,
+    /// Bottom flange width [mm]
+    pub bot_flange_width: f64,
+    /// Bottom flange thickness [mm]
+    pub bot_flange_thick: f64,
+    /// Web thickness [mm]
+    pub web_thick: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SuperTType {
+    Type1000, // 1000mm deep
+    Type1200, // 1200mm deep
+    Type1400, // 1400mm deep
+    Type1600, // 1600mm deep
+    Type1800, // 1800mm deep
+    Type2000, // 2000mm deep
+}
+
+impl SuperTGirder {
+    pub fn new(girder_type: SuperTType) -> Self {
+        // Standard dimensions per AS 5100 / Austroads
+        let (_depth, tfw, tfth, bfw, bfth, tw) = match girder_type {
+            SuperTType::Type1000 => (1000.0, 1000.0, 150.0, 1000.0, 150.0, 200.0),
+            SuperTType::Type1200 => (1200.0, 1200.0, 150.0, 1200.0, 150.0, 200.0),
+            SuperTType::Type1400 => (1400.0, 1400.0, 150.0, 1400.0, 150.0, 200.0),
+            SuperTType::Type1600 => (1600.0, 1600.0, 150.0, 1600.0, 150.0, 200.0),
+            SuperTType::Type1800 => (1800.0, 1800.0, 150.0, 1800.0, 150.0, 200.0),
+            SuperTType::Type2000 => (2000.0, 2000.0, 150.0, 2000.0, 150.0, 200.0),
+        };
+        Self {
+            girder_type,
+            top_flange_width: tfw,
+            top_flange_thick: tfth,
+            bot_flange_width: bfw,
+            bot_flange_thick: bfth,
+            web_thick: tw,
+        }
+    }
+
+    /// Create with custom flange/web dimensions
+    pub fn custom(
+        _depth: f64,
+        top_flange_width: f64,
+        top_flange_thick: f64,
+        bot_flange_width: f64,
+        bot_flange_thick: f64,
+        web_thick: f64,
+    ) -> Self {
+        Self {
+            girder_type: SuperTType::Type1000, // placeholder
+            top_flange_width,
+            top_flange_thick,
+            bot_flange_width,
+            bot_flange_thick,
+            web_thick,
+        }
+    }
+}
+
+impl ParametricSection for SuperTGirder {
+    fn build(&self) -> Section {
+        let h = match self.girder_type {
+            SuperTType::Type1000 => 1000.0,
+            SuperTType::Type1200 => 1200.0,
+            SuperTType::Type1400 => 1400.0,
+            SuperTType::Type1600 => 1600.0,
+            SuperTType::Type1800 => 1800.0,
+            SuperTType::Type2000 => 2000.0,
+        } / 1000.0;
+
+        let tfw = self.top_flange_width / 1000.0;
+        let tfth = self.top_flange_thick / 1000.0;
+        let bfw = self.bot_flange_width / 1000.0;
+        let bfth = self.bot_flange_thick / 1000.0;
+        let tw = self.web_thick / 1000.0;
+
+        let hh = h / 2.0;
+        let tfw2 = tfw / 2.0;
+        let bfw2 = bfw / 2.0;
+        let tw2 = tw / 2.0;
+
+        let mut vertices = Vec::new();
+
+        // Top flange (left to right)
+        vertices.push(crate::geometry::Point::new(-tfw2, hh));
+        vertices.push(crate::geometry::Point::new(tfw2, hh));
+        vertices.push(crate::geometry::Point::new(tfw2, hh - tfth));
+
+        // Top of web
+        vertices.push(crate::geometry::Point::new(tw2, hh - tfth));
+
+        // Web right side down to bottom flange
+        vertices.push(crate::geometry::Point::new(tw2, -hh + bfth));
+
+        // Bottom flange right side
+        vertices.push(crate::geometry::Point::new(bfw2, -hh + bfth));
+        vertices.push(crate::geometry::Point::new(bfw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bfw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bfw2, -hh + bfth));
+
+        // Web left side up
+        vertices.push(crate::geometry::Point::new(-tw2, -hh + bfth));
+        vertices.push(crate::geometry::Point::new(-tw2, hh - tfth));
+
+        // Top flange left side
+        vertices.push(crate::geometry::Point::new(-tfw2, hh - tfth));
+
+        Section::new(crate::geometry::Polygon::new(vertices), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("Super-T {:?}", self.girder_type)
+    }
+}
+
+/// AASHTO/PCI I-Girder (US standard)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IGirder {
+    /// Girder type (AASHTO/PCI types)
+    pub girder_type: IGirderType,
+    /// Custom dimensions (optional)
+    pub custom_dims: Option<(f64, f64, f64, f64, f64, f64)>, // (depth, top_w, top_th, bot_w, bot_th, web_th) in mm
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IGirderType {
+    TypeI,   // 28" (711mm)
+    TypeII,  // 36" (914mm)
+    TypeIII, // 45" (1143mm)
+    TypeIV,  // 54" (1372mm)
+    TypeV,   // 63" (1600mm)
+    TypeVI,  // 72" (1829mm)
+    BT54,    // Bulb-tee 54"
+    BT63,    // Bulb-tee 63"
+    BT72,    // Bulb-tee 72"
+    Custom,
+}
+
+impl IGirder {
+    pub fn new(girder_type: IGirderType) -> Self {
+        Self { girder_type, custom_dims: None }
+    }
+
+    pub fn custom(depth: f64, top_w: f64, top_th: f64, bot_w: f64, bot_th: f64, web_th: f64) -> Self {
+        Self {
+            girder_type: IGirderType::Custom,
+            custom_dims: Some((depth, top_w, top_th, bot_w, bot_th, web_th)),
+        }
+    }
+}
+
+impl ParametricSection for IGirder {
+    fn build(&self) -> Section {
+        let (h, tfw, tfth, bfw, bfth, tw) = if let Some(dims) = self.custom_dims {
+            dims
+        } else {
+            // Standard AASHTO/PCI dimensions in mm
+            match self.girder_type {
+                IGirderType::TypeI => (711.0, 406.0, 89.0, 406.0, 89.0, 152.0),
+                IGirderType::TypeII => (914.0, 406.0, 89.0, 406.0, 89.0, 152.0),
+                IGirderType::TypeIII => (1143.0, 406.0, 102.0, 406.0, 102.0, 178.0),
+                IGirderType::TypeIV => (1372.0, 406.0, 114.0, 406.0, 114.0, 178.0),
+                IGirderType::TypeV => (1600.0, 406.0, 127.0, 406.0, 127.0, 178.0),
+                IGirderType::TypeVI => (1829.0, 406.0, 140.0, 406.0, 140.0, 203.0),
+                IGirderType::BT54 => (1372.0, 610.0, 102.0, 610.0, 102.0, 178.0),
+                IGirderType::BT63 => (1600.0, 610.0, 114.0, 610.0, 114.0, 178.0),
+                IGirderType::BT72 => (1829.0, 610.0, 127.0, 610.0, 127.0, 203.0),
+                IGirderType::Custom => (1000.0, 500.0, 100.0, 500.0, 100.0, 200.0), // fallback
+            }
+        };
+
+        let h = h / 1000.0;
+        let tfw = tfw / 1000.0;
+        let tfth = tfth / 1000.0;
+        let bfw = bfw / 1000.0;
+        let bfth = bfth / 1000.0;
+        let tw = tw / 1000.0;
+
+        let hh = h / 2.0;
+        let tfw2 = tfw / 2.0;
+        let bfw2 = bfw / 2.0;
+        let tw2 = tw / 2.0;
+
+        let mut vertices = Vec::new();
+
+        // Top flange
+        vertices.push(crate::geometry::Point::new(-tfw2, hh));
+        vertices.push(crate::geometry::Point::new(tfw2, hh));
+        vertices.push(crate::geometry::Point::new(tfw2, hh - tfth));
+
+        // Web right side
+        vertices.push(crate::geometry::Point::new(tw2, hh - tfth));
+        vertices.push(crate::geometry::Point::new(tw2, -hh + bfth));
+
+        // Bottom flange
+        vertices.push(crate::geometry::Point::new(bfw2, -hh + bfth));
+        vertices.push(crate::geometry::Point::new(bfw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bfw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bfw2, -hh + bfth));
+
+        // Web left side
+        vertices.push(crate::geometry::Point::new(-tw2, -hh + bfth));
+        vertices.push(crate::geometry::Point::new(-tw2, hh - tfth));
+
+        // Top flange left
+        vertices.push(crate::geometry::Point::new(-tfw2, hh - tfth));
+
+        Section::new(crate::geometry::Polygon::new(vertices), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("I-Girder {:?}", self.girder_type)
+    }
+}
+
+/// U-Girder (for box girders)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UGirder {
+    pub depth: f64,           // Overall depth [mm]
+    pub bottom_width: f64,    // Bottom flange width [mm]
+    pub top_width: f64,       // Top flange width [mm]
+    pub web_thick: f64,       // Web thickness [mm]
+    pub flange_thick: f64,    // Flange thickness [mm]
+}
+
+impl UGirder {
+    pub fn new(depth: f64, bottom_width: f64, top_width: f64, web_thick: f64, flange_thick: f64) -> Self {
+        Self { depth, bottom_width, top_width, web_thick, flange_thick }
+    }
+}
+
+impl ParametricSection for UGirder {
+    fn build(&self) -> Section {
+        let h = self.depth / 1000.0;
+        let bw = self.bottom_width / 1000.0;
+        let tw = self.top_width / 1000.0;
+        let wth = self.web_thick / 1000.0;
+        let fth = self.flange_thick / 1000.0;
+
+        let hh = h / 2.0;
+        let bw2 = bw / 2.0;
+        let tw2 = tw / 2.0;
+        let wth2 = wth / 2.0;
+
+        let mut vertices = Vec::new();
+
+        // Top flange left
+        vertices.push(crate::geometry::Point::new(-tw2, hh));
+        vertices.push(crate::geometry::Point::new(tw2, hh));
+        vertices.push(crate::geometry::Point::new(tw2, hh - fth));
+
+        // Web right side
+        vertices.push(crate::geometry::Point::new(wth2, hh - fth));
+        vertices.push(crate::geometry::Point::new(wth2, -hh + fth));
+
+        // Bottom flange
+        vertices.push(crate::geometry::Point::new(bw2, -hh + fth));
+        vertices.push(crate::geometry::Point::new(bw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bw2, -hh));
+        vertices.push(crate::geometry::Point::new(-bw2, -hh + fth));
+
+        // Web left side
+        vertices.push(crate::geometry::Point::new(-wth2, -hh + fth));
+        vertices.push(crate::geometry::Point::new(-wth2, hh - fth));
+
+        // Top flange left
+        vertices.push(crate::geometry::Point::new(-tw2, hh - fth));
+
+        Section::new(crate::geometry::Polygon::new(vertices), Vec::new())
+    }
+
+    fn designation(&self) -> String {
+        format!("U-Girder {:.0}x{:.0}x{:.0}", self.depth, self.bottom_width, self.web_thick)
     }
 }

@@ -5,8 +5,7 @@
 use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
-use crate::section_library::{ParametricSection, rectangle_polygon, rounded_rectangle_polygon};
-use std::f64::consts::PI;
+use crate::section_library::{ParametricSection, rectangle_polygon};
 
 /// Solid rectangular timber section.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -236,7 +235,7 @@ impl ParametricSection for GlulamCurved {
 }
 
 /// Cross-Laminated Timber (CLT) panel.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CLTPanel {
     pub thickness: f64,
     pub layers: Vec<CLTLayer>,
@@ -283,7 +282,7 @@ impl CLTPanel {
     }
 
     /// Standard 3-layer CLT
-    pub fn three_layer(thickness: f64, lam_thickness: f64, width: f64) -> Self {
+    pub fn three_layer(thickness: f64, _lam_thickness: f64, width: f64) -> Self {
         let t = thickness / 3.0;
         Self::new(
             thickness,
@@ -309,7 +308,7 @@ impl CLTPanel {
     }
 
     /// Standard 5-layer CLT
-    pub fn five_layer(thickness: f64, lam_thickness: f64, width: f64) -> Self {
+    pub fn five_layer(thickness: f64, _lam_thickness: f64, width: f64) -> Self {
         let t = thickness / 5.0;
         Self::new(
             thickness,
@@ -345,7 +344,7 @@ impl CLTPanel {
     }
 
     /// Standard 7-layer CLT
-    pub fn seven_layer(thickness: f64, lam_thickness: f64, width: f64) -> Self {
+    pub fn seven_layer(thickness: f64, _lam_thickness: f64, width: f64) -> Self {
         let t = thickness / 7.0;
         Self::new(
             thickness,
@@ -479,7 +478,7 @@ impl ParametricSection for BuiltUpTimber {
             * self.element_height
             * self.n_elements_wide as f64
             * self.n_elements_high as f64;
-        let fill_factor = board_area / solid_area;
+        let _fill_factor = board_area / solid_area;
 
         // Effective solid section
         Section::new(rectangle_polygon(self.width, self.height), Vec::new())
@@ -559,7 +558,7 @@ impl TimberIJoist {
         match series.to_uppercase().as_str() {
             "TJI" => {
                 // Trus Joist TJI series
-                let (fw, ft, wt) = match (depth_mm as i32) {
+                let (fw, ft, wt) = match depth_mm as i32 {
                     235..=241 => (38.0, 38.0, 9.5),
                     300..=302 => (38.0, 38.0, 9.5),
                     356..=360 => (38.0, 38.0, 11.0),
@@ -581,7 +580,7 @@ impl TimberIJoist {
             }
             "IJ" => {
                 // Generic I-joist
-                let (fw, ft, wt) = match (depth_mm as i32) {
+                let (fw, ft, wt) = match depth_mm as i32 {
                     200..=250 => (45.0, 35.0, 8.0),
                     251..=300 => (45.0, 35.0, 9.0),
                     301..=350 => (45.0, 35.0, 10.0),
@@ -619,25 +618,19 @@ impl ParametricSection for TimberIJoist {
 
         let mut vertices = Vec::new();
 
-        // Top flange
-        vertices.push(Point::new(-bf2, hh - tf));
-        vertices.push(Point::new(bf2, hh - tf));
-        vertices.push(Point::new(bf2, hh));
+        // CCW outline: top flange → web right → bottom flange → web left
         vertices.push(Point::new(-bf2, hh));
-
-        // Web right
+        vertices.push(Point::new(bf2, hh));
+        vertices.push(Point::new(bf2, hh - tf));
         vertices.push(Point::new(tw2, hh - tf));
         vertices.push(Point::new(tw2, -hh + tf));
-
-        // Bottom flange
         vertices.push(Point::new(bf2, -hh + tf));
         vertices.push(Point::new(bf2, -hh));
         vertices.push(Point::new(-bf2, -hh));
         vertices.push(Point::new(-bf2, -hh + tf));
-
-        // Web left
         vertices.push(Point::new(-tw2, -hh + tf));
         vertices.push(Point::new(-tw2, hh - tf));
+        vertices.push(Point::new(-bf2, hh - tf));
 
         let mut clean = Vec::new();
         for v in vertices {
@@ -723,6 +716,7 @@ impl ParametricSection for TimberBoxBeam {
 mod tests {
     use super::*;
     use crate::material::presets::TIMBER_GL24H;
+    use std::f64::consts::PI;
 
     #[test]
     fn solid_rectangular_timber() {
@@ -802,6 +796,31 @@ mod tests {
         );
         let sec = ij.build();
         assert!(sec.area() > 0.0);
+    }
+
+    #[test]
+    fn timber_i_joist_area() {
+        let h = 0.3;
+        let bf = 0.038;
+        let tf = 0.038;
+        let tw = 0.0095;
+        let ij = TimberIJoist::new(
+            h,
+            bf,
+            tf,
+            tw,
+            TimberFlangeMaterial::SolidSawn,
+            TimberWebMaterial::OSB,
+        );
+        let sec = ij.build();
+        let area = sec.area();
+        let expected = 2.0 * bf * tf + tw * (h - 2.0 * tf);
+        assert!(
+            (area - expected).abs() / expected < 1e-6,
+            "TimberIJoist area: got {}, expected {}",
+            area,
+            expected
+        );
     }
 
     #[test]

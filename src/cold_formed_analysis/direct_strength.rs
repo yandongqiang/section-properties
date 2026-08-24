@@ -2,7 +2,6 @@
 //!
 //! Provides nominal capacity predictions for local, distortional, and global buckling.
 
-use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -29,9 +28,9 @@ impl DsmParams {
 
         // Simplified elastic buckling moments
         // Real implementation would use FSM (finite strip method)
-        let iy = props.iy;
+        let _iy = props.iy;
         let iz = props.ix;
-        let iw = props.ix; // Approximate
+        let _iw = props.ix; // Approximate
 
         // Global buckling (flexural-torsional)
         let l = 6.0; // Assume 6m span
@@ -124,6 +123,7 @@ pub fn dsm_analysis(section: &Section, material: &Material) -> DsmStrengths {
 mod tests {
     use super::*;
     use crate::material::presets::STEEL_S355;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]

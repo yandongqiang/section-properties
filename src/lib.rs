@@ -1,5 +1,6 @@
 pub mod cold_formed_analysis;
 pub mod database;
+pub mod fea;
 pub mod fire;
 pub mod geometry;
 pub mod io;
@@ -9,10 +10,12 @@ pub mod plastic;
 pub mod section;
 pub mod section_library;
 pub mod section_properties;
+pub mod stress;
+pub mod stress_fem;
 
 pub use crate::cold_formed_analysis::{
     BucklingCurve, ColdFormedElement, ColdFormedSection, EdgeSupport, EffectiveSectionProperties,
-    EffectiveWidthParams, ElementReduction, ElementType, Stiffener, StiffenerType,
+    EffectiveWidthParams, ElementReduction, Stiffener, StiffenerType,
 };
 pub use crate::database::{
     SearchFilter, SearchResult, SectionDatabase, SectionEntry, build_standard_database,
@@ -30,8 +33,9 @@ pub use crate::io::{
 };
 pub use crate::material::Material;
 pub use crate::mesh::{
-    AnalysisResults, ElementType, FemModel, FemSolver, LoadCase, MaterialProps, Mesh, MeshParams,
-    StressResult, analyze_section,
+    AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
+    FemSectionAnalysis, FemSolver, FemWarpingProperties, LoadCase, MaterialProps, Mesh, MeshParams,
+    PropertyComparison, StressPlotData, StressPost, StressResult, analyze_section,
 };
 pub use crate::plastic::{
     CapacityCheck, ClassLimit, InteractionDiagram, InteractionPoint, LoadCase3D, PlasticAnalysis,
@@ -41,3 +45,6 @@ pub use crate::plastic::{
 pub use crate::section::Section;
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{GyrationProperties, PrincipalProperties, SectionProperties};
+pub use crate::stress::{
+    SectionLoads, StressAnalysis, StressAnalysisResult, StressAtPoint, YieldCheckResult,
+};

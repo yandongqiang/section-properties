@@ -4,9 +4,9 @@
 //! properties, and stress visualization.
 
 use crate::geometry::{Point, Polygon};
-use crate::plastic::StressResult;
+use crate::mesh::StressResult;
 use crate::section::Section;
-use crate::section_properties::{PrincipalProperties, SectionProperties};
+use crate::section_properties::SectionProperties;
 
 /// SVG export options.
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ pub fn to_svg(section: &Section, options: SvgExportOptions) -> String {
     // Title
     if let Some(title) = &options.title {
         svg.push_str(&format!(
-            r#"<text x="{}" y="{}" font-size="{}" text-anchor="middle" fill="#333 ">{}</text>"#,
+            r##"<text x="{}" y="{}" font-size="{}" text-anchor="middle" fill="#333">{}</text>"##,
             options.width / 2,
             options.margin / 2,
             options.font_size + 4,
@@ -241,12 +241,12 @@ fn centroid_marker(
     let size = 8.0;
 
     format!(
-        r#"<g stroke="#e74c3c " stroke-width="2" fill="none">
+        r##"<g stroke="#e74c3c" stroke-width="2" fill="none">
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
-  <circle cx="{:.1}" cy="{:.1}" r="3" fill="#e74c3c "/>
-  <text x="{:.1}" y="{:.1}" font-size="{}" text-anchor="middle" fill="#e74c3c " dy="-10">C</text>
-</g>"#,
+  <circle cx="{:.1}" cy="{:.1}" r="3" fill="#e74c3c"/>
+  <text x="{:.1}" y="{:.1}" font-size="{}" text-anchor="middle" fill="#e74c3c" dy="-10">C</text>
+</g>"##,
         x - size, y, x + size, y,
         x, y - size, x, y + size,
         x, y,
@@ -274,12 +274,12 @@ fn principal_axes_svg(
     let dy2 = (angle + std::f64::consts::FRAC_PI_2).sin() * length;
 
     format!(
-        r#"<g stroke="#27ae60 " stroke-width="1.5" fill="none" stroke-dasharray="8,4">
+        r##"<g stroke="#27ae60" stroke-width="1.5" fill="none" stroke-dasharray="8,4">
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
-  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60 " text-anchor="start">U (I₁={:.2e})</text>
-  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60 " text-anchor="start">V (I₂={:.2e})</text>
-</g>"#,
+  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60" text-anchor="start">U (I₁={:.2e})</text>
+  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60" text-anchor="start">V (I₂={:.2e})</text>
+</g>"##,
         cx - dx1, cy - dy1, cx + dx1, cy + dy1,
         cx - dx2, cy - dy2, cx + dx2, cy + dy2,
         cx + dx1 + 5.0, cy + dy1 - 5.0, options.font_size, i1,
@@ -299,12 +299,12 @@ fn coordinate_axes(
     let length = ((props.ix + props.iy).sqrt() * scale * 0.5).max(60.0);
 
     format!(
-        r#"<g stroke="#95a5a6 " stroke-width="1" fill="none" stroke-dasharray="4,4">
+        r##"<g stroke="#95a5a6" stroke-width="1" fill="none" stroke-dasharray="4,4">
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
-  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6 " text-anchor="end">X</text>
-  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6 " text-anchor="start">Y</text>
-</g>"#,
+  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6" text-anchor="end">X</text>
+  <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6" text-anchor="start">Y</text>
+</g>"##,
         cx - length, cy, cx + length, cy,
         cx, cy - length, cx, cy + length,
         cx + length + 5.0, cy + 5.0, options.font_size,
@@ -330,24 +330,24 @@ fn dimension_lines(
     let height = bounds.3 - bounds.2;
 
     format!(
-        r#"<g stroke="#7f8c8d " stroke-width="1" fill="none" font-size="{}" font-family="monospace">
+        r##"<g stroke="#7f8c8d" stroke-width="1" fill="none" font-size="{}" font-family="monospace">
   <!-- Width dimension -->
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
-  <text x="{:.1}" y="{:.1}" text-anchor="middle" fill="#7f8c8d ">{:.1}</text>
+  <text x="{:.1}" y="{:.1}" text-anchor="middle" fill="#7f8c8d">{:.1}</text>
   <!-- Height dimension -->
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
   <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
-  <text x="{:.1}" y="{:.1}" text-anchor="middle" fill="#7f8c8d " transform="rotate(-90 {:.1} {:.1})">{:.1}</text>
-</g>"#,
+  <text x="{:.1}" y="{:.1}" text-anchor="middle" fill="#7f8c8d" transform="rotate(-90 {:.1} {:.1})">{:.1}</text>
+</g>"##,
         options.font_size,
         min_x, max_y + offset, max_x, max_y + offset,
         min_x, max_y + offset - 5.0, min_x, max_y + offset + 5.0,
-        max_x, max_y + offset - 5.0, max_x, max_y + offset + 5.0,
         (min_x + max_x) / 2.0, max_y + offset + 15.0, width * 1000.0,
         min_x - offset, min_y, min_x - offset, max_y,
         min_x - offset + 5.0, min_y, min_x - offset - 5.0, max_y,
-        min_x - offset - 20.0, (min_y + max_y) / 2.0, min_x - offset - 20.0, (min_y + max_y) / 2.0, height * 1000.0
+        min_x - offset - 20.0, (min_y + max_y) / 2.0,
+        min_x - offset - 20.0, (min_y + max_y) / 2.0, height * 1000.0
     )
 }
 
@@ -356,27 +356,27 @@ fn legend(options: &SvgExportOptions) -> String {
     let x_start = 20.0;
 
     format!(
-        r#"<g font-size="{}" font-family="sans-serif">
+        r##"<g font-size="{}" font-family="sans-serif">
   <rect x="{}" y="{}" width="15" height="15" fill="{}" fill-opacity="{}" stroke="{}" stroke-width="{}"/>
-  <text x="{}" y="{}" fill="#333 ">Section</text>
+  <text x="{}" y="{}" fill="#333">Section</text>
   <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-dasharray="5,5"/>
-  <text x="{}" y="{}" fill="#333 ">Holes</text>
-  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#e74c3c " stroke-width="2"/>
-  <circle cx="{}" cy="{}" r="3" fill="#e74c3c "/>
-  <text x="{}" y="{}" fill="#333 ">Centroid</text>
-  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#27ae60 " stroke-width="1.5" stroke-dasharray="8,4"/>
-  <text x="{}" y="{}" fill="#333 ">Principal Axes</text>
-</g>"#,
+  <text x="{}" y="{}" fill="#333">Holes</text>
+  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#e74c3c" stroke-width="2"/>
+  <circle cx="{}" cy="{}" r="3" fill="#e74c3c"/>
+  <text x="{}" y="{}" fill="#333">Centroid</text>
+  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#27ae60" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="{}" y="{}" fill="#333">Principal Axes</text>
+</g>"##,
         options.font_size,
         x_start, y_start, options.fill_color, options.fill_opacity, options.outer_stroke_color, options.outer_stroke_width,
-        x_start + 25, y_start + 12,
-        x_start, y_start + 30, x_start + 15, y_start + 30, options.hole_stroke_color, options.hole_stroke_width,
-        x_start + 25, y_start + 37,
-        x_start, y_start + 50, x_start + 15, y_start + 50,
-        x_start + 10, y_start + 50,
-        x_start + 25, y_start + 57,
-        x_start, y_start + 70, x_start + 15, y_start + 70,
-        x_start + 25, y_start + 77
+        x_start + 25.0, y_start + 12.0,
+        x_start, y_start + 30.0, x_start + 15.0, y_start + 30.0, options.hole_stroke_color, options.hole_stroke_width,
+        x_start + 25.0, y_start + 37.0,
+        x_start, y_start + 50.0, x_start + 15.0, y_start + 50.0,
+        x_start + 10.0, y_start + 50.0,
+        x_start + 25.0, y_start + 57.0,
+        x_start, y_start + 70.0, x_start + 15.0, y_start + 70.0,
+        x_start + 25.0, y_start + 77.0
     )
 }
 
@@ -394,11 +394,11 @@ pub fn to_svg_stress(
         .fold(f64::INFINITY, f64::min);
 
     let mut svg = String::new();
-    let bounds = section.bounds();
+    let _bounds = section.bounds();
 
     // ... similar to to_svg but with stress-colored elements
     // This would require mesh integration - simplified version
-    svg.push_str(&to_svg(section, options));
+    svg.push_str(&to_svg(section, options.clone()));
 
     // Add stress legend
     svg.push_str(&stress_legend(min_vm, max_vm, &options));
@@ -411,19 +411,19 @@ fn stress_legend(min_vm: f64, max_vm: f64, options: &SvgExportOptions) -> String
     let x = 20.0;
 
     format!(
-        r#"<g font-size="{}" font-family="sans-serif">
-  <text x="{}" y="{}" fill="#333 ">Von Mises Stress (Pa)</text>
-  <text x="{}" y="{}" fill="#333 ">{:.2e}</text>
-  <text x="{}" y="{}" fill="#333 ">{:.2e}</text>
+        r##"<g font-size="{}" font-family="sans-serif">
+  <text x="{}" y="{}" fill="#333">Von Mises Stress (Pa)</text>
+  <text x="{}" y="{}" fill="#333">{:.2e}</text>
+  <text x="{}" y="{}" fill="#333">{:.2e}</text>
   <defs>
     <linearGradient id="stressGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#3498db "/>
-      <stop offset="50%" stop-color="#f1c40f "/>
-      <stop offset="100%" stop-color="#e74c3c "/>
+      <stop offset="0%" stop-color="#3498db"/>
+      <stop offset="50%" stop-color="#f1c40f"/>
+      <stop offset="100%" stop-color="#e74c3c"/>
     </linearGradient>
   </defs>
   <rect x="{}" y="{}" width="200" height="15" fill="url(#stressGradient)"/>
-</g>"#,
+</g>"##,
         options.font_size,
         x, y - 20.0,
         x, y + 35.0, min_vm,
@@ -432,41 +432,12 @@ fn stress_legend(min_vm: f64, max_vm: f64, options: &SvgExportOptions) -> String
     )
 }
 
-/// Section bounds helper.
-trait SectionBounds {
-    fn bounds(&self) -> (f64, f64, f64, f64);
-}
-
-impl SectionBounds for Section {
-    fn bounds(&self) -> (f64, f64, f64, f64) {
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for v in &self.outer.vertices {
-            min_x = min_x.min(v.x);
-            max_x = max_x.max(v.x);
-            min_y = min_y.min(v.y);
-            max_y = max_y.max(v.y);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                min_x = min_x.min(v.x);
-                max_x = max_x.max(v.x);
-                min_y = min_y.min(v.y);
-                max_y = max_y.max(v.y);
-            }
-        }
-        (min_x, max_x, min_y, max_y)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geometry::{Point, Polygon};
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]

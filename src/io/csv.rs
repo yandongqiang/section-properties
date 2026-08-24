@@ -5,7 +5,7 @@
 
 use crate::geometry::{Point, Polygon};
 use crate::section::Section;
-use crate::section_properties::{GyrationProperties, PrincipalProperties, SectionProperties};
+use crate::section_properties::SectionProperties;
 
 /// CSV export options.
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ impl Default for CsvExportOptions {
 pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
     let props = SectionProperties::from_section(section);
     let mut csv = String::new();
-    let fmt_str = format!("{{:.{}e}}", options.precision);
+    let fmt_val = |v: f64| format!("{:.p$e}", v, p = options.precision);
 
     // Unit conversion factor
     let unit_factor: f64 = match options.units.as_str() {
@@ -67,32 +67,32 @@ pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
     // Basic properties
     csv.push_str(&format!(
         "Area,{},{}^2\n",
-        fmt_str.format(&props.area * area_factor),
+        fmt_val(props.area * area_factor),
         options.units
     ));
     csv.push_str(&format!(
         "CentroidX,{},{}\n",
-        fmt_str.format(&props.centroid.x * unit_factor),
+        fmt_val(props.centroid.x * unit_factor),
         options.units
     ));
     csv.push_str(&format!(
         "CentroidY,{},{}\n",
-        fmt_str.format(&props.centroid.y * unit_factor),
+        fmt_val(props.centroid.y * unit_factor),
         options.units
     ));
     csv.push_str(&format!(
         "Ix,{},{}^4\n",
-        fmt_str.format(&props.ix * inertia_factor),
+        fmt_val(props.ix * inertia_factor),
         options.units
     ));
     csv.push_str(&format!(
         "Iy,{},{}^4\n",
-        fmt_str.format(&props.iy * inertia_factor),
+        fmt_val(props.iy * inertia_factor),
         options.units
     ));
     csv.push_str(&format!(
         "Ixy,{},{}^4\n",
-        fmt_str.format(&props.ixy * inertia_factor),
+        fmt_val(props.ixy * inertia_factor),
         options.units
     ));
 
@@ -100,19 +100,19 @@ pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
     if options.include_principal {
         let (i1, i2, angle) = props.principal_moments();
         csv.push_str(&format!(
-            "I1 (Major),,{}^4\n",
-            fmt_str.format(&i1 * inertia_factor),
+            "I1 (Major),,{},{}^4\n",
+            fmt_val(i1 * inertia_factor),
             options.units
         ));
         csv.push_str(&format!(
-            "I2 (Minor),,{}^4\n",
-            fmt_str.format(&i2 * inertia_factor),
+            "I2 (Minor),,{},{}^4\n",
+            fmt_val(i2 * inertia_factor),
             options.units
         ));
-        csv.push_str(&format!("PrincipalAngle,{},rad\n", fmt_str.format(&angle)));
+        csv.push_str(&format!("PrincipalAngle,{},rad\n", fmt_val(angle)));
         csv.push_str(&format!(
             "PrincipalAngleDeg,{},deg\n",
-            fmt_str.format(&angle.to_degrees())
+            fmt_val(angle.to_degrees())
         ));
     }
 
@@ -121,17 +121,17 @@ pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
         let (rx, ry, rp) = props.radius_of_gyration();
         csv.push_str(&format!(
             "rx,{},{}\n",
-            fmt_str.format(&rx * unit_factor),
+            fmt_val(rx * unit_factor),
             options.units
         ));
         csv.push_str(&format!(
             "ry,{},{}\n",
-            fmt_str.format(&ry * unit_factor),
+            fmt_val(ry * unit_factor),
             options.units
         ));
         csv.push_str(&format!(
-            "rp (polar),,{}\n",
-            fmt_str.format(&rp * unit_factor),
+            "rp (polar),,{},{}\n",
+            fmt_val(rp * unit_factor),
             options.units
         ));
     }
@@ -147,31 +147,32 @@ pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
             csv.push_str(&format!(
                 "Outer,{},{},{}\n",
                 i,
-                fmt_str.format(&v.x * unit_factor),
-                fmt_str.format(&v.y * unit_factor)
+                fmt_val(v.x * unit_factor),
+                fmt_val(v.y * unit_factor)
             ));
         }
 
         for (h_idx, hole) in section.holes.iter().enumerate() {
-            for (i, v) in hole.vertices.iter().enumerate() {
+            for (_i, v) in hole.vertices.iter().enumerate() {
                 csv.push_str(&format!(
                     "Hole{},,{},{}\n",
                     h_idx,
-                    fmt_str.format(&v.x * unit_factor),
-                    fmt_str.format(&v.y * unit_factor)
+                    fmt_val(v.x * unit_factor),
+                    fmt_val(v.y * unit_factor)
                 ));
             }
         }
     }
 
+    // Replace delimiter if not comma (must do before decimal separator
+    // to avoid replacing decimal commas with the delimiter)
+    if options.delimiter != ',' {
+        csv = csv.replace(',', &options.delimiter.to_string());
+    }
+
     // Replace decimal separator if needed
     if options.decimal_separator != '.' {
         csv = csv.replace('.', &options.decimal_separator.to_string());
-    }
-
-    // Replace delimiter if not comma
-    if options.delimiter != ',' {
-        csv = csv.replace(',', &options.delimiter.to_string());
     }
 
     csv
@@ -180,7 +181,7 @@ pub fn to_csv(section: &Section, options: CsvExportOptions) -> String {
 /// Export multiple sections to CSV (one row per section).
 pub fn to_csv_catalog(sections: &[(String, Section)], options: CsvExportOptions) -> String {
     let mut csv = String::new();
-    let fmt_str = format!("{{:.{}e}}", options.precision);
+    let fmt_val = |v: f64| format!("{:.p$e}", v, p = options.precision);
     let unit_factor: f64 = match options.units.as_str() {
         "mm" => 1000.0,
         "cm" => 100.0,
@@ -196,20 +197,20 @@ pub fn to_csv_catalog(sections: &[(String, Section)], options: CsvExportOptions)
 
     for (name, section) in sections {
         let props = SectionProperties::from_section(section);
-        let (i1, i2, angle) = props.principal_moments();
+        let (_i1, _i2, angle) = props.principal_moments();
         let (rx, ry, _) = props.radius_of_gyration();
 
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{}\n",
             name,
-            fmt_str.format(&props.area * area_factor),
-            fmt_str.format(&props.ix * inertia_factor),
-            fmt_str.format(&props.iy * inertia_factor),
-            fmt_str.format(&props.ixy * inertia_factor),
-            fmt_str.format(&rx * unit_factor),
-            fmt_str.format(&ry * unit_factor),
-            fmt_str.format(&angle),
-            fmt_str.format(&angle.to_degrees()),
+            fmt_val(props.area * area_factor),
+            fmt_val(props.ix * inertia_factor),
+            fmt_val(props.iy * inertia_factor),
+            fmt_val(props.ixy * inertia_factor),
+            fmt_val(rx * unit_factor),
+            fmt_val(ry * unit_factor),
+            fmt_val(angle),
+            fmt_val(angle.to_degrees()),
         ));
     }
 
@@ -273,6 +274,7 @@ mod tests {
     use super::*;
     use crate::geometry::{Point, Polygon};
     use crate::section::Section;
+    use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
     #[test]

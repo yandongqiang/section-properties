@@ -131,7 +131,20 @@ impl Polygon {
         self.product_of_inertia_xy() - area * centroid.x * centroid.y
     }
 
-    /// Check if a point is inside the polygon (using winding number algorithm).
+/// Rotate all vertices about the origin by `angle` radians (CCW positive).
+    pub fn rotate(&self, angle: f64) -> Self {
+        Polygon::new(
+            self.vertices
+                .iter()
+                .map(|v| Point::new(
+                    v.x * angle.cos() - v.y * angle.sin(),
+                    v.x * angle.sin() + v.y * angle.cos(),
+                ))
+                .collect(),
+        )
+    }
+
+    /// Check if a point is inside the polygon (ray casting algorithm).
     pub fn contains_point(&self, point: Point) -> bool {
         let mut inside = false;
         let n = self.vertices.len();

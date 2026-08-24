@@ -1,6 +1,8 @@
 //! Isotropic linear-elastic material definition.
 //!
 //! All values in SI base units (Pa, kg/m³, /K).
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Young's modulus [Pa]
@@ -106,7 +108,7 @@ impl Material {
 impl Default for Material {
     /// Default to generic structural steel (S355).
     fn default() -> Self {
-        STEEL_S355
+        presets::STEEL_S355
     }
 }
 

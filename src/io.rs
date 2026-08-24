@@ -13,7 +13,6 @@ pub use dxf::{DxfColor, DxfExportOptions, to_dxf};
 pub use json::{JsonMaterial, JsonSection, from_json, to_json};
 pub use svg::{SvgExportOptions, to_svg};
 
-use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
 use crate::section_library::{CompositeSection, ParametricSection};
@@ -223,7 +222,7 @@ mod tests {
 
         let svg = exporter.to_svg(SvgExportOptions::default());
         assert!(svg.contains("<svg"));
-        assert!(svg.contains("<polygon"));
+        assert!(svg.contains("<path"));
     }
 
     #[test]

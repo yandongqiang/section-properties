@@ -131,23 +131,48 @@ impl Section {
         }
         p
     }
+
+    /// Frame properties for beam/frame analysis (matches Python's calculate_frame_properties).
+    ///
+    /// Returns tuple: (area, ixx, iyy, ixy, j, phi)
+    /// - area: cross-sectional area [m²]
+    /// - ixx: second moment of area about x-axis [m⁴]
+    /// - iyy: second moment of area about y-axis [m⁴]
+    /// - ixy: product of inertia [m⁴]
+    /// - j: St. Venant torsion constant [m⁴]
+    /// - phi: principal axis angle (radians, CCW from x-axis) [rad]
+    pub fn frame_properties(&self) -> (f64, f64, f64, f64, f64, f64) {
+        use crate::plastic::warping::WarpingProperties;
+        use crate::section_properties::SectionProperties;
+
+        let props = SectionProperties::from_section(self);
+        let warping = WarpingProperties::from_section(self);
+        let principal = props.principal_properties();
+
+        (
+            props.area,
+            props.ix,
+            props.iy,
+            props.ixy,
+            warping.j,
+            principal.angle,
+        )
+    }
+
+    /// Frame properties with custom material (for composite sections).
+    pub fn frame_properties_with_material(&self, _material: &crate::material::Material) -> (f64, f64, f64, f64, f64, f64) {
+        // For composite sections, would use transformed section method
+        // For now, return geometric properties
+        self.frame_properties()
+    }
 }
 
-impl From<crate::io::JsonSection> for Section {
-    fn from(json: crate::io::JsonSection) -> Self {
-        let outer = Polygon::new(
-            json.outer_vertices
-                .into_iter()
-                .map(|v| Point::new(v[0], v[1]))
-                .collect(),
-        );
+impl crate::section_library::ParametricSection for Section {
+    fn build(&self) -> Section {
+        self.clone()
+    }
 
-        let holes = json
-            .holes
-            .into_iter()
-            .map(|h| Polygon::new(h.into_iter().map(|v| Point::new(v[0], v[1])).collect()))
-            .collect();
-
-        Section::new(outer, holes)
+    fn designation(&self) -> String {
+        "Section".to_string()
     }
 }
