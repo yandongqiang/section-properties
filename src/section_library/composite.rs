@@ -201,6 +201,13 @@ impl CompositeSection {
             .map(|v| (v.x - centroid.x).abs())
             .fold(0.0, f64::max);
 
+        let avg = (ix_c + iy_c) * 0.5;
+        let diff = (ix_c - iy_c) * 0.5;
+        let radius = (diff * diff + ixy_c * ixy_c).sqrt();
+        let i11 = avg + radius;
+        let i22 = avg - radius;
+        let phi = 0.5 * (2.0 * ixy_c).atan2(ix_c - iy_c);
+
         crate::section_properties::SectionProperties {
             geometric: crate::section_properties::GeometricProperties {
                 area: total_area,
@@ -222,15 +229,17 @@ impl CompositeSection {
                 ixy_g: ixy_c + total_area * centroid.x * centroid.y,
             },
             principal: crate::section_properties::PrincipalProperties {
-                i11: ix_c.max(iy_c),
-                i22: ix_c.min(iy_c),
+                i11,
+                i22,
+                phi,
                 ..Default::default()
             },
             gyration: crate::section_properties::GyrationProperties {
                 rx: (ix_c / total_area).sqrt(),
                 ry: (iy_c / total_area).sqrt(),
+                r11: (i11 / total_area).sqrt(),
+                r22: (i22 / total_area).sqrt(),
                 polar: ((ix_c + iy_c) / total_area).sqrt(),
-                ..Default::default()
             },
         }
     }
@@ -296,6 +305,13 @@ impl CompositeSection {
             .map(|v| (v.x - centroid.x).abs())
             .fold(0.0, f64::max);
 
+        let avg = (ix_c + iy_c) * 0.5;
+        let diff = (ix_c - iy_c) * 0.5;
+        let radius = (diff * diff + ixy_c * ixy_c).sqrt();
+        let i11 = avg + radius;
+        let i22 = avg - radius;
+        let phi = 0.5 * (2.0 * ixy_c).atan2(ix_c - iy_c);
+
 Some(crate::section_properties::SectionProperties {
             geometric: crate::section_properties::GeometricProperties {
                 area,
@@ -317,15 +333,17 @@ Some(crate::section_properties::SectionProperties {
                 ixy_g: ixy_c + area * centroid.x * centroid.y,
             },
             principal: crate::section_properties::PrincipalProperties {
-                i11: ix_c.max(iy_c),
-                i22: ix_c.min(iy_c),
+                i11,
+                i22,
+                phi,
                 ..Default::default()
             },
             gyration: crate::section_properties::GyrationProperties {
                 rx: (ix_c / area).sqrt(),
                 ry: (iy_c / area).sqrt(),
+                r11: (i11 / area).sqrt(),
+                r22: (i22 / area).sqrt(),
                 polar: ((ix_c + iy_c) / area).sqrt(),
-                ..Default::default()
             },
         })
     }
