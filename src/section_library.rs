@@ -167,24 +167,37 @@ impl CompositeSection {
             .fold(0.0, f64::max);
 
         crate::section_properties::SectionProperties {
-            area: total_area,
-            centroid,
-            ix: ix_c,
-            iy: iy_c,
-            ixy: ixy_c,
-            max_fiber_distance_y: max_fiber_y,
-            max_fiber_distance_x: max_fiber_x,
-            zxx_plus: ix_c / max_fiber_y.max(1e-10),
-            zxx_minus: ix_c / max_fiber_y.max(1e-10),
-            zyy_plus: iy_c / max_fiber_x.max(1e-10),
-            zyy_minus: iy_c / max_fiber_x.max(1e-10),
-            perimeter: self.outer.perimeter(),
-            ixx_g: ix_c + total_area * centroid.y.powi(2),
-            iyy_g: iy_c + total_area * centroid.x.powi(2),
-            ixy_g: ixy_c + total_area * centroid.x * centroid.y,
-            rx_c: (ix_c / total_area).sqrt(),
-            ry_c: (iy_c / total_area).sqrt(),
-            ..Default::default()
+            geometric: crate::section_properties::GeometricProperties {
+                area: total_area,
+                centroid,
+                ix: ix_c,
+                iy: iy_c,
+                ixy: ixy_c,
+                max_fiber_distance_y: max_fiber_y,
+                max_fiber_distance_x: max_fiber_x,
+                zxx_plus: ix_c / max_fiber_y.max(1e-10),
+                zxx_minus: ix_c / max_fiber_y.max(1e-10),
+                zyy_plus: iy_c / max_fiber_x.max(1e-10),
+                zyy_minus: iy_c / max_fiber_x.max(1e-10),
+                perimeter: self.outer.perimeter(),
+                qx: total_area * centroid.y,
+                qy: total_area * centroid.x,
+                ixx_g: ix_c + total_area * centroid.y.powi(2),
+                iyy_g: iy_c + total_area * centroid.x.powi(2),
+                ixy_g: ixy_c + total_area * centroid.x * centroid.y,
+            },
+            principal: crate::section_properties::PrincipalProperties {
+                i11: ix_c.max(iy_c),
+                i22: ix_c.min(iy_c),
+                phi: 0.0,
+                ..Default::default()
+            },
+            gyration: crate::section_properties::GyrationProperties {
+                rx: (ix_c / total_area).sqrt(),
+                ry: (iy_c / total_area).sqrt(),
+                polar: ((ix_c + iy_c) / total_area).sqrt(),
+                ..Default::default()
+            },
         }
     }
 }

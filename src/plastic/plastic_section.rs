@@ -228,7 +228,7 @@ impl PlasticSection {
         // Principal axis plastic properties
         let sect_props = SectionProperties::from_section(&self.section);
         let principal = sect_props.principal_properties();
-        let phi = principal.angle;
+        let phi = principal.phi;
 
         let (props_11, props_22, sf_11, sf_22) = if phi.abs() < 1e-10 {
             // Already aligned with principal axes
@@ -271,10 +271,10 @@ impl PlasticSection {
         let sf_xx_minus = if sect_props.zxx_minus > 1e-15 { sxx / sect_props.zxx_minus } else { 0.0 };
         let sf_yy_plus = if sect_props.zyy_plus > 1e-15 { syy / sect_props.zyy_plus } else { 0.0 };
         let sf_yy_minus = if sect_props.zyy_minus > 1e-15 { syy / sect_props.zyy_minus } else { 0.0 };
-        let sf_11_plus = if sect_props.z11_plus > 1e-15 { s11 / sect_props.z11_plus } else { 0.0 };
-        let sf_11_minus = if sect_props.z11_minus > 1e-15 { s11 / sect_props.z11_minus } else { 0.0 };
-        let sf_22_plus = if sect_props.z22_plus > 1e-15 { s22 / sect_props.z22_plus } else { 0.0 };
-        let sf_22_minus = if sect_props.z22_minus > 1e-15 { s22 / sect_props.z22_minus } else { 0.0 };
+        let sf_11_plus = if sect_props.principal.z11_plus > 1e-15 { s11 / sect_props.principal.z11_plus } else { 0.0 };
+        let sf_11_minus = if sect_props.principal.z11_minus > 1e-15 { s11 / sect_props.principal.z11_minus } else { 0.0 };
+        let sf_22_plus = if sect_props.principal.z22_plus > 1e-15 { s22 / sect_props.principal.z22_plus } else { 0.0 };
+        let sf_22_minus = if sect_props.principal.z22_minus > 1e-15 { s22 / sect_props.principal.z22_minus } else { 0.0 };
 
         FullPlasticProperties {
             x_axis: props_x,

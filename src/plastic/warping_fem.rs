@@ -443,7 +443,7 @@ pub fn compute_fem_warping_properties(
 
     // Principal axis shear areas via tensor rotation (Python method)
     let principal = props.principal_properties();
-    let phi_rad = principal.angle;
+    let phi_rad = principal.phi;
     let cos_phi = phi_rad.cos();
     let sin_phi = phi_rad.sin();
 

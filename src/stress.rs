@@ -242,9 +242,9 @@ impl StressAnalysis {
         let ixy = self.props.ixy;
 
         let principal = self.props.principal_properties();
-        let phi = principal.angle;
-        let i11 = principal.i1;
-        let i22 = principal.i2;
+        let phi = principal.phi;
+        let i11 = principal.i11;
+        let i22 = principal.i22;
 
         let warping = crate::plastic::warping::WarpingProperties::from_section(&self.section);
         let ay = warping.ay.max(1e-12);

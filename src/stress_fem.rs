@@ -36,9 +36,9 @@ fn compute_stress_from_fem(
     let ixy = props.ixy;
 
     let principal = props.principal_properties();
-    let phi = principal.angle;
-    let i11 = principal.i1;
-    let i22 = principal.i2;
+    let phi = principal.phi;
+    let i11 = principal.i11;
+    let i22 = principal.i22;
 
     let j = fem.j.max(1e-15);
     let nu = fem.nu;

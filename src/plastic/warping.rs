@@ -112,7 +112,7 @@ impl WarpingProperties {
         let r_w = if iw > 0.0 { (iw / area).sqrt() } else { 0.0 };
 
         let principal = props.principal_properties();
-        let phi = principal.angle;
+        let phi = principal.phi;
 
         let (sc_11, sc_22) = if phi.abs() < 1e-10 {
             (shear_center.x, shear_center.y)

@@ -1,33 +1,10 @@
-use crate::geometry::Point;
+use crate::geometry::{CompoundGeometry, Geometry, Point};
 use crate::section::Section;
+use std::ops::Deref;
 
+/// Basic geometric properties about the centroidal and global axes.
 #[derive(Debug, Clone, Copy)]
-pub struct PrincipalProperties {
-    /// Major principal moment of inertia.
-    pub i1: f64,
-
-    /// Minor principal moment of inertia.
-    pub i2: f64,
-
-    /// Principal axis angle in radians, measured CCW from the x-axis.
-    pub angle: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GyrationProperties {
-    /// Radius of gyration about the centroidal x-axis.
-    pub rx: f64,
-
-    /// Radius of gyration about the centroidal y-axis.
-    pub ry: f64,
-
-    /// Polar radius of gyration.
-    pub polar: f64,
-}
-
-/// Mechanical properties of a section (area, centroid, moments of inertia, etc.).
-#[derive(Debug, Clone, Copy)]
-pub struct SectionProperties {
+pub struct GeometricProperties {
     pub area: f64,
 
     pub centroid: Point,
@@ -55,43 +32,24 @@ pub struct SectionProperties {
     pub zyy_plus: f64,
     /// Section modulus about y-axis for negative extreme fibre (Iy / |x_min|).
     pub zyy_minus: f64,
-    /// Section modulus about 11-axis for positive extreme fibre.
-    pub z11_plus: f64,
-    /// Section modulus about 11-axis for negative extreme fibre.
-    pub z11_minus: f64,
-    /// Section modulus about 22-axis for positive extreme fibre.
-    pub z22_plus: f64,
-    /// Section modulus about 22-axis for negative extreme fibre.
-    pub z22_minus: f64,
+
     /// Cross-sectional perimeter (outer + holes).
     pub perimeter: f64,
+
     /// First moment of area about the global x-axis (∫y dA).
     pub qx: f64,
     /// First moment of area about the global y-axis (∫x dA).
     pub qy: f64,
+
     /// Second moment of area about the global x-axis.
     pub ixx_g: f64,
     /// Second moment of area about the global y-axis.
     pub iyy_g: f64,
     /// Product of inertia about the global xy-axis.
     pub ixy_g: f64,
-    /// Principal major second moment of area (centroidal).
-    pub i11_c: f64,
-    /// Principal minor second moment of area (centroidal).
-    pub i22_c: f64,
-    /// Principal axis angle in radians, CCW from x-axis.
-    pub phi: f64,
-    /// Radius of gyration about the centroidal x-axis.
-    pub rx_c: f64,
-    /// Radius of gyration about the centroidal y-axis.
-    pub ry_c: f64,
-    /// Radius of gyration about the principal 11-axis.
-    pub r11_c: f64,
-    /// Radius of gyration about the principal 22-axis.
-    pub r22_c: f64,
 }
 
-impl Default for SectionProperties {
+impl Default for GeometricProperties {
     fn default() -> Self {
         Self {
             area: 0.0,
@@ -105,30 +63,113 @@ impl Default for SectionProperties {
             zxx_minus: 0.0,
             zyy_plus: 0.0,
             zyy_minus: 0.0,
-            z11_plus: 0.0,
-            z11_minus: 0.0,
-            z22_plus: 0.0,
-            z22_minus: 0.0,
             perimeter: 0.0,
             qx: 0.0,
             qy: 0.0,
             ixx_g: 0.0,
             iyy_g: 0.0,
             ixy_g: 0.0,
-            i11_c: 0.0,
-            i22_c: 0.0,
-            phi: 0.0,
-            rx_c: 0.0,
-            ry_c: 0.0,
-            r11_c: 0.0,
-            r22_c: 0.0,
         }
     }
 }
 
+/// Principal-axis properties: moments of inertia, angle, and section moduli
+/// about the principal 11-22 axes.
+#[derive(Debug, Clone, Copy)]
+pub struct PrincipalProperties {
+    /// Major principal second moment of area (centroidal).
+    pub i11: f64,
+
+    /// Minor principal second moment of area (centroidal).
+    pub i22: f64,
+
+    /// Principal axis angle in radians, measured CCW from the x-axis.
+    pub phi: f64,
+
+    /// Section modulus about 11-axis for positive extreme fibre.
+    pub z11_plus: f64,
+    /// Section modulus about 11-axis for negative extreme fibre.
+    pub z11_minus: f64,
+    /// Section modulus about 22-axis for positive extreme fibre.
+    pub z22_plus: f64,
+    /// Section modulus about 22-axis for negative extreme fibre.
+    pub z22_minus: f64,
+}
+
+impl Default for PrincipalProperties {
+    fn default() -> Self {
+        Self {
+            i11: 0.0,
+            i22: 0.0,
+            phi: 0.0,
+            z11_plus: 0.0,
+            z11_minus: 0.0,
+            z22_plus: 0.0,
+            z22_minus: 0.0,
+        }
+    }
+}
+
+/// Radii of gyration about the centroidal and principal axes.
+#[derive(Debug, Clone, Copy)]
+pub struct GyrationProperties {
+    /// Radius of gyration about the centroidal x-axis.
+    pub rx: f64,
+
+    /// Radius of gyration about the centroidal y-axis.
+    pub ry: f64,
+
+    /// Radius of gyration about the principal 11-axis.
+    pub r11: f64,
+
+    /// Radius of gyration about the principal 22-axis.
+    pub r22: f64,
+
+    /// Polar radius of gyration.
+    pub polar: f64,
+}
+
+impl Default for GyrationProperties {
+    fn default() -> Self {
+        Self {
+            rx: 0.0,
+            ry: 0.0,
+            r11: 0.0,
+            r22: 0.0,
+            polar: 0.0,
+        }
+    }
+}
+
+/// Composite section properties: geometric + principal + gyration.
+///
+/// Field access is split across three sub-structs:
+/// - [`GeometricProperties`] (via `Deref`: `props.area`, `props.ix`, …)
+/// - [`PrincipalProperties`] (via `props.principal.i11`, `props.principal.phi`, …)
+/// - [`GyrationProperties`] (via `props.gyration.rx`, `props.gyration.r11`, …)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SectionProperties {
+    pub geometric: GeometricProperties,
+    pub principal: PrincipalProperties,
+    pub gyration: GyrationProperties,
+}
+
+impl Deref for SectionProperties {
+    type Target = GeometricProperties;
+    fn deref(&self) -> &GeometricProperties {
+        &self.geometric
+    }
+}
+
 impl SectionProperties {
-    /// Compute section properties from a `Section` (outer boundary + holes).
-    pub fn from_section(section: &Section) -> Self {
+    /// Compute section properties from a `CompoundGeometry` (one or more
+    /// independent regions, each with an outer boundary and optional holes).
+    ///
+    /// Regions are aggregated using the composite-area (parallel-axis) method:
+    /// each polygon contributes its signed area, first moments, and second
+    /// moments about the global axes; the global centroid is then found and
+    /// centroidal properties are obtained via the parallel-axis theorem.
+    pub fn from_compound(compound: &CompoundGeometry) -> Self {
         let mut area = 0.0;
         let mut first_x = 0.0;
         let mut first_y = 0.0;
@@ -136,12 +177,15 @@ impl SectionProperties {
         let mut iy = 0.0;
         let mut ixy = 0.0;
 
-        // Polygon orientation is normalized by Section:
+        // Collect every polygon (outer + holes) with transforms applied, so we
+        // can iterate them once for moments and again for fibre distances.
+        let polygons: Vec<crate::geometry::Polygon> = compound.polygons();
+
+        // Polygon orientation convention (enforced by Section / Geometry):
         // outer -> CCW (positive signed area)
         // holes -> CW (negative signed area)
-        //
         // Therefore we use signed geometric quantities directly.
-        let mut add_polygon = |poly: &crate::geometry::Polygon| {
+        for poly in &polygons {
             let signed_area = poly.signed_area();
             let centroid = poly.centroid();
 
@@ -152,12 +196,6 @@ impl SectionProperties {
             ix += poly.moment_of_inertia_x();
             iy += poly.moment_of_inertia_y();
             ixy += poly.product_of_inertia_xy();
-        };
-
-        add_polygon(&section.outer);
-
-        for hole in &section.holes {
-            add_polygon(hole);
         }
 
         assert!(
@@ -180,20 +218,16 @@ impl SectionProperties {
         // Maximum fiber distances measure from the centroid to the extreme
         // boundary of the section (used for elastic section modulus).
         // Track positive and negative extremes separately (Python convention).
-        let (y_min, y_max) = section
-            .outer
-            .vertices
+        let (y_min, y_max) = polygons
             .iter()
-            .chain(section.holes.iter().flat_map(|p| p.vertices.iter()))
+            .flat_map(|p| p.vertices.iter())
             .map(|v| v.y - centroid.y)
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), d| {
                 (mn.min(d), mx.max(d))
             });
-        let (x_min, x_max) = section
-            .outer
-            .vertices
+        let (x_min, x_max) = polygons
             .iter()
-            .chain(section.holes.iter().flat_map(|p| p.vertices.iter()))
+            .flat_map(|p| p.vertices.iter())
             .map(|v| v.x - centroid.x)
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), d| {
                 (mn.min(d), mx.max(d))
@@ -222,11 +256,9 @@ impl SectionProperties {
         let cos_phi = phi.cos();
         let sin_phi = phi.sin();
 
-        let (x1_min, x1_max, y2_min, y2_max) = section
-            .outer
-            .vertices
+        let (x1_min, x1_max, y2_min, y2_max) = polygons
             .iter()
-            .chain(section.holes.iter().flat_map(|p| p.vertices.iter()))
+            .flat_map(|p| p.vertices.iter())
             .map(|v| {
                 let dx = v.x - centroid.x;
                 let dy = v.y - centroid.y;
@@ -246,117 +278,114 @@ impl SectionProperties {
         let z22_plus = if x1_max.abs() > 1e-15 { i22 / x1_max.abs() } else { 0.0 };
         let z22_minus = if x1_min.abs() > 1e-15 { i22 / x1_min.abs() } else { 0.0 };
 
-        // Perimeter (outer + holes)
-        let perimeter = section.outer.perimeter()
-            + section.holes.iter().map(|h| h.perimeter()).sum::<f64>();
+        // Perimeter (sum of outer + holes across all regions)
+        let perimeter = polygons.iter().map(|p| p.perimeter()).sum::<f64>();
 
         // Radii of gyration
-        let rx_c = (ix_c / area).sqrt();
-        let ry_c = (iy_c / area).sqrt();
-        let r11_c = (i11 / area).sqrt();
-        let r22_c = (i22 / area).sqrt();
+        let rx = (ix_c / area).sqrt();
+        let ry = (iy_c / area).sqrt();
+        let r11 = (i11 / area).sqrt();
+        let r22 = (i22 / area).sqrt();
 
         Self {
-            area,
-            centroid,
-            ix: ix_c,
-            iy: iy_c,
-            ixy: ixy_c,
-            max_fiber_distance_y: max_fiber_y,
-            max_fiber_distance_x: max_fiber_x,
-            zxx_plus,
-            zxx_minus,
-            zyy_plus,
-            zyy_minus,
-            z11_plus,
-            z11_minus,
-            z22_plus,
-            z22_minus,
-            perimeter,
-            qx: first_y,
-            qy: first_x,
-            ixx_g: ix,
-            iyy_g: iy,
-            ixy_g: ixy,
-            i11_c: i11,
-            i22_c: i22,
-            phi,
-            rx_c,
-            ry_c,
-            r11_c,
-            r22_c,
+            geometric: GeometricProperties {
+                area,
+                centroid,
+                ix: ix_c,
+                iy: iy_c,
+                ixy: ixy_c,
+                max_fiber_distance_y: max_fiber_y,
+                max_fiber_distance_x: max_fiber_x,
+                zxx_plus,
+                zxx_minus,
+                zyy_plus,
+                zyy_minus,
+                perimeter,
+                qx: first_y,
+                qy: first_x,
+                ixx_g: ix,
+                iyy_g: iy,
+                ixy_g: ixy,
+            },
+            principal: PrincipalProperties {
+                i11,
+                i22,
+                phi,
+                z11_plus,
+                z11_minus,
+                z22_plus,
+                z22_minus,
+            },
+            gyration: GyrationProperties {
+                rx,
+                ry,
+                r11,
+                r22,
+                polar: ((ix_c + iy_c) / area).sqrt(),
+            },
         }
+    }
+
+    /// Compute section properties from a single `Geometry` (one region with
+    /// optional holes and transforms).
+    pub fn from_geometry(geometry: &Geometry) -> Self {
+        Self::from_compound(&CompoundGeometry::new(vec![geometry.clone()]))
+    }
+
+    /// Compute section properties from a `Section` (outer boundary + holes).
+    ///
+    /// This is a convenience wrapper that delegates to [`from_compound`]; the
+    /// section is treated as a single-region compound geometry.
+    pub fn from_section(section: &Section) -> Self {
+        Self::from_compound(&CompoundGeometry::from(section.clone()))
     }
 
     /// Principal moments of inertia and principal angle (radians, CCW from x-axis).
     pub fn principal_moments(&self) -> (f64, f64, f64) {
-        let avg = (self.ix + self.iy) * 0.5;
-        let diff = (self.ix - self.iy) * 0.5;
-        let rad = (diff * diff + self.ixy * self.ixy).sqrt();
-        let i1 = avg + rad;
-        let i2 = avg - rad;
-        let theta = 0.5 * (2.0 * self.ixy).atan2(self.ix - self.iy);
-        (i1, i2, theta)
+        (self.principal.i11, self.principal.i22, self.principal.phi)
     }
 
     pub fn principal_properties(&self) -> PrincipalProperties {
-        let avg = (self.ix + self.iy) * 0.5;
-        let diff = (self.ix - self.iy) * 0.5;
-
-        let radius = (diff * diff + self.ixy * self.ixy).sqrt();
-
-        let i1 = avg + radius;
-        let i2 = avg - radius;
-
-        let angle = 0.5 * (2.0 * self.ixy).atan2(self.ix - self.iy);
-
-        PrincipalProperties { i1, i2, angle }
+        self.principal
     }
 
-    /// Radius of gyration about centroidal axes.
+    /// Radius of gyration about centroidal axes: (rx, ry, polar).
     pub fn radius_of_gyration(&self) -> (f64, f64, f64) {
-        let rx = (self.ix / self.area).sqrt();
-        let ry = (self.iy / self.area).sqrt();
-        let rho = ((self.ix + self.iy) / self.area).sqrt();
-        (rx, ry, rho)
+        (self.gyration.rx, self.gyration.ry, self.gyration.polar)
     }
 
     pub fn gyration_properties(&self) -> GyrationProperties {
-        GyrationProperties {
-            rx: (self.ix / self.area).sqrt(),
-            ry: (self.iy / self.area).sqrt(),
-            polar: ((self.ix + self.iy) / self.area).sqrt(),
-        }
+        self.gyration
     }
 
     /// Maximum fiber distance from centroid in Y direction (for section modulus).
     pub fn max_fiber_distance_y(&self) -> f64 {
-        self.max_fiber_distance_y
+        self.geometric.max_fiber_distance_y
     }
 
     /// Maximum fiber distance from centroid in X direction (for section modulus).
     pub fn max_fiber_distance_x(&self) -> f64 {
-        self.max_fiber_distance_x
+        self.geometric.max_fiber_distance_x
     }
 
     /// Elastic section modulus about the x-axis (minimum of plus/minus).
     pub fn section_modulus_x(&self) -> f64 {
-        self.zxx_plus.min(self.zxx_minus)
+        self.geometric.zxx_plus.min(self.geometric.zxx_minus)
     }
 
     /// Elastic section modulus about the y-axis (minimum of plus/minus).
     pub fn section_modulus_y(&self) -> f64 {
-        self.zyy_plus.min(self.zyy_minus)
+        self.geometric.zyy_plus.min(self.geometric.zyy_minus)
     }
 
     /// Section modulus about the 11-axis (minimum of plus/minus).
     pub fn section_modulus_11(&self) -> f64 {
-        self.z11_plus.min(self.z11_minus)
+        self.principal.z11_plus.min(self.principal.z11_minus)
     }
 
     /// Section modulus about the 22-axis (minimum of plus/minus).
     pub fn section_modulus_22(&self) -> f64 {
-        self.z22_plus.min(self.z22_minus)
+        self.principal.z22_plus.min(self.principal.z22_minus)
     }
 }
 
@@ -442,10 +471,10 @@ mod tests {
     #[test]
     fn principal_moduli_match_centroidal_for_symmetric_section() {
         let props = SectionProperties::from_section(&rectangle(0.1, 0.2));
-        assert!((props.z11_plus - props.zxx_plus).abs() / props.zxx_plus < 1e-10);
-        assert!((props.z11_minus - props.zxx_minus).abs() / props.zxx_minus < 1e-10);
-        assert!((props.z22_plus - props.zyy_plus).abs() / props.zyy_plus < 1e-10);
-        assert!((props.z22_minus - props.zyy_minus).abs() / props.zyy_minus < 1e-10);
+        assert!((props.principal.z11_plus - props.zxx_plus).abs() / props.zxx_plus < 1e-10);
+        assert!((props.principal.z11_minus - props.zxx_minus).abs() / props.zxx_minus < 1e-10);
+        assert!((props.principal.z22_plus - props.zyy_plus).abs() / props.zyy_plus < 1e-10);
+        assert!((props.principal.z22_minus - props.zyy_minus).abs() / props.zyy_minus < 1e-10);
     }
 
     #[test]
@@ -514,16 +543,467 @@ mod tests {
         // For rectangle: I11 = Ix (if h > b), I22 = Iy
         let i11_expected = 0.1 * 0.2_f64.powi(3) / 12.0;
         let i22_expected = 0.2 * 0.1_f64.powi(3) / 12.0;
-        assert!((props.i11_c - i11_expected).abs() / i11_expected < 1e-10);
-        assert!((props.i22_c - i22_expected).abs() / i22_expected < 1e-10);
+        assert!((props.principal.i11 - i11_expected).abs() / i11_expected < 1e-10);
+        assert!((props.principal.i22 - i22_expected).abs() / i22_expected < 1e-10);
 
         // Principal angle ~ 0 for doubly-symmetric section
-        assert!(props.phi.abs() < 1e-10);
+        assert!(props.principal.phi.abs() < 1e-10);
 
         // Radii of gyration
-        assert!((props.rx_c - (props.ix / area).sqrt()).abs() < 1e-12);
-        assert!((props.ry_c - (props.iy / area).sqrt()).abs() < 1e-12);
-        assert!((props.r11_c - (props.i11_c / area).sqrt()).abs() < 1e-12);
-        assert!((props.r22_c - (props.i22_c / area).sqrt()).abs() < 1e-12);
+        assert!((props.gyration.rx - (props.ix / area).sqrt()).abs() < 1e-12);
+        assert!((props.gyration.ry - (props.iy / area).sqrt()).abs() < 1e-12);
+        assert!((props.gyration.r11 - (props.principal.i11 / area).sqrt()).abs() < 1e-12);
+        assert!((props.gyration.r22 - (props.principal.i22 / area).sqrt()).abs() < 1e-12);
+    }
+
+    // ---- CompoundGeometry / multi-region tests ----
+
+    use crate::geometry::{CompoundGeometry, Geometry};
+
+    fn rect_polygon(width: f64, height: f64, cx: f64, cy: f64) -> Polygon {
+        let hw = width * 0.5;
+        let hh = height * 0.5;
+        Polygon::new(vec![
+            Point::new(cx - hw, cy - hh),
+            Point::new(cx + hw, cy - hh),
+            Point::new(cx + hw, cy + hh),
+            Point::new(cx - hw, cy + hh),
+        ])
+    }
+
+    #[test]
+    fn from_section_and_from_compound_agree_for_single_region() {
+        let section = rectangle(0.1, 0.2);
+        let props_section = SectionProperties::from_section(&section);
+        let compound = CompoundGeometry::from(section.clone());
+        let props_compound = SectionProperties::from_compound(&compound);
+        assert!((props_section.area - props_compound.area).abs() < 1e-15);
+        assert!((props_section.ix - props_compound.ix).abs() < 1e-15);
+        assert!((props_section.iy - props_compound.iy).abs() < 1e-15);
+        assert!((props_section.ixy - props_compound.ixy).abs() < 1e-15);
+        assert!((props_section.centroid.x - props_compound.centroid.x).abs() < 1e-15);
+        assert!((props_section.centroid.y - props_compound.centroid.y).abs() < 1e-15);
+    }
+
+    #[test]
+    fn from_geometry_matches_from_section() {
+        let section = rectangle(0.1, 0.2);
+        let props_section = SectionProperties::from_section(&section);
+        let geometry = Geometry::from_section(&section);
+        let props_geometry = SectionProperties::from_geometry(&geometry);
+        assert!((props_section.area - props_geometry.area).abs() < 1e-15);
+        assert!((props_section.ix - props_geometry.ix).abs() < 1e-15);
+        assert!((props_section.iy - props_geometry.iy).abs() < 1e-15);
+    }
+
+    #[test]
+    fn two_disjoint_rectangles_area_and_centroid() {
+        // Two 0.1 x 0.2 rectangles side by side, gap 0.05.
+        // Left centroid at x=-0.075, right at x=+0.075.
+        let g1 = Geometry::new(rect_polygon(0.1, 0.2, -0.075, 0.0), vec![]);
+        let g2 = Geometry::new(rect_polygon(0.1, 0.2, 0.075, 0.0), vec![]);
+        let compound = CompoundGeometry::new(vec![g1, g2]);
+        let props = SectionProperties::from_compound(&compound);
+
+        let area_each = 0.1 * 0.2;
+        assert!((props.area - 2.0 * area_each).abs() / (2.0 * area_each) < 1e-12);
+        // Symmetric about y-axis => centroid at origin
+        assert!(props.centroid.x.abs() < 1e-12);
+        assert!(props.centroid.y.abs() < 1e-12);
+    }
+
+    #[test]
+    fn two_disjoint_rectangles_moment_of_inertia() {
+        // Two 0.1 x 0.2 rectangles, centroids at x = ±0.075.
+        // Iy_total = 2 * (Iy_local + A * d²) where d = 0.075.
+        let g1 = Geometry::new(rect_polygon(0.1, 0.2, -0.075, 0.0), vec![]);
+        let g2 = Geometry::new(rect_polygon(0.1, 0.2, 0.075, 0.0), vec![]);
+        let compound = CompoundGeometry::new(vec![g1, g2]);
+        let props = SectionProperties::from_compound(&compound);
+
+        let b = 0.1_f64;
+        let h = 0.2_f64;
+        let a = b * h;
+        let d = 0.075_f64;
+        let iy_local = h * b.powi(3) / 12.0;
+        let iy_expected = 2.0 * (iy_local + a * d * d);
+        assert!((props.iy - iy_expected).abs() / iy_expected < 1e-10);
+
+        // Ix: both share same y-centroid (0), so Ix = 2 * Ix_local
+        let ix_local = b * h.powi(3) / 12.0;
+        let ix_expected = 2.0 * ix_local;
+        assert!((props.ix - ix_expected).abs() / ix_expected < 1e-10);
+    }
+
+    #[test]
+    fn compound_with_hole_in_one_region() {
+        // Region 1: solid 0.2 x 0.2 square centred at origin.
+        // Region 2: 0.2 x 0.2 square with a 0.1 x 0.1 hole, centred at (0.3, 0).
+        let outer1 = rect_polygon(0.2, 0.2, 0.0, 0.0);
+        let g1 = Geometry::new(outer1, vec![]);
+
+        let outer2 = rect_polygon(0.2, 0.2, 0.3, 0.0);
+        let hole2 = rect_polygon(0.1, 0.1, 0.3, 0.0);
+        let g2 = Geometry::new(outer2, vec![hole2]);
+
+        let compound = CompoundGeometry::new(vec![g1, g2]);
+        let props = SectionProperties::from_compound(&compound);
+
+        let area_expected = 0.2 * 0.2 + (0.2 * 0.2 - 0.1 * 0.1);
+        assert!((props.area - area_expected).abs() / area_expected < 1e-10);
+
+        // Centroid: region 1 area 0.04 at x=0, region 2 net area 0.03 at x=0.3
+        let cx_expected = (0.04 * 0.0 + 0.03 * 0.3) / 0.07;
+        assert!((props.centroid.x - cx_expected).abs() < 1e-12);
+        assert!(props.centroid.y.abs() < 1e-12);
+    }
+
+    #[test]
+    fn compound_with_transform_translate() {
+        // A 0.1 x 0.2 rectangle built at origin, then translated to (1.0, 2.0).
+        let mut g = Geometry::new(rect_polygon(0.1, 0.2, 0.0, 0.0), vec![]);
+        g.transforms.push(crate::geometry::Transform::Translate {
+            dx: 1.0,
+            dy: 2.0,
+        });
+        let compound = CompoundGeometry::new(vec![g]);
+        let props = SectionProperties::from_compound(&compound);
+
+        assert!((props.centroid.x - 1.0).abs() < 1e-12);
+        assert!((props.centroid.y - 2.0).abs() < 1e-12);
+        assert!((props.area - 0.1 * 0.2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn compound_with_transform_rotate_preserves_area_and_ix() {
+        // Rotating a square about its centroid preserves area and Ix == Iy.
+        let mut g = Geometry::new(rect_polygon(0.2, 0.2, 0.0, 0.0), vec![]);
+        g.transforms
+            .push(crate::geometry::Transform::Rotate { angle: 0.3 });
+        let compound = CompoundGeometry::new(vec![g]);
+        let props = SectionProperties::from_compound(&compound);
+
+        assert!((props.area - 0.04).abs() < 1e-15);
+        // For a square, Ix == Iy regardless of rotation.
+        assert!((props.ix - props.iy).abs() / props.ix < 1e-10);
+    }
+
+    #[test]
+    fn compound_built_up_section_parallel_axis() {
+        // Built-up section: two flanges 0.2 x 0.02 at y = ±0.09,
+        // web 0.02 x 0.16 at x = 0.  This forms an I-section.
+        let flange_top = Geometry::new(rect_polygon(0.2, 0.02, 0.0, 0.09), vec![]);
+        let flange_bot = Geometry::new(rect_polygon(0.2, 0.02, 0.0, -0.09), vec![]);
+        let web = Geometry::new(rect_polygon(0.02, 0.16, 0.0, 0.0), vec![]);
+        let compound = CompoundGeometry::new(vec![flange_top, flange_bot, web]);
+        let props = SectionProperties::from_compound(&compound);
+
+        // Total area
+        let area_expected = 2.0 * (0.2 * 0.02) + 0.02 * 0.16;
+        assert!((props.area - area_expected).abs() / area_expected < 1e-12);
+
+        // Doubly symmetric => centroid at origin
+        assert!(props.centroid.x.abs() < 1e-12);
+        assert!(props.centroid.y.abs() < 1e-12);
+
+        // Ix via parallel-axis theorem
+        let ix_flange = 0.2 * 0.02_f64.powi(3) / 12.0 + 0.2 * 0.02 * 0.09_f64.powi(2);
+        let ix_web = 0.02 * 0.16_f64.powi(3) / 12.0;
+        let ix_expected = 2.0 * ix_flange + ix_web;
+        assert!((props.ix - ix_expected).abs() / ix_expected < 1e-10);
+    }
+
+    // ---- L / T / I / rotation / multi-hole test suite ----
+
+    fn l_section() -> Section {
+        // L-section: 0.1 x 0.1 square with top-right 0.08 x 0.08 removed.
+        // Horizontal leg: 0.1 x 0.02 at bottom.
+        // Vertical leg: 0.02 x 0.1 at left.
+        let poly = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.1, 0.0),
+            Point::new(0.1, 0.02),
+            Point::new(0.02, 0.02),
+            Point::new(0.02, 0.1),
+            Point::new(0.0, 0.1),
+        ]);
+        Section::new(poly, vec![])
+    }
+
+    fn i_section() -> Section {
+        // I-section: flanges 0.2 x 0.02 at y=±0.09, web 0.02 x 0.16.
+        let poly = Polygon::new(vec![
+            Point::new(-0.1, 0.10),
+            Point::new(0.1, 0.10),
+            Point::new(0.1, 0.08),
+            Point::new(0.01, 0.08),
+            Point::new(0.01, -0.08),
+            Point::new(0.1, -0.08),
+            Point::new(0.1, -0.10),
+            Point::new(-0.1, -0.10),
+            Point::new(-0.1, -0.08),
+            Point::new(-0.01, -0.08),
+            Point::new(-0.01, 0.08),
+            Point::new(-0.1, 0.08),
+        ]);
+        Section::new(poly, vec![])
+    }
+
+    #[test]
+    fn l_section_area_and_centroid() {
+        let props = SectionProperties::from_section(&l_section());
+        // Area = 0.1*0.02 + 0.02*0.08 = 0.0036
+        let area_expected = 0.1 * 0.02 + 0.02 * 0.08;
+        assert!((props.area - area_expected).abs() / area_expected < 1e-10);
+
+        // Centroid by composite method:
+        // horizontal leg (0.1 x 0.02): A=0.002, cx=0.05, cy=0.01
+        // vertical leg  (0.02 x 0.08): A=0.0016, cx=0.01, cy=0.06
+        let cx = (0.002 * 0.05 + 0.0016 * 0.01) / area_expected;
+        let cy = (0.002 * 0.01 + 0.0016 * 0.06) / area_expected;
+        assert!((props.centroid.x - cx).abs() < 1e-12);
+        assert!((props.centroid.y - cy).abs() < 1e-12);
+    }
+
+    #[test]
+    fn l_section_has_nonzero_ixy_and_rotated_principal_axes() {
+        let props = SectionProperties::from_section(&l_section());
+        // L-section is asymmetric => Ixy != 0
+        assert!(
+            props.ixy.abs() > 1e-8,
+            "L-section should have non-zero Ixy, got {}",
+            props.ixy
+        );
+        // Principal angle should be non-zero and not 90°
+        let phi = props.principal.phi;
+        assert!(phi.abs() > 1e-8, "L-section principal angle should be non-zero");
+        assert!(
+            (phi.abs() - std::f64::consts::FRAC_PI_2).abs() > 1e-8,
+            "L-section principal angle should not be 90°"
+        );
+    }
+
+    #[test]
+    fn l_section_principal_invariants() {
+        let props = SectionProperties::from_section(&l_section());
+        // Invariant: I11 + I22 = Ix + Iy
+        let sum_centroidal = props.ix + props.iy;
+        let sum_principal = props.principal.i11 + props.principal.i22;
+        assert!((sum_principal - sum_centroidal).abs() / sum_centroidal < 1e-10);
+
+        // Invariant: I11 * I22 = Ix * Iy - Ixy²
+        let det_centroidal = props.ix * props.iy - props.ixy.powi(2);
+        let det_principal = props.principal.i11 * props.principal.i22;
+        assert!((det_principal - det_centroidal).abs() / det_centroidal.abs() < 1e-10);
+
+        // I11 >= I22
+        assert!(props.principal.i11 >= props.principal.i22);
+    }
+
+    #[test]
+    fn t_section_single_symmetric_ixy_zero() {
+        let props = SectionProperties::from_section(&tee_section());
+        // T-section is symmetric about y-axis => Ixy = 0
+        assert!(props.ixy.abs() < 1e-12);
+
+        // zxx_plus != zxx_minus (not symmetric about x)
+        assert!((props.zxx_plus - props.zxx_minus).abs() > 1e-6);
+
+        // zyy_plus == zyy_minus (symmetric about y)
+        assert!((props.zyy_plus - props.zyy_minus).abs() < 1e-12);
+
+        // Ixy = 0 => principal angle is 0 (if Ix > Iy) or π/2 (if Iy > Ix).
+        // For this T-section, Iy > Ix (flange is wide in x), so phi ≈ π/2.
+        let phi = props.principal.phi;
+        assert!(
+            phi.abs() < 1e-10 || (phi.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-10,
+            "phi should be 0 or π/2 for Ixy=0, got {}",
+            phi
+        );
+    }
+
+    #[test]
+    fn i_section_doubly_symmetric() {
+        let props = SectionProperties::from_section(&i_section());
+
+        // Centroid at origin
+        assert!(props.centroid.x.abs() < 1e-12);
+        assert!(props.centroid.y.abs() < 1e-12);
+
+        // Ixy = 0
+        assert!(props.ixy.abs() < 1e-12);
+
+        // Symmetric => zxx_plus == zxx_minus, zyy_plus == zyy_minus
+        assert!((props.zxx_plus - props.zxx_minus).abs() / props.zxx_plus < 1e-10);
+        assert!((props.zyy_plus - props.zyy_minus).abs() / props.zyy_plus < 1e-10);
+
+        // Principal angle ~ 0
+        assert!(props.principal.phi.abs() < 1e-10);
+
+        // Principal moments == centroidal moments (Ixy = 0)
+        assert!((props.principal.i11 - props.ix).abs() / props.ix < 1e-10);
+        assert!((props.principal.i22 - props.iy).abs() / props.iy < 1e-10);
+    }
+
+    #[test]
+    fn i_section_area_and_ix_analytical() {
+        let props = SectionProperties::from_section(&i_section());
+        let area_expected = 2.0 * (0.2 * 0.02) + 0.02 * 0.16;
+        assert!((props.area - area_expected).abs() / area_expected < 1e-10);
+
+        // Ix = 2 * (bf*tf³/12 + bf*tf*d²) + tw*hw³/12
+        let ix_flange = 0.2 * 0.02_f64.powi(3) / 12.0 + 0.2 * 0.02 * 0.09_f64.powi(2);
+        let ix_web = 0.02 * 0.16_f64.powi(3) / 12.0;
+        let ix_expected = 2.0 * ix_flange + ix_web;
+        assert!((props.ix - ix_expected).abs() / ix_expected < 1e-10);
+    }
+
+    #[test]
+    fn rotated_rectangle_principal_angle() {
+        // Rectangle 0.2 x 0.1 rotated by 30°.
+        // After rotation, Ixy != 0 and principal angle ≈ 30°.
+        let angle = std::f64::consts::PI / 6.0; // 30°
+        let (s, c) = angle.sin_cos();
+        let hw = 0.1_f64;
+        let hh = 0.05_f64;
+        let rotate = |x: f64, y: f64| Point::new(x * c - y * s, x * s + y * c);
+        let poly = Polygon::new(vec![
+            rotate(-hw, -hh),
+            rotate(hw, -hh),
+            rotate(hw, hh),
+            rotate(-hw, hh),
+        ]);
+        let section = Section::new(poly, vec![]);
+        let props = SectionProperties::from_section(&section);
+
+        // Ixy should be non-zero after rotation
+        assert!(props.ixy.abs() > 1e-6, "rotated rectangle should have Ixy != 0");
+
+        // Principal angle should be ≈ ±30° (or ±30° + 90°)
+        let phi = props.principal.phi;
+        let deg = phi.to_degrees();
+        let deg_abs = deg.abs();
+        // phi could be 30° or -60° (atan2 ambiguity), both valid
+        assert!(
+            (deg_abs - 30.0).abs() < 1.0 || (deg_abs - 60.0).abs() < 1.0,
+            "principal angle should be near 30° or 60°, got {}°",
+            deg
+        );
+    }
+
+    #[test]
+    fn rotated_square_ix_equals_iy() {
+        // A square rotated by any angle has Ix == Iy.
+        let angle: f64 = 0.4; // arbitrary
+        let (s, c) = angle.sin_cos();
+        let hw = 0.1_f64;
+        let rotate = |x: f64, y: f64| Point::new(x * c - y * s, x * s + y * c);
+        let poly = Polygon::new(vec![
+            rotate(-hw, -hw),
+            rotate(hw, -hw),
+            rotate(hw, hw),
+            rotate(-hw, hw),
+        ]);
+        let section = Section::new(poly, vec![]);
+        let props = SectionProperties::from_section(&section);
+
+        assert!((props.ix - props.iy).abs() / props.ix < 1e-10);
+        // Ixy should be ~0 for a square (I11 == I22 => Ixy doesn't matter)
+        // Actually for a square Ixy may not be zero after rotation, but I11==I22
+        assert!((props.principal.i11 - props.principal.i22).abs() / props.principal.i11 < 1e-10);
+    }
+
+    #[test]
+    fn multi_hole_section_area() {
+        // 0.4 x 0.4 square with two 0.05 x 0.05 square holes
+        // at (±0.1, 0).
+        let outer = rect_polygon(0.4, 0.4, 0.0, 0.0);
+        let hole1 = rect_polygon(0.05, 0.05, 0.1, 0.0);
+        let hole2 = rect_polygon(0.05, 0.05, -0.1, 0.0);
+        let section = Section::new(outer, vec![hole1, hole2]);
+        let props = SectionProperties::from_section(&section);
+
+        let area_expected = 0.4 * 0.4 - 2.0 * 0.05 * 0.05;
+        assert!((props.area - area_expected).abs() / area_expected < 1e-10);
+    }
+
+    #[test]
+    fn multi_hole_section_centroid_at_origin() {
+        // Symmetric placement of holes => centroid at origin.
+        let outer = rect_polygon(0.4, 0.4, 0.0, 0.0);
+        let hole1 = rect_polygon(0.05, 0.05, 0.1, 0.0);
+        let hole2 = rect_polygon(0.05, 0.05, -0.1, 0.0);
+        let section = Section::new(outer, vec![hole1, hole2]);
+        let props = SectionProperties::from_section(&section);
+
+        assert!(props.centroid.x.abs() < 1e-12);
+        assert!(props.centroid.y.abs() < 1e-12);
+    }
+
+    #[test]
+    fn multi_hole_section_ix_parallel_axis() {
+        // Ix = Ix_outer - 2 * (Ix_hole_local + A_hole * d²)
+        // where d = 0 (holes on x-axis), so Ix = Ix_outer - 2 * Ix_hole_local
+        let outer = rect_polygon(0.4, 0.4, 0.0, 0.0);
+        let hole1 = rect_polygon(0.05, 0.05, 0.1, 0.0);
+        let hole2 = rect_polygon(0.05, 0.05, -0.1, 0.0);
+        let section = Section::new(outer, vec![hole1, hole2]);
+        let props = SectionProperties::from_section(&section);
+
+        let ix_outer = 0.4 * 0.4_f64.powi(3) / 12.0;
+        let ix_hole = 0.05 * 0.05_f64.powi(3) / 12.0;
+        let ix_expected = ix_outer - 2.0 * ix_hole;
+        assert!((props.ix - ix_expected).abs() / ix_expected < 1e-10);
+    }
+
+    #[test]
+    fn multi_hole_section_iy_parallel_axis() {
+        // Iy = Iy_outer - 2 * (Iy_hole_local + A_hole * d²)
+        // where d = 0.1 (holes at x = ±0.1)
+        let outer = rect_polygon(0.4, 0.4, 0.0, 0.0);
+        let hole1 = rect_polygon(0.05, 0.05, 0.1, 0.0);
+        let hole2 = rect_polygon(0.05, 0.05, -0.1, 0.0);
+        let section = Section::new(outer, vec![hole1, hole2]);
+        let props = SectionProperties::from_section(&section);
+
+        let iy_outer = 0.4 * 0.4_f64.powi(3) / 12.0;
+        let iy_hole_local = 0.05 * 0.05_f64.powi(3) / 12.0;
+        let a_hole = 0.05 * 0.05;
+        let iy_expected = iy_outer - 2.0 * (iy_hole_local + a_hole * 0.1_f64.powi(2));
+        assert!((props.iy - iy_expected).abs() / iy_expected < 1e-10);
+    }
+
+    #[test]
+    fn multi_hole_section_perimeter() {
+        // Perimeter = outer + 2 * hole
+        let outer = rect_polygon(0.4, 0.4, 0.0, 0.0);
+        let hole1 = rect_polygon(0.05, 0.05, 0.1, 0.0);
+        let hole2 = rect_polygon(0.05, 0.05, -0.1, 0.0);
+        let section = Section::new(outer, vec![hole1, hole2]);
+        let props = SectionProperties::from_section(&section);
+
+        let p_expected = 4.0 * 0.4 + 2.0 * 4.0 * 0.05;
+        assert!((props.perimeter - p_expected).abs() / p_expected < 1e-10);
+    }
+
+    #[test]
+    fn compound_l_plus_rectangle_two_regions() {
+        // An L-section built as two disjoint rectangles (no shared edge).
+        // Horizontal leg: 0.1 x 0.02 at (0.05, 0.01)
+        // Vertical leg: 0.02 x 0.08 at (0.01, 0.06)
+        let g1 = Geometry::new(rect_polygon(0.1, 0.02, 0.05, 0.01), vec![]);
+        let g2 = Geometry::new(rect_polygon(0.02, 0.08, 0.01, 0.06), vec![]);
+        let compound = CompoundGeometry::new(vec![g1, g2]);
+        let props = SectionProperties::from_compound(&compound);
+
+        // Compare with the single-polygon L-section
+        let l_props = SectionProperties::from_section(&l_section());
+
+        assert!((props.area - l_props.area).abs() / l_props.area < 1e-10);
+        assert!((props.centroid.x - l_props.centroid.x).abs() < 1e-12);
+        assert!((props.centroid.y - l_props.centroid.y).abs() < 1e-12);
+        assert!((props.ix - l_props.ix).abs() / l_props.ix < 1e-10);
+        assert!((props.iy - l_props.iy).abs() / l_props.iy < 1e-10);
+        assert!((props.ixy - l_props.ixy).abs() / props.ixy.abs() < 1e-10);
     }
 }

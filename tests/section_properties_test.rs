@@ -140,20 +140,20 @@ fn principal_properties_invariants() {
 
     // Invariant 1:
     // I1 + I2 = Ix + Iy
-    assert!((principal.i1 + principal.i2 - props.ix - props.iy).abs() < 1e-10);
+    assert!((principal.i11 + principal.i22 - props.ix - props.iy).abs() < 1e-10);
 
     // Invariant 2:
     // I1 * I2 = Ix * Iy - Ixy²
     assert!(
-        (principal.i1 * principal.i2 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
+        (principal.i11 * principal.i22 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
     );
 
     // Principal moments are ordered.
-    assert!(principal.i1 >= principal.i2);
+    assert!(principal.i11 >= principal.i22);
 
     // Principal moments must be non-negative for a valid area.
-    assert!(principal.i1 >= 0.0);
-    assert!(principal.i2 >= 0.0);
+    assert!(principal.i11 >= 0.0);
+    assert!(principal.i22 >= 0.0);
 }
 #[test]
 fn gyration_properties() {
@@ -208,24 +208,24 @@ fn asymmetric_section_has_rotated_principal_axes() {
     let principal = props.principal_properties();
 
     // Principal moments must be ordered.
-    assert!(principal.i1 >= principal.i2);
+    assert!(principal.i11 >= principal.i22);
 
     // Principal-axis transformation must preserve the
     // first invariant.
-    assert!((principal.i1 + principal.i2 - props.ix - props.iy).abs() < 1e-10);
+    assert!((principal.i11 + principal.i22 - props.ix - props.iy).abs() < 1e-10);
 
     // And preserve the determinant.
     assert!(
-        (principal.i1 * principal.i2 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
+        (principal.i11 * principal.i22 - (props.ix * props.iy - props.ixy.powi(2))).abs() < 1e-10
     );
 
     // Since Ixy != 0, this section should not have its
     // principal axes coincident with the original x/y axes.
     assert!(
-        principal.angle.abs() > 1e-10
-            && (principal.angle.abs() - std::f64::consts::PI / 2.0).abs() > 1e-10,
+        principal.phi.abs() > 1e-10
+            && (principal.phi.abs() - std::f64::consts::PI / 2.0).abs() > 1e-10,
         "principal angle = {}",
-        principal.angle
+        principal.phi
     );
 }
 

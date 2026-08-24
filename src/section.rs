@@ -12,9 +12,8 @@ pub struct Section {
 impl Section {
     /// Create a new section from an outer polygon and optional holes.
     ///
-    /// # Panics
-    ///
-    /// Panics if the outer polygon is not CCW or any hole is not CW.
+    /// The outer boundary is normalised to counter-clockwise orientation
+    /// and each hole to clockwise orientation.
     pub fn new(mut outer: Polygon, mut holes: Vec<Polygon>) -> Self {
         // Section owns the orientation convention:
         // outer boundary -> CCW
@@ -155,7 +154,7 @@ impl Section {
             props.iy,
             props.ixy,
             warping.j,
-            principal.angle,
+            principal.phi,
         )
     }
 

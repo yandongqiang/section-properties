@@ -7,9 +7,45 @@ pub struct Polygon {
 
 impl Polygon {
     pub fn new(vertices: Vec<Point>) -> Self {
-        assert!(vertices.len() >= 3, "Polygon needs at least 3 vertices");
+        assert!(
+            vertices.len() >= 3,
+            "Polygon needs at least 3 vertices"
+        );
 
-        Self { vertices }
+        for (i, v) in vertices.iter().enumerate() {
+            assert!(
+                v.x.is_finite() && v.y.is_finite(),
+                "Polygon vertex {} is not finite: ({}, {})",
+                i,
+                v.x,
+                v.y
+            );
+        }
+
+        // Remove consecutive duplicate vertices (zero-length edges) and a
+        // trailing vertex that closes back on the first (closed-ring convention).
+        let mut dedup: Vec<Point> = Vec::with_capacity(vertices.len());
+        for v in &vertices {
+            if dedup.last().map_or(true, |p| *p != *v) {
+                dedup.push(*v);
+            }
+        }
+        if dedup.len() > 1 && dedup[0] == *dedup.last().unwrap() {
+            dedup.pop();
+        }
+
+        assert!(
+            dedup.len() >= 3,
+            "Polygon needs at least 3 distinct vertices"
+        );
+
+        let poly = Self { vertices: dedup };
+        assert!(
+            poly.signed_area().abs() > f64::EPSILON,
+            "Polygon has (near-)zero area"
+        );
+
+        poly
     }
 
     /// Calculate the signed area of the polygon.
