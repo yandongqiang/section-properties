@@ -738,6 +738,38 @@ impl SparseMatrix {
         self.vals.push(val);
     }
 
+    /// Compressed CSR representation for fast repeated matvec.
+    pub fn to_csr(&self) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+        use std::collections::HashMap;
+        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
+        for k in 0..self.rows.len() {
+            *map.entry((self.rows[k], self.cols[k])).or_insert(0.0) += self.vals[k];
+        }
+        let mut entries: Vec<(usize, usize, f64)> =
+            map.into_iter().filter(|(_, v)| *v != 0.0).map(|((r, c), v)| (r, c, v)).collect();
+        entries.sort_unstable_by_key(|e| (e.0, e.1));
+        let mut row_ptr = vec![0usize; self.n + 1];
+        let cols: Vec<usize> = entries.iter().map(|e| e.1).collect();
+        let vals: Vec<f64> = entries.iter().map(|e| e.2).collect();
+        for e in &entries {
+            row_ptr[e.0 + 1] += 1;
+        }
+        for i in 0..self.n {
+            row_ptr[i + 1] += row_ptr[i];
+        }
+        (row_ptr, cols, vals)
+    }
+
+    /// Matrix-vector product into a caller-provided buffer (no alloc).'
+    pub fn matvec_into(&self, x: &[f64], y: &mut [f64]) {
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
+        for k in 0..self.rows.len() {
+            y[self.rows[k]] += self.vals[k] * x[self.cols[k]];
+        }
+    }
+
     /// Matrix-vector product y = A*x.
     pub fn matvec(&self, x: &[f64]) -> Vec<f64> {
         let mut y = vec![0.0; self.n];
@@ -809,9 +841,11 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
     let mut z: Vec<f64> = r.iter().zip(m_inv.iter()).map(|(a, b)| a * b).collect();
     let mut p = z.clone();
     let mut rz_old: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
+    let mut ap_buf = vec![0.0; n];
 
     for _ in 0..max_iter {
-        let ap = a.matvec(&p);
+        a.matvec_into(&p, &mut ap_buf);
+        let ap: &[f64] = &ap_buf;
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(a, b)| a * b).sum();
         if p_ap.abs() <= 0.0 {
             break;

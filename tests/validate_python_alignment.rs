@@ -183,3 +183,110 @@ fn report_angle_principal_axes() {
         "equal-leg angle principal angle should be ~45deg");
 }
 
+
+#[test]
+fn report_i_section_shape_factor() {
+    let ipe = ISection::from_designation("IPE300").unwrap();
+    let sec = ipe.build();
+    let props = section_properties::SectionProperties::from_section(&sec);
+    let mat = STEEL_S355;
+    let pa = PlasticAnalysis::new(sec.clone(), mat);
+    let px = pa.plastic_section.plastic_properties(PlasticAxis::X);
+    println!("zxx+={:.4e} zxx-={:.4e} Zpl_x={:.4e} SF_x={:.4}",
+        props.zxx_plus, props.zxx_minus, px.plastic_section_modulus,
+        px.plastic_section_modulus / props.section_modulus_x());
+    // Shape factor for rolled I-sections ~ 1.10-1.15
+    let sf = px.plastic_section_modulus / props.section_modulus_x();
+    assert!(sf > 1.05 && sf < 1.25, "shape factor out of range: {}", sf);
+    // Table cross-check (IPE300): Wx=557, Wy=80.5, Wpl,x=628.4 cm3.
+    assert!(rel(props.zxx_plus, 5.57e-4) < 0.01);
+    assert!(rel(props.zyy_plus, 8.05e-5) < 0.01);
+    assert!(rel(px.plastic_section_modulus, 6.284e-4) < 0.01);
+}
+#[test]
+fn report_interaction_diagram_rectangle() {
+    // Rectangle 100x200 steel: Nc = A*fy, Mc = Wpl*fy.
+    let rect = RectangularSection::new(0.1, 0.2);
+    let fy = STEEL_S355.yield_strength;
+    let a = 0.02_f64;
+    let wpl = 0.1 * 0.04 / 4.0;
+    let n_c = a * fy;
+    let m_c = wpl * fy;
+
+    let diagram = section_properties::plastic::InteractionDiagram::new(rect.build(), STEEL_S355);
+    // pure compression capacity
+    let chk_n = diagram.check_capacity(
+        section_properties::plastic::LoadCase3D::pure_compression(n_c), 1.0);
+    println!("pure N: util={:.4} passed={}", chk_n.utilization, chk_n.passed);
+    println!("diagram caps: Nrd={:.1} Mxrd={:.1} Myrd={:.1} npts={}", diagram.n_rd, diagram.m_x_rd, diagram.m_y_rd, diagram.surface_points.len());
+    for (i,pt) in diagram.surface_points.iter().enumerate().take(8) {
+        println!("  pt[{}] n={:.3e} mx={:.3e} my={:.3e}", i, pt.n, pt.mx, pt.my);
+    }
+    println!("expected: Nc={:.1} Mc={:.1}", n_c, m_c);
+    assert!(chk_n.utilization < 1.01, "pure compression should be at capacity");
+
+    // pure bending
+    let chk_m = diagram.check_capacity(
+        section_properties::plastic::LoadCase3D::pure_bending_x(m_c), 1.0);
+    println!("pure M: util={:.4}", chk_m.utilization);
+
+    // half-N + bending should have remaining capacity < pure-bending case
+    let chk_mix = diagram.check_capacity(
+        section_properties::plastic::LoadCase3D::new(0.5 * n_c, m_c, 0.0), 1.0);
+    println!("halfN+M: util={:.4}", chk_mix.utilization);
+    assert!(chk_mix.utilization > chk_m.utilization,
+        "half axial + full bending must exceed pure-bending utilization");
+    // Exact surface check should accept pure bending at capacity
+    let exact = diagram.check_capacity_exact(
+        section_properties::plastic::LoadCase3D::pure_bending_x(m_c * 0.9), 1.0);
+    println!("exact 90% M: util={:.4} passed={}", exact.utilization, exact.passed);
+    assert!(exact.passed);
+}
+
+#[test]
+fn report_fem_bending_stress() {
+    // FEM path: rectangle under My about strong axis; compare extreme fibre.
+    use section_properties::mesh::{FemSectionAnalysis};
+    let rect = RectangularSection::new(0.1, 0.2);
+    let mut analysis = FemSectionAnalysis::new(rect.build(), STEEL_S355)
+        .with_mesh_params(section_properties::MeshParams {
+            target_size: 0.02,
+            ..Default::default()
+        });
+    let m = 10e3; // 10 kNm about x (strong)
+    let stress = analysis.calculate_stress(0.0, 0.0, 0.0, m, 0.0, 0.0).unwrap();
+    let wel = 0.1 * 0.2_f64.powi(2) / 6.0;
+    let expected = m / wel;
+    // sigma_zz from bending: sig_zz_mxx component of nodal stresses
+    let max_sz = stress
+        .nodal_stresses
+        .iter()
+        .map(|s| s.sigma_x.abs())
+        .fold(0.0_f64, f64::max);
+    println!(
+        "FEM max |sigma_z| = {:.1}, analytic extreme = {:.1}, rel err = {:.4}",
+        max_sz,
+        expected,
+        ((max_sz - expected) / expected).abs()
+    );
+    assert!(((max_sz - expected) / expected).abs() < 0.05);
+}
+
+#[test]
+fn debug_fem_props() {
+    use section_properties::mesh::FemSectionAnalysis;
+    let rect = RectangularSection::new(0.1, 0.2);
+    let mut analysis = FemSectionAnalysis::new(rect.build(), STEEL_S355);
+    let cmp = analysis.validate_properties();
+    println!("fem vs analytic: area%={:.3} ix%={:.3} iy%={:.3}", cmp.area_diff_pct, cmp.ix_diff_pct, cmp.iy_diff_pct);
+    let fem = analysis.calculate_geometric_properties();
+    println!("fem ix={:.6e} iy={:.6e} area={:.6e}", fem.ix, fem.iy, fem.area);
+
+    let stress = analysis.calculate_stress(0.0,0.0,0.0,1e4,0.0,0.0).unwrap();
+    let mut ns: Vec<_> = stress.nodal_stresses.iter().map(|s| (s.sigma_x, s.sigma_y, s.tau_xy)).collect();
+    ns.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap());
+    for (sx,sy,tx) in ns.iter().take(3) { println!("nodal sx={:.3e} sy={:.3e} t={:.3e}", sx, sy, tx); }
+    let mut es: Vec<_> = stress.element_stresses.iter().map(|s| s.sigma_x).collect();
+    es.sort_by(|a,b| b.partial_cmp(a).unwrap());
+    for s in es.iter().take(3) { println!("elem sx={:.3e}", s); }
+}

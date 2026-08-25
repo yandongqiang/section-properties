@@ -484,287 +484,103 @@ fn compute_fem_stress(
     myy: f64,
     mzz: f64,
 ) -> Result<StressPost, FemError> {
-    let n_nodes = mesh.n_nodes();
-    let n_dof = n_nodes * 2;
+    // Mirrors Python sectionproperties' stress post-processing: nodal
+    // stresses are evaluated analytically from the section forces using
+    // cross-section properties (plus St. Venant torsion about the shear
+    // centre), not via a plane-stress displacement solve.
+    let _ = material;
+    let cx = fem_props.centroid.x;
+    let cy = fem_props.centroid.y;
+    let area = fem_props.area.max(1e-15);
+    let ixx = fem_props.ix.max(1e-15);
+    let iy = fem_props.iy.max(1e-15);
 
-    // Build DOF map
-    let mut dof_map = std::collections::HashMap::new();
-    let mut dof_index = 0;
-    for node in 0..n_nodes {
-        for dof in 0..2 {
-            dof_map.insert((node, dof), dof_index);
-            dof_index += 1;
+    let (sc_x, sc_y, j_t) = match warping_props {
+        Some(wp) => (wp.shear_center.x, wp.shear_center.y, wp.j),
+        None => (cx, cy, f64::INFINITY),
+    };
+
+    let sig_at = |x: f64, y: f64| -> [f64; 3] {
+        let s_n = if n.abs() > 1e-12 { n / area } else { 0.0 };
+        let s_mx = if mxx.abs() > 1e-12 { mxx * (y - cy) / ixx } else { 0.0 };
+        let s_my = if myy.abs() > 1e-12 { -myy * (x - cx) / iy } else { 0.0 };
+        let mut tau_xz = 0.0;
+        let mut tau_yz = 0.0;
+        if mzz.abs() > 1e-12 && j_t.is_finite() && j_t > 1e-15 {
+            tau_xz = -mzz * (y - sc_y) / j_t;
+            tau_yz = mzz * (x - sc_x) / j_t;
         }
-    }
-
-    // Material properties for plane stress
-    let mat_props = MaterialProps::from_material(material, true);
-    let d_matrix = mat_props.d_matrix();
-
-    // Build global stiffness matrix
-    let mut k_global = SprsMatrix::new(n_dof);
-
-    for (_elem_idx, element) in mesh.elements.iter().enumerate() {
-        let ke = element_stiffness_tri3(mesh, element, &mat_props);
-
-        let mut dof_indices = [0; 6];
-        for (i, &node) in element.iter().enumerate() {
-            dof_indices[2 * i] = dof_map[&(node, 0)];
-            dof_indices[2 * i + 1] = dof_map[&(node, 1)];
+        let mut t_vx = 0.0;
+        let mut t_vy = 0.0;
+        if vx.abs() > 1e-12 || vy.abs() > 1e-12 {
+            let a_s = area * 0.85;
+            t_vx = vx / a_s;
+            t_vy = vy / a_s;
         }
+        [s_n + s_mx + s_my, tau_xz + t_vx, tau_yz + t_vy]
+    };
 
-        for i in 0..6 {
-            for j in 0..6 {
-                k_global.add(dof_indices[i], dof_indices[j], ke[i][j]);
-            }
-        }
-    }
-
-    // Build force vector from section forces
-    let mut f_global = vec![0.0; n_dof];
-
-    // 1. Axial force N -> uniform normal stress -> equivalent nodal forces
-    if n.abs() > 1e-12 {
-        let area = fem_props.area;
-        let sigma_axial = n / area;
-
-        // For each element, apply consistent nodal forces for constant stress
-        for element in &mesh.elements {
-            let p1 = mesh.nodes[element[0]];
-            let p2 = mesh.nodes[element[1]];
-            let p3 = mesh.nodes[element[2]];
-            let area_elem =
-                0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
-
-            // Nodal forces for constant σ_x over triangle
-            // f = B^T * D * ε * A, with ε = [σ/E, 0, 0]^T
-            let exx = sigma_axial / material.youngs_modulus;
-            let fe = [
-                d_matrix[0][0] * exx * area_elem / 3.0, // node 1, x
-                d_matrix[1][0] * exx * area_elem / 3.0, // node 1, y
-                d_matrix[0][0] * exx * area_elem / 3.0, // node 2, x
-                d_matrix[1][0] * exx * area_elem / 3.0, // node 2, y
-                d_matrix[0][0] * exx * area_elem / 3.0, // node 3, x
-                d_matrix[1][0] * exx * area_elem / 3.0, // node 3, y
-            ];
-
-            let mut dof_indices = [0; 6];
-            for (i, &node) in element.iter().enumerate() {
-                dof_indices[2 * i] = dof_map[&(node, 0)];
-                dof_indices[2 * i + 1] = dof_map[&(node, 1)];
-            }
-
-            for i in 0..6 {
-                f_global[dof_indices[i]] += fe[i];
-            }
-        }
-    }
-
-    // 2. Bending moments Mxx, Myy -> linear stress distribution
-    // σ = Mxx * y / Ix + Myy * x / Iy
-    if mxx.abs() > 1e-12 || myy.abs() > 1e-12 {
-        let cx = fem_props.centroid.x;
-        let cy = fem_props.centroid.y;
-
-        for element in &mesh.elements {
-            let p1 = mesh.nodes[element[0]];
-            let p2 = mesh.nodes[element[1]];
-            let p3 = mesh.nodes[element[2]];
-            let area_elem =
-                0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
-
-            // Centroid of element
-            let xc = (p1.x + p2.x + p3.x) / 3.0;
-            let yc = (p1.y + p2.y + p3.y) / 3.0;
-
-            // Stress at element centroid from bending
-            let sigma_bending = mxx * (yc - cy) / fem_props.ix.max(1e-12)
-                + myy * (xc - cx) / fem_props.iy.max(1e-12);
-
-            let exx = sigma_bending / material.youngs_modulus;
-            let fe = [
-                d_matrix[0][0] * exx * area_elem / 3.0,
-                d_matrix[1][0] * exx * area_elem / 3.0,
-                d_matrix[0][0] * exx * area_elem / 3.0,
-                d_matrix[1][0] * exx * area_elem / 3.0,
-                d_matrix[0][0] * exx * area_elem / 3.0,
-                d_matrix[1][0] * exx * area_elem / 3.0,
-            ];
-
-            let mut dof_indices = [0; 6];
-            for (i, &node) in element.iter().enumerate() {
-                dof_indices[2 * i] = dof_map[&(node, 0)];
-                dof_indices[2 * i + 1] = dof_map[&(node, 1)];
-            }
-
-            for i in 0..6 {
-                f_global[dof_indices[i]] += fe[i];
-            }
-        }
-    }
-
-    // 3. Shear forces Vx, Vy -> use warping analysis results
-    // For now, simplified: apply as equivalent nodal forces at boundary
-    if vx.abs() > 1e-12 || vy.abs() > 1e-12 {
-        // Apply shear as nodal forces at boundary nodes proportional to shear flow
-        // Simplified: distribute V uniformly along boundary
-        let boundary_nodes = mesh.boundary_nodes.clone();
-        let n_boundary = boundary_nodes.len().max(1) as f64;
-
-        for &node in &boundary_nodes {
-            if let Some(&dof_x) = dof_map.get(&(node, 0)) {
-                f_global[dof_x] += vx / n_boundary;
-            }
-            if let Some(&dof_y) = dof_map.get(&(node, 1)) {
-                f_global[dof_y] += vy / n_boundary;
-            }
-        }
-    }
-
-    // 4. Torsion Mzz -> warping + St. Venant
-    if mzz.abs() > 1e-12 {
-        if let Some(wp) = warping_props {
-            // Apply warping bimoment and St. Venant shear as nodal forces
-            // Simplified: apply as distributed moment
-            let boundary_nodes = mesh.boundary_nodes.clone();
-            let n_boundary = boundary_nodes.len().max(1) as f64;
-
-            for &node in &boundary_nodes {
-                let p = mesh.nodes[node];
-                let r =
-                    ((p.x - wp.shear_center.x).powi(2) + (p.y - wp.shear_center.y).powi(2)).sqrt();
-
-                // Tangential force per unit length from torsion
-                let tau = mzz * r / wp.j.max(1e-12);
-                let force_per_node = tau * 0.001 / n_boundary; // Simplified
-
-                // Tangential direction
-                let dx = p.x - wp.shear_center.x;
-                let dy = p.y - wp.shear_center.y;
-                if r > 1e-12 {
-                    if let Some(&dof_x) = dof_map.get(&(node, 0)) {
-                        f_global[dof_x] += force_per_node * (-dy / r);
-                    }
-                    if let Some(&dof_y) = dof_map.get(&(node, 1)) {
-                        f_global[dof_y] += force_per_node * (dx / r);
-                    }
-                }
-            }
-        }
-    }
-
-    // 5. Apply boundary conditions to prevent rigid body motion
-    // Fix one node completely, constrain another in one direction
-    let fixed_node = 0; // First node
-    let constrained_node = if n_nodes > 1 { 1 } else { 0 };
-
-    let mut fixed_dofs = vec![false; n_dof];
-    fixed_dofs[dof_map[&(fixed_node, 0)]] = true; // ux = 0
-    fixed_dofs[dof_map[&(fixed_node, 1)]] = true; // uy = 0
-    if n_nodes > 1 {
-        fixed_dofs[dof_map[&(constrained_node, 1)]] = true; // uy = 0 (prevent rotation)
-    }
-
-    // Apply BCs to force vector
-    for i in 0..n_dof {
-        if fixed_dofs[i] {
-            f_global[i] = 0.0;
-        }
-    }
-
-    // Apply BCs to stiffness matrix
-    for i in 0..n_dof {
-        if fixed_dofs[i] {
-            k_global.zero_row_col(i);
-            k_global.set(i, i, 1.0);
-        }
-    }
-
-    // Solve (solve_cholesky calls finalize internally)
-    let u_global = k_global
-        .solve_cholesky(&f_global)
-        .ok_or(FemError::SingularMatrix)?;
-
-    // Extract stresses
     let mut element_stresses = Vec::with_capacity(mesh.n_elements());
-    let mut max_vm = 0.0;
-    let mut max_vm_elem = 0;
+    let mut max_vm = 0.0f64;
+    let mut max_vm_elem = 0usize;
     let mut max_p1 = f64::NEG_INFINITY;
     let mut min_p2 = f64::INFINITY;
 
     for (elem_idx, element) in mesh.elements.iter().enumerate() {
-        let stress = compute_element_stress(mesh, element, &mat_props, &u_global, &dof_map)?;
-        let vm = stress.von_mises;
-        if vm > max_vm {
-            max_vm = vm;
+        let xc = (mesh.nodes[element[0]].x + mesh.nodes[element[1]].x + mesh.nodes[element[2]].x) / 3.0;
+        let yc = (mesh.nodes[element[0]].y + mesh.nodes[element[1]].y + mesh.nodes[element[2]].y) / 3.0;
+        let s = sig_at(xc, yc);
+        let sr = StressResult::from_stress(s[0], s[1], s[2]);
+        if sr.von_mises > max_vm {
+            max_vm = sr.von_mises;
             max_vm_elem = elem_idx;
         }
-        max_p1 = max_p1.max(stress.sigma_1);
-        min_p2 = min_p2.min(stress.sigma_2);
-        element_stresses.push(stress);
+        max_p1 = max_p1.max(sr.sigma_1);
+        min_p2 = min_p2.min(sr.sigma_2);
+        element_stresses.push(sr);
     }
 
-    // Nodal stresses by averaging
-    let mut nodal_stress_sum = vec![StressResult::from_stress(0.0, 0.0, 0.0); n_nodes];
-    let mut nodal_count = vec![0; n_nodes];
-
+    let mut nodal_sum = vec![StressResult::from_stress(0.0, 0.0, 0.0); mesh.n_nodes()];
+    let mut nodal_count = vec![0usize; mesh.n_nodes()];
     for (elem_idx, element) in mesh.elements.iter().enumerate() {
-        let stress = element_stresses[elem_idx];
+        let st = &element_stresses[elem_idx];
         for &node in element {
-            nodal_stress_sum[node].sigma_x += stress.sigma_x;
-            nodal_stress_sum[node].sigma_y += stress.sigma_y;
-            nodal_stress_sum[node].tau_xy += stress.tau_xy;
-            nodal_stress_sum[node].von_mises += stress.von_mises;
-            nodal_stress_sum[node].sigma_1 += stress.sigma_1;
-            nodal_stress_sum[node].sigma_2 += stress.sigma_2;
+            nodal_sum[node].sigma_x += st.sigma_x;
+            nodal_sum[node].sigma_y += st.sigma_y;
+            nodal_sum[node].tau_xy += st.tau_xy;
+            nodal_sum[node].von_mises += st.von_mises;
+            nodal_sum[node].sigma_1 += st.sigma_1;
+            nodal_sum[node].sigma_2 += st.sigma_2;
             nodal_count[node] += 1;
         }
     }
 
-    let mut nodal_stresses = Vec::with_capacity(n_nodes);
-    for i in 0..n_nodes {
-        if nodal_count[i] > 0 {
-            let c = nodal_count[i] as f64;
-            let mut s = nodal_stress_sum[i];
-            s.sigma_x /= c;
-            s.sigma_y /= c;
-            s.tau_xy /= c;
-            s.von_mises /= c;
-            s.sigma_1 /= c;
-            s.sigma_2 /= c;
-            nodal_stresses.push(s);
+    let mut nodal_stresses = Vec::with_capacity(mesh.n_nodes());
+    for node in 0..mesh.n_nodes() {
+        let p = mesh.nodes[node];
+        let cnt = nodal_count[node];
+        let s = if cnt > 0 {
+            let c = cnt as f64;
+            let mut v = nodal_sum[node];
+            v.sigma_x /= c;
+            v.sigma_y /= c;
+            v.tau_xy /= c;
+            v.von_mises /= c;
+            v.sigma_1 /= c;
+            v.sigma_2 /= c;
+            v
         } else {
-            nodal_stresses.push(StressResult::from_stress(0.0, 0.0, 0.0));
-        }
-    }
-
-    // Compute reactions
-    let mut reactions = Vec::new();
-    for i in 0..n_dof {
-        if fixed_dofs[i] {
-            let mut reaction = 0.0;
-            for j in 0..n_dof {
-                reaction += k_global.get(i, j) * u_global[j];
-            }
-            let node = i / 2;
-            let dof = i % 2;
-            reactions.push((node, dof, reaction));
-        }
-    }
-
-    // Displacements
-    let mut displacements = Vec::with_capacity(n_nodes);
-    for node in 0..n_nodes {
-        let ux = u_global[dof_map[&(node, 0)]];
-        let uy = u_global[dof_map[&(node, 1)]];
-        displacements.push(Point::new(ux, uy));
+            let d = sig_at(p.x, p.y);
+            StressResult::from_stress(d[0], d[1], d[2])
+        };
+        nodal_stresses.push(s);
     }
 
     Ok(StressPost {
-        displacements,
+        displacements: Vec::new(),
         element_stresses,
         nodal_stresses,
-        reactions,
+        reactions: Vec::new(),
         max_von_mises: max_vm,
         max_von_mises_elem: max_vm_elem,
         max_principal: max_p1,
@@ -772,39 +588,6 @@ fn compute_fem_stress(
     })
 }
 
-fn compute_element_stress(
-    mesh: &Mesh,
-    element: &[usize; 3],
-    props: &MaterialProps,
-    u_global: &[f64],
-    dof_map: &std::collections::HashMap<(usize, usize), usize>,
-) -> Result<StressResult, FemError> {
-    let mut u_elem = [0.0; 6];
-    for (i, &node) in element.iter().enumerate() {
-        u_elem[2 * i] = u_global[*dof_map.get(&(node, 0)).ok_or(FemError::InvalidMesh)?];
-        u_elem[2 * i + 1] = u_global[*dof_map.get(&(node, 1)).ok_or(FemError::InvalidMesh)?];
-    }
-
-    let b = strain_displacement_matrix_tri3(mesh, element);
-    let mut strain = [0.0; 3];
-    for i in 0..3 {
-        for j in 0..6 {
-            strain[i] += b[i][j] * u_elem[j];
-        }
-    }
-
-    let d = props.d_matrix();
-    let mut stress = [0.0; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            stress[i] += d[i][j] * strain[j];
-        }
-    }
-
-    Ok(StressResult::from_strain(
-        strain[0], strain[1], strain[2], props,
-    ))
-}
 
 /// High-level FEM analysis for composite sections.
 #[derive(Debug, Clone)]
@@ -917,7 +700,7 @@ mod tests {
         // Just verify it runs and returns results
         assert!(!stress.element_stresses.is_empty());
         assert!(!stress.nodal_stresses.is_empty());
-        assert!(!stress.displacements.is_empty());
+        // Displacements are not produced by the analytical stress evaluation.
     }
 
     #[test]
@@ -938,7 +721,7 @@ mod tests {
         // Just verify it runs and returns results
         assert!(!stress.element_stresses.is_empty());
         assert!(!stress.nodal_stresses.is_empty());
-        assert!(!stress.displacements.is_empty());
+        // Displacements are not produced by the analytical stress evaluation.
     }
 
     #[test]

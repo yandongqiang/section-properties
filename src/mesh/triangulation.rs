@@ -435,13 +435,23 @@ pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
 /// Triangulate a section (outer boundary + holes) using constrained Delaunay.
 pub fn triangulate_section(
     section: &Section,
-    _params: crate::mesh::MeshParams,
+    params: crate::mesh::MeshParams,
 ) -> crate::mesh::Mesh {
     let outer = &section.outer;
     let holes = &section.holes;
 
     // Prefer bridged triangulation: hole boundaries become exact mesh edges.
-    let (nodes, elements) = triangulate_section_bridged(outer, holes);
+    let (mut nodes, mut elements) = triangulate_section_bridged(outer, holes);
+
+    // Refine uniformly to honour the target element size (ear clipping
+    // produces only boundary vertices otherwise).
+    refine_mesh_uniform(
+        &mut nodes,
+        &mut elements,
+        params.target_size.max(1e-6),
+        params.max_iterations.clamp(1, 12),
+        20000,
+    );
 
     let outer_start = 0;
     let outer_end = outer.vertices.len();
@@ -474,6 +484,59 @@ pub fn triangulate_section(
     mesh.element_materials = vec![0; mesh.elements.len()];
 
     mesh
+}
+
+/// Uniform (red) refinement by edge midpoint subdivision until all edges are
+/// below `target_size`. Keeps the mesh conforming; original vertex order is
+/// preserved so boundary index ranges stay valid.
+pub(crate) fn refine_mesh_uniform(
+    nodes: &mut Vec<Point>,
+    elements: &mut Vec<[usize; 3]>,
+    target_size: f64,
+    max_iterations: usize,
+    max_nodes: usize,
+) {
+    use std::collections::HashMap;
+
+    for _ in 0..max_iterations {
+        let needs = elements.iter().any(|tri| {
+            let p0 = nodes[tri[0]];
+            let p1 = nodes[tri[1]];
+            let p2 = nodes[tri[2]];
+            let d01 = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt();
+            let d12 = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
+            let d20 = ((p0.x - p2.x).powi(2) + (p0.y - p2.y).powi(2)).sqrt();
+            d01.max(d12).max(d20) > target_size
+        });
+        if !needs || nodes.len() >= max_nodes / 4 {
+            break;
+        }
+
+        let mut edge_map: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut new_elements = Vec::with_capacity(elements.len() * 4);
+        for &elem in elements.iter() {
+            let mut mid = |a: usize, b: usize| -> usize {
+                let key = if a < b { (a, b) } else { (b, a) };
+                if let Some(&m) = edge_map.get(&key) {
+                    return m;
+                }
+                let pa = nodes[a];
+                let pb = nodes[b];
+                let idx = nodes.len();
+                nodes.push(Point::new(0.5 * (pa.x + pb.x), 0.5 * (pa.y + pb.y)));
+                edge_map.insert(key, idx);
+                idx
+            };
+            let m01 = mid(elem[0], elem[1]);
+            let m12 = mid(elem[1], elem[2]);
+            let m20 = mid(elem[2], elem[0]);
+            new_elements.push([elem[0], m01, m20]);
+            new_elements.push([m01, elem[1], m12]);
+            new_elements.push([m20, m12, elem[2]]);
+            new_elements.push([m01, m12, m20]);
+        }
+        *elements = new_elements;
+    }
 }
 
 /// Triangulate a simple polygon (no holes).

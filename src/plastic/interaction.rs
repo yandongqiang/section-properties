@@ -122,10 +122,11 @@ impl InteractionDiagram {
         fy: f64,
     ) -> Vec<InteractionPoint> {
         let mut points = Vec::new();
-        let _area = self.section.area();
+        let area_total = self.section.area();
 
-        // Area in compression
-        let a_c = n / fy;
+        // Net axial force N = fy * (A_comp - A_ten) = fy * (2*A_comp - A)
+        // => compression area required for target n:
+        let a_c = (n / fy + area_total) / 2.0;
 
         // Find PNA for this axial force
         // For biaxial, we need to find the PNA orientation and position
@@ -185,10 +186,12 @@ impl InteractionDiagram {
             let mid = (low + high) / 2.0;
             let area_compression = self.area_in_halfspace(plastic, n_x, n_y, mid, true);
 
+            // Compression area grows with c; if it already exceeds the
+            // target the PNA lies below mid.
             if area_compression > a_c {
-                low = mid;
-            } else {
                 high = mid;
+            } else {
+                low = mid;
             }
 
             if (high - low).abs() < 1e-9 {
@@ -250,12 +253,25 @@ impl InteractionDiagram {
             prev_inside = curr_inside;
         }
 
-        out.pop(); // remove duplicate closing vertex
-
         if out.len() < 3 {
             return None;
         }
-        Some(Polygon::new(out))
+        // Degenerate slivers appear when clipping at the extremes; drop them
+        // rather than tripping Polygon's zero-area assertion.
+        let pts = out;
+        let area = pts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let q = &pts[(i + 1) % pts.len()];
+                p.x * q.y - q.x * p.y
+            })
+            .sum::<f64>()
+            / 2.0;
+        if area.abs() < 1e-14 {
+            return None;
+        }
+        Some(Polygon::new(pts))
     }
 
     /// Compute area in half
@@ -365,34 +381,50 @@ impl InteractionDiagram {
     }
 
     /// Check capacity using exact plastic analysis (more accurate).
+    ///
+    /// Finds the smallest scaling of the load vector that reaches the
+    /// discrete interaction surface (ray-surface test). Robust against
+    /// surface points with zero components.
     pub fn check_capacity_exact(&self, load: LoadCase3D, gamma_m0: f64) -> CapacityCheck {
-        // Find the closest point on the interaction surface
-        let mut min_dist = f64::INFINITY;
-        let mut closest = self.surface_points[0];
+        let ln = load.n.abs();
+        let lmx = load.mx.abs();
+        let lmy = load.my.abs();
 
+        // Smallest factor t >= 0 such that t * load lies on/outside the
+        // surface: for each surface point, the scale needed to reach it in
+        // the worst component; take the minimum over points.
+        let mut min_scale = f64::INFINITY;
         for pt in &self.surface_points {
-            let dn = pt.n - load.n.abs();
-            let dmx = pt.mx - load.mx.abs();
-            let dmy = pt.my - load.my.abs();
-            let dist = (dn * dn + dmx * dmx + dmy * dmy).sqrt();
-
-            if dist < min_dist {
-                min_dist = dist;
-                closest = *pt;
+            let mut scale = 0.0f64;
+            let mut any = false;
+            for (load_c, cap_c) in [
+                (ln, pt.n),
+                (lmx, pt.mx),
+                (lmy, pt.my),
+            ] {
+                if cap_c > 0.0 {
+                    any = true;
+                    scale = scale.max(load_c / (cap_c / gamma_m0));
+                } else if load_c > 0.0 {
+                    // Demand in a direction this point has no capacity for:
+                    // this point cannot cover the load.
+                    any = false;
+                    break;
+                }
+            }
+            if any && scale < min_scale {
+                min_scale = scale;
             }
         }
 
-        // Scale to design values
-        let scale = 1.0 / gamma_m0;
-        let utilization = (load.n.abs() / (closest.n * scale))
-            .max(load.mx.abs() / (closest.mx * scale))
-            .max(load.my.abs() / (closest.my * scale));
+        let utilization = if min_scale.is_finite() { min_scale } else { f64::INFINITY };
 
+        let safe = |a: f64, b: f64| if b > 0.0 { a / b } else { 0.0 };
         CapacityCheck {
             utilization,
-            n_ratio: load.n.abs() / (closest.n * scale),
-            mx_ratio: load.mx.abs() / (closest.mx * scale),
-            my_ratio: load.my.abs() / (closest.my * scale),
+            n_ratio: safe(ln, self.n_rd / gamma_m0),
+            mx_ratio: safe(lmx, self.m_x_rd / gamma_m0),
+            my_ratio: safe(lmy, self.m_y_rd / gamma_m0),
             passed: utilization <= 1.0,
             method: "Exact Plastic Surface".to_string(),
         }

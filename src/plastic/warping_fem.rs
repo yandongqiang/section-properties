@@ -38,7 +38,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
     let _ = props;
-    let target_size = (max_dim / 30.0).min(min_edge * 1.5).max(1e-4);
+    let target_size = (max_dim / 8.0).min(min_edge * 1.5).max(1e-4);
 
     // Bridged triangulation keeps hole boundaries as exact mesh edges.
     let base_mesh = mesh_section(
@@ -56,22 +56,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         return None;
     }
 
-    let mut refined_nodes = base_mesh.nodes.clone();
-    let mut refined_elements = base_mesh.elements.clone();
-    refine_mesh(
-        &mut refined_nodes,
-        &mut refined_elements,
-        target_size,
-        10,
-        5000,
-    );
-
-    if refined_elements.is_empty() {
-        return None;
-    }
-
-
-    let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
+    // mesh_section already refines uniformly to target_size.
+    let tri6_mesh = tri3_to_tri6(&base_mesh.nodes, &base_mesh.elements);
     let n = tri6_mesh.nodes.len();
 
     let mut elements: Vec<Tri6> = Vec::with_capacity(tri6_mesh.elements.len());
@@ -221,74 +207,6 @@ fn min_edge_length(section: &Section) -> f64 {
     if min_len.is_finite() { min_len } else { 1.0 }
 }
 
-/// Refine a Tri3 mesh by edge midpoint subdivision until all edges < target_size.
-fn refine_mesh(
-    nodes: &mut Vec<Point>,
-    elements: &mut Vec<[usize; 3]>,
-    target_size: f64,
-    max_iterations: usize,
-    max_nodes: usize,
-) {
-    use std::collections::HashMap;
-
-    // Uniform (red) refinement: subdivide every element each pass so the
-    // mesh stays conforming. Selective refinement would create hanging
-    // nodes, which breaks stiffness assembly and prevents convergence.
-    for _ in 0..max_iterations {
-        // Does any element still exceed the target size?
-        let needs = elements.iter().any(|elem| {
-            let p0 = nodes[elem[0]];
-            let p1 = nodes[elem[1]];
-            let p2 = nodes[elem[2]];
-            let d01 = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt();
-            let d12 = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
-            let d20 = ((p0.x - p2.x).powi(2) + (p0.y - p2.y).powi(2)).sqrt();
-            d01.max(d12).max(d20) > target_size * 1.5
-        });
-        if !needs || nodes.len() >= max_nodes / 4 {
-            break;
-        }
-
-        let mut edge_map: HashMap<(usize, usize), usize> = HashMap::new();
-        let mut new_elements = Vec::with_capacity(elements.len() * 4);
-
-        for &elem in elements.iter() {
-            let m01 =
-                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[0], elem[1]);
-            let m12 =
-                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[1], elem[2]);
-            let m20 =
-                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[2], elem[0]);
-
-            new_elements.push([elem[0], m01, m20]);
-            new_elements.push([m01, elem[1], m12]);
-            new_elements.push([m20, m12, elem[2]]);
-            new_elements.push([m01, m12, m20]);
-        }
-
-        *elements = new_elements;
-    }
-}
-
-fn get_or_create_midpoint_refine(
-    nodes: &mut Vec<Point>,
-    edge_map: &mut std::collections::HashMap<(usize, usize), usize>,
-    a: usize,
-    b: usize,
-) -> usize {
-    let key = if a < b { (a, b) } else { (b, a) };
-    if let Some(&mid) = edge_map.get(&key) {
-        return mid;
-    }
-    let pa = nodes[a];
-    let pb = nodes[b];
-    let mid = Point::new(0.5 * (pa.x + pb.x), 0.5 * (pa.y + pb.y));
-    let mid_idx = nodes.len();
-    nodes.push(mid);
-    edge_map.insert(key, mid_idx);
-    mid_idx
-}
-
 /// Compute warping properties using FEM with Tri6 elements.
 pub fn compute_fem_warping_properties(
     section: &Section,
@@ -306,8 +224,8 @@ pub fn compute_fem_warping_properties(
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
     let _ = props;
-    let target_size = (max_dim / 30.0).min(min_edge * 1.5).max(1e-4);
-    let _t00 = std::time::Instant::now();
+    let target_size = (max_dim / 8.0).min(min_edge * 1.5).max(1e-4);
+    
 
     let mesh = mesh_section(
         section,
@@ -321,6 +239,8 @@ pub fn compute_fem_warping_properties(
         },
     );
 
+
+    let _t0 = std::time::Instant::now();
 
     if mesh.elements.is_empty() {
         return FemWarpingResult {
@@ -338,17 +258,8 @@ pub fn compute_fem_warping_properties(
         };
     }
 
-    let mut refined_nodes = mesh.nodes.clone();
-    let mut refined_elements = mesh.elements.clone();
-    refine_mesh(
-        &mut refined_nodes,
-        &mut refined_elements,
-        target_size,
-        10,
-        5000,
-    );
-
-    let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
+    // mesh_section already refines uniformly to target_size.
+    let tri6_mesh = tri3_to_tri6(&mesh.nodes, &mesh.elements);
     let n = tri6_mesh.nodes.len();
 
     let mut elements: Vec<Tri6> = Vec::with_capacity(tri6_mesh.elements.len());
@@ -377,7 +288,7 @@ pub fn compute_fem_warping_properties(
         }
     }
 
-    let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
+let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -386,7 +297,8 @@ pub fn compute_fem_warping_properties(
         .sum();
     let j = ixx + iyy - omega_dot_f;
 
-    let mut f_psi = vec![0.0; n];
+    let _t_s2 = std::time::Instant::now();
+let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
 
     for tri6 in &elements {
@@ -398,8 +310,8 @@ pub fn compute_fem_warping_properties(
         }
     }
 
-    let psi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_psi, 1e-11);
-    let phi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_phi, 1e-11);
+    let psi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_psi, 1e-7);
+    let phi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_phi, 1e-7);
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
