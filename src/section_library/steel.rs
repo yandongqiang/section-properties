@@ -283,13 +283,7 @@ impl ISection {
 
         // Convert mm to meters
         let (h, b, s, t, r) = dims;
-        let mut section = Self::new(
-            h / 1000.0,
-            b / 1000.0,
-            s / 1000.0,
-            t / 1000.0,
-            r / 1000.0,
-        );
+        let mut section = Self::new(h / 1000.0, b / 1000.0, s / 1000.0, t / 1000.0, r / 1000.0);
         section.label = Some(designation.to_uppercase());
         Some(section)
     }
@@ -328,8 +322,8 @@ impl ParametricSection for ISection {
             // Top right root radius: center (sw+r, hh-t-r), theta from pi to pi/2
             let (cx, cy) = (sw + r, hh - t - r);
             for i in 0..=n_r {
-                let theta = std::f64::consts::PI
-                    - i as f64 / n_r as f64 * std::f64::consts::FRAC_PI_2;
+                let theta =
+                    std::f64::consts::PI - i as f64 / n_r as f64 * std::f64::consts::FRAC_PI_2;
                 vertices.push(Point::new(cx + r * theta.cos(), cy + r * theta.sin()));
             }
         } else {
@@ -1021,14 +1015,14 @@ impl ParametricSection for TeeSection {
         // CCW polygon tracing the T-section material boundary.
         // Flange at top, web extends downward from flange centre.
         let vertices = vec![
-            Point::new(-hw, hh),       // flange top-left
-            Point::new(hw, hh),        // flange top-right
-            Point::new(hw, hh - t),    // flange bottom-right
-            Point::new(sw, hh - t),    // web top-right
-            Point::new(sw, -hh),       // web bottom-right
-            Point::new(-sw, -hh),      // web bottom-left
-            Point::new(-sw, hh - t),   // web top-left
-            Point::new(-hw, hh - t),   // flange bottom-left
+            Point::new(-hw, hh),     // flange top-left
+            Point::new(hw, hh),      // flange top-right
+            Point::new(hw, hh - t),  // flange bottom-right
+            Point::new(sw, hh - t),  // web top-right
+            Point::new(sw, -hh),     // web bottom-right
+            Point::new(-sw, -hh),    // web bottom-left
+            Point::new(-sw, hh - t), // web top-left
+            Point::new(-hw, hh - t), // flange bottom-left
         ];
 
         let outer = Polygon::new(vertices);
@@ -1164,9 +1158,7 @@ impl CircularHollowSectionLib {
     pub fn from_designation(designation: &str) -> Option<Self> {
         // Format: "CHS60X3" (outer diameter [mm] x wall thickness [mm])
         let upper = designation.to_uppercase();
-        let rest = upper
-            .strip_prefix("CHS")?
-            .trim_start_matches('Ø');
+        let rest = upper.strip_prefix("CHS")?.trim_start_matches('Ø');
         let parts: Vec<&str> = rest.split('X').collect();
         if parts.len() != 2 {
             return None;
@@ -1555,7 +1547,10 @@ impl ParametricSection for TaperedFlangeISection {
         } else {
             for i in 0..n_r {
                 let theta = i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
-                points.push(Point::new(b - r_f + r_f * theta.cos(), y_t + r_f * theta.sin()));
+                points.push(Point::new(
+                    b - r_f + r_f * theta.cos(),
+                    y_t + r_f * theta.sin(),
+                ));
             }
         }
         // Bottom right root radius
@@ -1590,7 +1585,10 @@ impl ParametricSection for TaperedFlangeISection {
             for i in 0..n_r {
                 let theta = (1.5 * PI + alpha)
                     + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
-                points.push(Point::new(b - r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+                points.push(Point::new(
+                    b - r_f + r_f * theta.cos(),
+                    d - y_t + r_f * theta.sin(),
+                ));
             }
         }
         points.push(Point::new(b, d));
@@ -1602,7 +1600,10 @@ impl ParametricSection for TaperedFlangeISection {
         } else {
             for i in 0..n_r {
                 let theta = PI + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
-                points.push(Point::new(r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+                points.push(Point::new(
+                    r_f + r_f * theta.cos(),
+                    d - y_t + r_f * theta.sin(),
+                ));
             }
         }
         // Top left root radius
@@ -1722,7 +1723,10 @@ impl ParametricSection for TaperedFlangeChannel {
         } else {
             for i in 0..n_r {
                 let theta = i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
-                points.push(Point::new(b - r_f + r_f * theta.cos(), y_t + r_f * theta.sin()));
+                points.push(Point::new(
+                    b - r_f + r_f * theta.cos(),
+                    y_t + r_f * theta.sin(),
+                ));
             }
         }
         // Bottom right root radius
@@ -1757,7 +1761,10 @@ impl ParametricSection for TaperedFlangeChannel {
             for i in 0..n_r {
                 let theta = (1.5 * PI + alpha)
                     + i as f64 / (n_r.max(1) - 1).max(1) as f64 * (PI / 2.0 - alpha);
-                points.push(Point::new(b - r_f + r_f * theta.cos(), d - y_t + r_f * theta.sin()));
+                points.push(Point::new(
+                    b - r_f + r_f * theta.cos(),
+                    d - y_t + r_f * theta.sin(),
+                ));
             }
         }
         points.push(Point::new(b, d));
@@ -1799,7 +1806,10 @@ impl BoxGirderSection {
         web_thickness: f64,
     ) -> Self {
         assert!(depth > 0.0, "Depth must be positive");
-        assert!(top_thickness + bottom_thickness < depth, "Flanges too thick");
+        assert!(
+            top_thickness + bottom_thickness < depth,
+            "Flanges too thick"
+        );
         Self {
             depth,
             top_width,
@@ -1876,7 +1886,10 @@ pub struct BulbSection {
 
 impl BulbSection {
     pub fn new(depth: f64, bulb_width: f64, web_thickness: f64, radius: f64, n_r: usize) -> Self {
-        assert!(depth > 0.0 && web_thickness > 0.0, "Dimensions must be positive");
+        assert!(
+            depth > 0.0 && web_thickness > 0.0,
+            "Dimensions must be positive"
+        );
         assert!(n_r >= 2, "Need at least 2 points for radius");
         Self {
             depth,
@@ -1915,9 +1928,9 @@ impl ParametricSection for BulbSection {
         let r = self.radius;
         let n_r = self.n_r;
 
-        let d_b = self.bulb_depth.unwrap_or_else(|| {
-            r * (PI / 3.0).cos() / (PI / 6.0).cos() + r + b * (PI / 6.0).tan()
-        });
+        let d_b = self
+            .bulb_depth
+            .unwrap_or_else(|| r * (PI / 3.0).cos() / (PI / 6.0).cos() + r + b * (PI / 6.0).tan());
 
         let mut points = Vec::new();
         points.push(Point::new(-t * 0.5, 0.0));
@@ -1956,7 +1969,7 @@ impl ParametricSection for BulbSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::presets::STEEL_S355;
+    
     use std::f64::consts::PI;
 
     #[test]
@@ -2084,11 +2097,7 @@ mod tests {
             c.x,
             s / 2.0
         );
-        assert!(
-            c.y.abs() < 1e-9,
-            "Z-section cy: got {}, expected 0",
-            c.y
-        );
+        assert!(c.y.abs() < 1e-9, "Z-section cy: got {}, expected 0", c.y);
     }
 
     #[test]
@@ -2248,16 +2257,20 @@ impl ParametricSection for NastranBar {
 /// NASTRAN BOX section (rectangular tube)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranBox {
-    pub width: f64,       // Width [mm]
-    pub height: f64,      // Height [mm]
-    pub thickness: f64,   // Wall thickness [mm]
+    pub width: f64,     // Width [mm]
+    pub height: f64,    // Height [mm]
+    pub thickness: f64, // Wall thickness [mm]
 }
 
 impl NastranBox {
     pub fn new(width: f64, height: f64, thickness: f64) -> Self {
         assert!(width > 0.0 && height > 0.0 && thickness > 0.0);
         assert!(2.0 * thickness < width.min(height));
-        Self { width, height, thickness }
+        Self {
+            width,
+            height,
+            thickness,
+        }
     }
 }
 
@@ -2273,23 +2286,31 @@ impl ParametricSection for NastranBox {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN BOX {:.1}x{:.1}x{:.1}", self.width, self.height, self.thickness)
+        format!(
+            "NASTRAN BOX {:.1}x{:.1}x{:.1}",
+            self.width, self.height, self.thickness
+        )
     }
 }
 
 /// NASTRAN CHAN section (channel)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranChan {
-    pub height: f64,        // Height [mm]
-    pub width: f64,         // Flange width [mm]
-    pub web_thick: f64,     // Web thickness [mm]
-    pub flange_thick: f64,  // Flange thickness [mm]
+    pub height: f64,       // Height [mm]
+    pub width: f64,        // Flange width [mm]
+    pub web_thick: f64,    // Web thickness [mm]
+    pub flange_thick: f64, // Flange thickness [mm]
 }
 
 impl NastranChan {
     pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
         assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
-        Self { height, width, web_thick, flange_thick }
+        Self {
+            height,
+            width,
+            web_thick,
+            flange_thick,
+        }
     }
 }
 
@@ -2319,23 +2340,30 @@ impl ParametricSection for NastranChan {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN CHAN {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+        format!(
+            "NASTRAN CHAN {:.1}x{:.1}x{:.1}x{:.1}",
+            self.height, self.width, self.web_thick, self.flange_thick
+        )
     }
 }
 
 /// NASTRAN CROSS section (cruciform)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranCross {
-    pub height: f64,      // Overall height [mm]
-    pub width: f64,       // Overall width [mm]
-    pub thickness: f64,   // Arm thickness [mm]
+    pub height: f64,    // Overall height [mm]
+    pub width: f64,     // Overall width [mm]
+    pub thickness: f64, // Arm thickness [mm]
 }
 
 impl NastranCross {
     pub fn new(height: f64, width: f64, thickness: f64) -> Self {
         assert!(height > 0.0 && width > 0.0 && thickness > 0.0);
         assert!(thickness < height.min(width));
-        Self { height, width, thickness }
+        Self {
+            height,
+            width,
+            thickness,
+        }
     }
 }
 
@@ -2374,17 +2402,20 @@ impl ParametricSection for NastranCross {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN CROSS {:.1}x{:.1}x{:.1}", self.height, self.width, self.thickness)
+        format!(
+            "NASTRAN CROSS {:.1}x{:.1}x{:.1}",
+            self.height, self.width, self.thickness
+        )
     }
 }
 
 /// NASTRAN I section (I-beam)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranI {
-    pub height: f64,        // Overall depth [mm]
-    pub width: f64,         // Flange width [mm]
-    pub web_thick: f64,     // Web thickness [mm]
-    pub flange_thick: f64,  // Flange thickness [mm]
+    pub height: f64,       // Overall depth [mm]
+    pub width: f64,        // Flange width [mm]
+    pub web_thick: f64,    // Web thickness [mm]
+    pub flange_thick: f64, // Flange thickness [mm]
 }
 
 impl NastranI {
@@ -2392,7 +2423,12 @@ impl NastranI {
         assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
         assert!(2.0 * flange_thick < height);
         assert!(web_thick < width);
-        Self { height, width, web_thick, flange_thick }
+        Self {
+            height,
+            width,
+            web_thick,
+            flange_thick,
+        }
     }
 }
 
@@ -2410,24 +2446,32 @@ impl ParametricSection for NastranI {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN I {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+        format!(
+            "NASTRAN I {:.1}x{:.1}x{:.1}x{:.1}",
+            self.height, self.width, self.web_thick, self.flange_thick
+        )
     }
 }
 
 /// NASTRAN TEE section (T-beam)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranTee {
-    pub height: f64,        // Overall height [mm]
-    pub width: f64,         // Flange width [mm]
-    pub web_thick: f64,     // Web thickness [mm]
-    pub flange_thick: f64,  // Flange thickness [mm]
+    pub height: f64,       // Overall height [mm]
+    pub width: f64,        // Flange width [mm]
+    pub web_thick: f64,    // Web thickness [mm]
+    pub flange_thick: f64, // Flange thickness [mm]
 }
 
 impl NastranTee {
     pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
         assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
         assert!(flange_thick < height);
-        Self { height, width, web_thick, flange_thick }
+        Self {
+            height,
+            width,
+            web_thick,
+            flange_thick,
+        }
     }
 }
 
@@ -2444,7 +2488,10 @@ impl ParametricSection for NastranTee {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN TEE {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+        format!(
+            "NASTRAN TEE {:.1}x{:.1}x{:.1}x{:.1}",
+            self.height, self.width, self.web_thick, self.flange_thick
+        )
     }
 }
 
@@ -2459,7 +2506,10 @@ impl NastranTube {
     pub fn new(outer_diameter: f64, wall_thickness: f64) -> Self {
         assert!(outer_diameter > 0.0 && wall_thickness > 0.0);
         assert!(2.0 * wall_thickness < outer_diameter);
-        Self { outer_diameter, wall_thickness }
+        Self {
+            outer_diameter,
+            wall_thickness,
+        }
     }
 }
 
@@ -2473,23 +2523,31 @@ impl ParametricSection for NastranTube {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN TUBE Ø{:.1}x{:.1}", self.outer_diameter, self.wall_thickness)
+        format!(
+            "NASTRAN TUBE Ø{:.1}x{:.1}",
+            self.outer_diameter, self.wall_thickness
+        )
     }
 }
 
 /// NASTRAN ZED section (Z-purlin)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranZed {
-    pub height: f64,        // Overall depth [mm]
-    pub width: f64,         // Flange width [mm]
-    pub web_thick: f64,     // Web thickness [mm]
-    pub flange_thick: f64,  // Flange thickness [mm]
+    pub height: f64,       // Overall depth [mm]
+    pub width: f64,        // Flange width [mm]
+    pub web_thick: f64,    // Web thickness [mm]
+    pub flange_thick: f64, // Flange thickness [mm]
 }
 
 impl NastranZed {
     pub fn new(height: f64, width: f64, web_thick: f64, flange_thick: f64) -> Self {
         assert!(height > 0.0 && width > 0.0 && web_thick > 0.0 && flange_thick > 0.0);
-        Self { height, width, web_thick, flange_thick }
+        Self {
+            height,
+            width,
+            web_thick,
+            flange_thick,
+        }
     }
 }
 
@@ -2506,58 +2564,127 @@ impl ParametricSection for NastranZed {
     }
 
     fn designation(&self) -> String {
-        format!("NASTRAN ZED {:.1}x{:.1}x{:.1}x{:.1}", self.height, self.width, self.web_thick, self.flange_thick)
+        format!(
+            "NASTRAN ZED {:.1}x{:.1}x{:.1}x{:.1}",
+            self.height, self.width, self.web_thick, self.flange_thick
+        )
     }
 }
 
 // Convenience constructors for common NASTRAN sections
 impl NastranChan {
     /// Standard channel sizes (approximate)
-    pub fn standard_c3x4_1() -> Self { Self::new(76.2, 34.9, 4.4, 6.9) } // C3x4.1
-    pub fn standard_c4x5_4() -> Self { Self::new(101.6, 38.1, 4.8, 8.1) } // C4x5.4
-    pub fn standard_c5x6_7() -> Self { Self::new(127.0, 41.3, 5.1, 8.9) } // C5x6.7
-    pub fn standard_c6x8_2() -> Self { Self::new(152.4, 44.5, 5.1, 9.7) } // C6x8.2
-    pub fn standard_c7x9_8() -> Self { Self::new(177.8, 47.6, 5.3, 10.4) } // C7x9.8
-    pub fn standard_c8x11_5() -> Self { Self::new(203.2, 50.8, 5.6, 11.2) } // C8x11.5
-    pub fn standard_c9x13_4() -> Self { Self::new(228.6, 53.3, 6.1, 11.9) } // C9x13.4
-    pub fn standard_c10x15_3() -> Self { Self::new(254.0, 55.9, 6.4, 12.7) } // C10x15.3
-    pub fn standard_c12x20_7() -> Self { Self::new(304.8, 63.5, 7.1, 14.5) } // C12x20.7
-    pub fn standard_c15x33_9() -> Self { Self::new(381.0, 76.2, 10.2, 16.8) } // C15x33.9
+    pub fn standard_c3x4_1() -> Self {
+        Self::new(76.2, 34.9, 4.4, 6.9)
+    } // C3x4.1
+    pub fn standard_c4x5_4() -> Self {
+        Self::new(101.6, 38.1, 4.8, 8.1)
+    } // C4x5.4
+    pub fn standard_c5x6_7() -> Self {
+        Self::new(127.0, 41.3, 5.1, 8.9)
+    } // C5x6.7
+    pub fn standard_c6x8_2() -> Self {
+        Self::new(152.4, 44.5, 5.1, 9.7)
+    } // C6x8.2
+    pub fn standard_c7x9_8() -> Self {
+        Self::new(177.8, 47.6, 5.3, 10.4)
+    } // C7x9.8
+    pub fn standard_c8x11_5() -> Self {
+        Self::new(203.2, 50.8, 5.6, 11.2)
+    } // C8x11.5
+    pub fn standard_c9x13_4() -> Self {
+        Self::new(228.6, 53.3, 6.1, 11.9)
+    } // C9x13.4
+    pub fn standard_c10x15_3() -> Self {
+        Self::new(254.0, 55.9, 6.4, 12.7)
+    } // C10x15.3
+    pub fn standard_c12x20_7() -> Self {
+        Self::new(304.8, 63.5, 7.1, 14.5)
+    } // C12x20.7
+    pub fn standard_c15x33_9() -> Self {
+        Self::new(381.0, 76.2, 10.2, 16.8)
+    } // C15x33.9
 }
 
 impl NastranI {
     /// Standard I-beam sizes (approximate W-shapes)
-    pub fn standard_w4x13() -> Self { Self::new(101.6, 101.6, 5.8, 6.4) } // W4x13
-    pub fn standard_w6x15() -> Self { Self::new(152.4, 101.6, 5.8, 6.6) } // W6x15
-    pub fn standard_w8x18() -> Self { Self::new(203.2, 133.4, 6.1, 7.4) } // W8x18
-    pub fn standard_w10x22() -> Self { Self::new(254.0, 146.1, 6.1, 8.6) } // W10x22
-    pub fn standard_w12x26() -> Self { Self::new(304.8, 165.1, 6.4, 9.7) } // W12x26
-    pub fn standard_w14x30() -> Self { Self::new(355.6, 177.8, 6.9, 9.7) } // W14x30
-    pub fn standard_w16x31() -> Self { Self::new(406.4, 203.2, 7.4, 9.9) } // W16x31
-    pub fn standard_w18x35() -> Self { Self::new(457.2, 203.2, 7.6, 10.4) } // W18x35
-    pub fn standard_w21x44() -> Self { Self::new(533.4, 203.2, 8.9, 11.2) } // W21x44
-    pub fn standard_w24x55() -> Self { Self::new(609.6, 203.2, 9.7, 12.7) } // W24x55
+    pub fn standard_w4x13() -> Self {
+        Self::new(101.6, 101.6, 5.8, 6.4)
+    } // W4x13
+    pub fn standard_w6x15() -> Self {
+        Self::new(152.4, 101.6, 5.8, 6.6)
+    } // W6x15
+    pub fn standard_w8x18() -> Self {
+        Self::new(203.2, 133.4, 6.1, 7.4)
+    } // W8x18
+    pub fn standard_w10x22() -> Self {
+        Self::new(254.0, 146.1, 6.1, 8.6)
+    } // W10x22
+    pub fn standard_w12x26() -> Self {
+        Self::new(304.8, 165.1, 6.4, 9.7)
+    } // W12x26
+    pub fn standard_w14x30() -> Self {
+        Self::new(355.6, 177.8, 6.9, 9.7)
+    } // W14x30
+    pub fn standard_w16x31() -> Self {
+        Self::new(406.4, 203.2, 7.4, 9.9)
+    } // W16x31
+    pub fn standard_w18x35() -> Self {
+        Self::new(457.2, 203.2, 7.6, 10.4)
+    } // W18x35
+    pub fn standard_w21x44() -> Self {
+        Self::new(533.4, 203.2, 8.9, 11.2)
+    } // W21x44
+    pub fn standard_w24x55() -> Self {
+        Self::new(609.6, 203.2, 9.7, 12.7)
+    } // W24x55
 }
 
 impl NastranTube {
     /// Standard tube sizes (OD x WT in mm)
-    pub fn standard_25x3() -> Self { Self::new(25.0, 3.0) }
-    pub fn standard_32x3() -> Self { Self::new(32.0, 3.0) }
-    pub fn standard_38x4() -> Self { Self::new(38.0, 4.0) }
-    pub fn standard_51x5() -> Self { Self::new(51.0, 5.0) }
-    pub fn standard_63x6() -> Self { Self::new(63.0, 6.0) }
-    pub fn standard_76x6() -> Self { Self::new(76.0, 6.0) }
-    pub fn standard_102x8() -> Self { Self::new(102.0, 8.0) }
-    pub fn standard_152x10() -> Self { Self::new(152.0, 10.0) }
+    pub fn standard_25x3() -> Self {
+        Self::new(25.0, 3.0)
+    }
+    pub fn standard_32x3() -> Self {
+        Self::new(32.0, 3.0)
+    }
+    pub fn standard_38x4() -> Self {
+        Self::new(38.0, 4.0)
+    }
+    pub fn standard_51x5() -> Self {
+        Self::new(51.0, 5.0)
+    }
+    pub fn standard_63x6() -> Self {
+        Self::new(63.0, 6.0)
+    }
+    pub fn standard_76x6() -> Self {
+        Self::new(76.0, 6.0)
+    }
+    pub fn standard_102x8() -> Self {
+        Self::new(102.0, 8.0)
+    }
+    pub fn standard_152x10() -> Self {
+        Self::new(152.0, 10.0)
+    }
 }
 
 impl NastranZed {
     /// Standard Z-purlin sizes
-    pub fn standard_z100() -> Self { Self::new(100.0, 50.0, 2.0, 2.0) }
-    pub fn standard_z150() -> Self { Self::new(150.0, 60.0, 2.5, 2.5) }
-    pub fn standard_z200() -> Self { Self::new(200.0, 70.0, 3.0, 3.0) }
-    pub fn standard_z250() -> Self { Self::new(250.0, 80.0, 3.5, 3.5) }
-    pub fn standard_z300() -> Self { Self::new(300.0, 90.0, 4.0, 4.0) }
+    pub fn standard_z100() -> Self {
+        Self::new(100.0, 50.0, 2.0, 2.0)
+    }
+    pub fn standard_z150() -> Self {
+        Self::new(150.0, 60.0, 2.5, 2.5)
+    }
+    pub fn standard_z200() -> Self {
+        Self::new(200.0, 70.0, 3.0, 3.0)
+    }
+    pub fn standard_z250() -> Self {
+        Self::new(250.0, 80.0, 3.5, 3.5)
+    }
+    pub fn standard_z300() -> Self {
+        Self::new(300.0, 90.0, 4.0, 4.0)
+    }
 }
 
 // ============================================================================
@@ -2713,10 +2840,20 @@ pub enum IGirderType {
 
 impl IGirder {
     pub fn new(girder_type: IGirderType) -> Self {
-        Self { girder_type, custom_dims: None }
+        Self {
+            girder_type,
+            custom_dims: None,
+        }
     }
 
-    pub fn custom(depth: f64, top_w: f64, top_th: f64, bot_w: f64, bot_th: f64, web_th: f64) -> Self {
+    pub fn custom(
+        depth: f64,
+        top_w: f64,
+        top_th: f64,
+        bot_w: f64,
+        bot_th: f64,
+        web_th: f64,
+    ) -> Self {
         Self {
             girder_type: IGirderType::Custom,
             custom_dims: Some((depth, top_w, top_th, bot_w, bot_th, web_th)),
@@ -2791,16 +2928,28 @@ impl ParametricSection for IGirder {
 /// U-Girder (for box girders)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UGirder {
-    pub depth: f64,           // Overall depth [mm]
-    pub bottom_width: f64,    // Bottom flange width [mm]
-    pub top_width: f64,       // Top flange width [mm]
-    pub web_thick: f64,       // Web thickness [mm]
-    pub flange_thick: f64,    // Flange thickness [mm]
+    pub depth: f64,        // Overall depth [mm]
+    pub bottom_width: f64, // Bottom flange width [mm]
+    pub top_width: f64,    // Top flange width [mm]
+    pub web_thick: f64,    // Web thickness [mm]
+    pub flange_thick: f64, // Flange thickness [mm]
 }
 
 impl UGirder {
-    pub fn new(depth: f64, bottom_width: f64, top_width: f64, web_thick: f64, flange_thick: f64) -> Self {
-        Self { depth, bottom_width, top_width, web_thick, flange_thick }
+    pub fn new(
+        depth: f64,
+        bottom_width: f64,
+        top_width: f64,
+        web_thick: f64,
+        flange_thick: f64,
+    ) -> Self {
+        Self {
+            depth,
+            bottom_width,
+            top_width,
+            web_thick,
+            flange_thick,
+        }
     }
 }
 
@@ -2845,6 +2994,9 @@ impl ParametricSection for UGirder {
     }
 
     fn designation(&self) -> String {
-        format!("U-Girder {:.0}x{:.0}x{:.0}", self.depth, self.bottom_width, self.web_thick)
+        format!(
+            "U-Girder {:.0}x{:.0}x{:.0}",
+            self.depth, self.bottom_width, self.web_thick
+        )
     }
 }

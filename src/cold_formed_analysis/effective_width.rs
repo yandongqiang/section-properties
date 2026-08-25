@@ -30,7 +30,7 @@ pub fn effective_width_flat(
         return (0.0, 0.0);
     }
 
-// Normalized slenderness per EN 1993-1-3 Section 4.4(2):
+    // Normalized slenderness per EN 1993-1-3 Section 4.4(2):
     // λ̄ = (b/t) * sqrt(12(1-ν²) * fy / (k * E * π²))
     let nu_clamped = params.nu.clamp(0.0, 0.5); // keep (1-ν²) positive for metals
     let k = buckling_coefficient(edge_support);
@@ -49,7 +49,7 @@ fn buckling_coefficient(edge_support: crate::cold_formed_analysis::EdgeSupport) 
     match edge_support {
         crate::cold_formed_analysis::EdgeSupport::DoubleSupported => 4.0, // Internal
         crate::cold_formed_analysis::EdgeSupport::Outstand => 0.43,       // Outstand
-        crate::cold_formed_analysis::EdgeSupport::Stiffened => 4.0,       // Stiffened (conservative)
+        crate::cold_formed_analysis::EdgeSupport::Stiffened => 4.0, // Stiffened (conservative)
     }
 }
 
@@ -203,8 +203,7 @@ fn minimum_stiffener_inertia(
     e: f64,
     params: &EffectiveWidthParams,
 ) -> f64 {
-    let k_sigma =
-        buckling_coefficient(crate::cold_formed_analysis::EdgeSupport::DoubleSupported);
+    let k_sigma = buckling_coefficient(crate::cold_formed_analysis::EdgeSupport::DoubleSupported);
     let sigma_cr = k_sigma * e * std::f64::consts::PI.powi(2)
         / (12.0 * (1.0 - params.nu * params.nu))
         * (thickness / width).powi(2);
@@ -278,7 +277,9 @@ pub fn reduced_section_properties(
             effective_width: b_eff,
             reduction_factor: rho,
             buckling_curve: match element.edge_support {
-                crate::cold_formed_analysis::EdgeSupport::DoubleSupported => BucklingCurve::Internal,
+                crate::cold_formed_analysis::EdgeSupport::DoubleSupported => {
+                    BucklingCurve::Internal
+                }
                 crate::cold_formed_analysis::EdgeSupport::Outstand => BucklingCurve::Outstand,
                 crate::cold_formed_analysis::EdgeSupport::Stiffened => BucklingCurve::Stiffened,
             },
@@ -357,7 +358,7 @@ mod tests {
     #[test]
     fn effective_width_outstand() {
         // Outstand element
-        let (b_eff, rho) =
+        let (_b_eff, rho) =
             effective_width_flat_simple(100.0, 2.0, 350e6, 300e6, EdgeSupport::Outstand);
         assert!(rho <= 1.0);
     }
@@ -366,7 +367,7 @@ mod tests {
     fn effective_width_corner_enhancement() {
         // Corner with small radius gets enhancement
         let params = EffectiveWidthParams::default();
-        let (b_eff1, rho1) = effective_width_flat(
+        let (_b_eff1, rho1) = effective_width_flat(
             100.0,
             2.0,
             350e6,
@@ -375,18 +376,14 @@ mod tests {
             EdgeSupport::DoubleSupported,
             &params,
         );
-        let (b_eff2, rho2) =
+        let (_b_eff2, rho2) =
             effective_width_corner(100.0, 2.0, 350e6, 200e9, 300e6, 3.0 * 2.0, &params); // r = 3t
         assert!(rho2 >= rho1); // Corner should be better or equal
     }
 
     #[test]
     fn buckling_coefficients() {
-        assert_eq!(
-            buckling_coefficient(EdgeSupport::DoubleSupported),
-            4.0
-        );
+        assert_eq!(buckling_coefficient(EdgeSupport::DoubleSupported), 4.0);
         assert_eq!(buckling_coefficient(EdgeSupport::Outstand), 0.43);
     }
 }
-

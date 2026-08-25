@@ -247,10 +247,215 @@ fn centroid_marker(
   <circle cx="{:.1}" cy="{:.1}" r="3" fill="#e74c3c"/>
   <text x="{:.1}" y="{:.1}" font-size="{}" text-anchor="middle" fill="#e74c3c" dy="-10">C</text>
 </g>"##,
-        x - size, y, x + size, y,
-        x, y - size, x, y + size,
-        x, y,
-        x, y, options.font_size
+        x - size,
+        y,
+        x + size,
+        y,
+        x,
+        y - size,
+        x,
+        y + size,
+        x,
+        y,
+        x,
+        y,
+        options.font_size
+    )
+}
+
+/// Export a "centroids" plot: section outline with the geometric centroid,
+/// the shear centre, and the principal axes marked.
+///
+/// Mirrors Python `Section.plot_centroids()`.
+pub fn plot_centroids(section: &Section, options: SvgExportOptions) -> String {
+    use crate::plastic::warping::WarpingProperties;
+
+    let props = SectionProperties::from_section(section);
+    let warping = WarpingProperties::from_section(section);
+    let bounds = section.bounds();
+
+    let section_width = bounds.1 - bounds.0;
+    let section_height = bounds.3 - bounds.2;
+    let max_dim = section_width.max(section_height);
+
+    let scale = options.scale.unwrap_or_else(|| {
+        let available_width = options.width as f64 - 2.0 * options.margin as f64;
+        let available_height = options.height as f64 - 2.0 * options.margin as f64;
+        (available_width / max_dim).min(available_height / max_dim)
+    });
+
+    let offset_x = options.width as f64 / 2.0 - (bounds.0 + bounds.1) / 2.0 * scale;
+    let offset_y = options.height as f64 / 2.0 + (bounds.2 + bounds.3) / 2.0 * scale;
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg width="{}" height="{}" viewBox="0 0 {} {}" xmlns="http://www.w3.org/2000/svg">"#,
+        options.width, options.height, options.width, options.height
+    ));
+    svg.push('\n');
+    svg.push_str(&format!(
+        r#"<rect width="100%" height="100%" fill="{}"/>"#,
+        options.background_color
+    ));
+    svg.push('\n');
+
+    if let Some(title) = &options.title {
+        svg.push_str(&format!(
+            r##"<text x="{}" y="{}" font-size="{}" text-anchor="middle" fill="#333">{}</text>"##,
+            options.width / 2,
+            options.margin / 2,
+            options.font_size + 4,
+            title
+        ));
+        svg.push('\n');
+    }
+
+    // Section geometry
+    svg.push_str(&section_polygons(
+        section, offset_x, offset_y, scale, &options,
+    ));
+
+    // Geometric centroid
+    svg.push_str(&centroid_marker(
+        &props.centroid,
+        offset_x,
+        offset_y,
+        scale,
+        &options,
+    ));
+
+    // Shear centre
+    svg.push_str(&shear_center_marker(
+        &warping.shear_center,
+        offset_x,
+        offset_y,
+        scale,
+        &options,
+    ));
+
+    // Principal axes
+    svg.push_str(&principal_axes_svg(
+        &props, offset_x, offset_y, scale, &options,
+    ));
+
+    svg.push_str("</svg>\n");
+    svg
+}
+
+/// Export an interactive standalone HTML viewer for a section.
+///
+/// Embeds the centroids plot in an HTML page with mouse-wheel zoom and
+/// click-drag panning, providing the Rust-side equivalent of Python's
+/// matplotlib-based interactive figures.
+pub fn to_interactive_html(section: &Section, options: SvgExportOptions) -> String {
+    // Render the base figure at double resolution for crisp zooming.
+    let mut opts = options.clone();
+    opts.width *= 2;
+    opts.height *= 2;
+    let svg = plot_centroids(section, opts);
+
+    // Wrap all drawing elements in a root group we can transform.
+    let open = svg.find('>').expect("svg tag") + 1;
+    let mut body = String::with_capacity(svg.len() + 64);
+    body.push_str(&svg[..open]);
+    body.push_str(r#"<g id="root">"#);
+    body.push_str(&svg[open..svg.rfind("</svg>").expect("closing svg")]);
+    body.push_str("</g></svg>");
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>section-properties interactive viewer</title>
+<style>
+  html, body {{ margin: 0; height: 100%; background: {bg}; overflow: hidden; }}
+  #viewport {{ height: 100vh; cursor: grab; }}
+  #viewport.dragging {{ cursor: grabbing; }}
+</style>
+</head>
+<body>
+<div id="viewport">
+{body}
+</div>
+<script>
+(function () {{
+  var vp = document.getElementById('viewport');
+  var root = document.getElementById('root');
+  var scale = 1, tx = 0, ty = 0;
+
+  function apply() {{
+    root.setAttribute('transform',
+      'translate(' + tx + ',' + ty + ') scale(' + scale + ')');
+  }}
+
+  vp.addEventListener('wheel', function (e) {{
+    e.preventDefault();
+    var factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    var rect = vp.getBoundingClientRect();
+    var mx = e.clientX - rect.left - rect.width / 2;
+    var my = e.clientY - rect.top - rect.height / 2;
+    tx = mx - (mx - tx) * factor;
+    ty = my - (my - ty) * factor;
+    scale *= factor;
+    apply();
+  }}, {{ passive: false }});
+
+  var drag = null;
+  vp.addEventListener('mousedown', function (e) {{
+    drag = {{ x: e.clientX, y: e.clientY, tx: tx, ty: ty }};
+    vp.classList.add('dragging');
+  }});
+  window.addEventListener('mousemove', function (e) {{
+    if (!drag) return;
+    tx = drag.tx + e.clientX - drag.x;
+    ty = drag.ty + e.clientY - drag.y;
+    apply();
+  }});
+  window.addEventListener('mouseup', function () {{
+    drag = null;
+    vp.classList.remove('dragging');
+  }});
+  vp.addEventListener('dblclick', function () {{ scale = 1; tx = 0; ty = 0; apply(); }});
+}})();
+</script>
+</body>
+</html>
+"#,
+        bg = options.background_color,
+        body = body
+    )
+}
+fn shear_center_marker(
+    sc: &Point,
+    ox: f64,
+    oy: f64,
+    scale: f64,
+    options: &SvgExportOptions,
+) -> String {
+    let x = ox + sc.x * scale;
+    let y = oy - sc.y * scale;
+    let size = 8.0;
+    format!(
+        r##"<g stroke="#2980b9" stroke-width="2" fill="none">
+  <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
+  <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}"/>
+  <circle cx="{:.1}" cy="{:.1}" r="4"/>
+  <text x="{:.1}" y="{:.1}" font-size="{}" text-anchor="middle" fill="#2980b9" dy="-10">S</text>
+</g>"##,
+        x - size,
+        y,
+        x + size,
+        y,
+        x,
+        y - size,
+        x,
+        y + size,
+        x,
+        y,
+        x,
+        y,
+        options.font_size
     )
 }
 
@@ -280,10 +485,22 @@ fn principal_axes_svg(
   <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60" text-anchor="start">U (I₁={:.2e})</text>
   <text x="{:.1}" y="{:.1}" font-size="{}" fill="#27ae60" text-anchor="start">V (I₂={:.2e})</text>
 </g>"##,
-        cx - dx1, cy - dy1, cx + dx1, cy + dy1,
-        cx - dx2, cy - dy2, cx + dx2, cy + dy2,
-        cx + dx1 + 5.0, cy + dy1 - 5.0, options.font_size, i1,
-        cx + dx2 + 5.0, cy + dy2 + 5.0, options.font_size, i2
+        cx - dx1,
+        cy - dy1,
+        cx + dx1,
+        cy + dy1,
+        cx - dx2,
+        cy - dy2,
+        cx + dx2,
+        cy + dy2,
+        cx + dx1 + 5.0,
+        cy + dy1 - 5.0,
+        options.font_size,
+        i1,
+        cx + dx2 + 5.0,
+        cy + dy2 + 5.0,
+        options.font_size,
+        i2
     )
 }
 
@@ -305,10 +522,20 @@ fn coordinate_axes(
   <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6" text-anchor="end">X</text>
   <text x="{:.1}" y="{:.1}" font-size="{}" fill="#95a5a6" text-anchor="start">Y</text>
 </g>"##,
-        cx - length, cy, cx + length, cy,
-        cx, cy - length, cx, cy + length,
-        cx + length + 5.0, cy + 5.0, options.font_size,
-        cx - 5.0, cy - length - 5.0, options.font_size
+        cx - length,
+        cy,
+        cx + length,
+        cy,
+        cx,
+        cy - length,
+        cx,
+        cy + length,
+        cx + length + 5.0,
+        cy + 5.0,
+        options.font_size,
+        cx - 5.0,
+        cy - length - 5.0,
+        options.font_size
     )
 }
 
@@ -341,13 +568,30 @@ fn dimension_lines(
   <text x="{:.1}" y="{:.1}" text-anchor="middle" fill="#7f8c8d" transform="rotate(-90 {:.1} {:.1})">{:.1}</text>
 </g>"##,
         options.font_size,
-        min_x, max_y + offset, max_x, max_y + offset,
-        min_x, max_y + offset - 5.0, min_x, max_y + offset + 5.0,
-        (min_x + max_x) / 2.0, max_y + offset + 15.0, width * 1000.0,
-        min_x - offset, min_y, min_x - offset, max_y,
-        min_x - offset + 5.0, min_y, min_x - offset - 5.0, max_y,
-        min_x - offset - 20.0, (min_y + max_y) / 2.0,
-        min_x - offset - 20.0, (min_y + max_y) / 2.0, height * 1000.0
+        min_x,
+        max_y + offset,
+        max_x,
+        max_y + offset,
+        min_x,
+        max_y + offset - 5.0,
+        min_x,
+        max_y + offset + 5.0,
+        (min_x + max_x) / 2.0,
+        max_y + offset + 15.0,
+        width * 1000.0,
+        min_x - offset,
+        min_y,
+        min_x - offset,
+        max_y,
+        min_x - offset + 5.0,
+        min_y,
+        min_x - offset - 5.0,
+        max_y,
+        min_x - offset - 20.0,
+        (min_y + max_y) / 2.0,
+        min_x - offset - 20.0,
+        (min_y + max_y) / 2.0,
+        height * 1000.0
     )
 }
 
@@ -368,15 +612,36 @@ fn legend(options: &SvgExportOptions) -> String {
   <text x="{}" y="{}" fill="#333">Principal Axes</text>
 </g>"##,
         options.font_size,
-        x_start, y_start, options.fill_color, options.fill_opacity, options.outer_stroke_color, options.outer_stroke_width,
-        x_start + 25.0, y_start + 12.0,
-        x_start, y_start + 30.0, x_start + 15.0, y_start + 30.0, options.hole_stroke_color, options.hole_stroke_width,
-        x_start + 25.0, y_start + 37.0,
-        x_start, y_start + 50.0, x_start + 15.0, y_start + 50.0,
-        x_start + 10.0, y_start + 50.0,
-        x_start + 25.0, y_start + 57.0,
-        x_start, y_start + 70.0, x_start + 15.0, y_start + 70.0,
-        x_start + 25.0, y_start + 77.0
+        x_start,
+        y_start,
+        options.fill_color,
+        options.fill_opacity,
+        options.outer_stroke_color,
+        options.outer_stroke_width,
+        x_start + 25.0,
+        y_start + 12.0,
+        x_start,
+        y_start + 30.0,
+        x_start + 15.0,
+        y_start + 30.0,
+        options.hole_stroke_color,
+        options.hole_stroke_width,
+        x_start + 25.0,
+        y_start + 37.0,
+        x_start,
+        y_start + 50.0,
+        x_start + 15.0,
+        y_start + 50.0,
+        x_start + 10.0,
+        y_start + 50.0,
+        x_start + 25.0,
+        y_start + 57.0,
+        x_start,
+        y_start + 70.0,
+        x_start + 15.0,
+        y_start + 70.0,
+        x_start + 25.0,
+        y_start + 77.0
     )
 }
 
@@ -425,10 +690,16 @@ fn stress_legend(min_vm: f64, max_vm: f64, options: &SvgExportOptions) -> String
   <rect x="{}" y="{}" width="200" height="15" fill="url(#stressGradient)"/>
 </g>"##,
         options.font_size,
-        x, y - 20.0,
-        x, y + 35.0, min_vm,
-        x + 190.0, y + 35.0, max_vm,
-        x, y
+        x,
+        y - 20.0,
+        x,
+        y + 35.0,
+        min_vm,
+        x + 190.0,
+        y + 35.0,
+        max_vm,
+        x,
+        y
     )
 }
 
@@ -455,6 +726,27 @@ mod tests {
         assert!(svg.contains("</svg>"));
     }
 
+    #[test]
+    fn interactive_html_contains_viewer() {
+        use crate::section_library::primitive::RectangularSection;
+        let section = RectangularSection::new(0.2, 0.1).build();
+        let html = to_interactive_html(&section, SvgExportOptions::default());
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains(r#"id="root""#));
+        assert!(html.contains("addEventListener('wheel'"));
+        assert!(html.contains(">C</text>"));
+        assert!(html.contains(">S</text>"));
+    }
+    #[test]
+    fn plot_centroids_marks_shear_center() {
+        use crate::section_library::primitive::RectangularSection;
+        let section = RectangularSection::new(0.2, 0.1).build();
+        let svg = plot_centroids(&section, SvgExportOptions::default());
+        assert!(svg.contains(">C</text>"));
+        assert!(svg.contains(">S</text>"));
+        assert!(svg.contains("I₁"));
+        assert!(svg.contains("</svg>"));
+    }
     #[test]
     fn svg_with_title() {
         let i = ISection::from_designation("IPE300").unwrap();
@@ -507,3 +799,6 @@ mod tests {
         assert!(svg.contains("<svg"));
     }
 }
+
+
+

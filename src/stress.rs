@@ -47,10 +47,7 @@ impl SectionLoads {
 
     /// Pure axial load.
     pub fn axial(n: f64) -> Self {
-        Self {
-            n,
-            ..Self::zero()
-        }
+        Self { n, ..Self::zero() }
     }
 
     /// Pure bending about x-axis.
@@ -71,10 +68,7 @@ impl SectionLoads {
 
     /// Pure shear in y-direction.
     pub fn shear_y(vy: f64) -> Self {
-        Self {
-            vy,
-            ..Self::zero()
-        }
+        Self { vy, ..Self::zero() }
     }
 
     /// Pure torsion.
@@ -203,9 +197,9 @@ impl StressAnalysis {
         let area = self.props.area;
 
         // Try FEM Tri6 stress analysis first
-        if let Some(fem_points) = crate::stress_fem::calculate_stress_fem(
-            &self.section, &self.props, loads,
-        ) {
+        if let Some(fem_points) =
+            crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads)
+        {
             let mut max_sigma_z = f64::NEG_INFINITY;
             let mut min_sigma_z = f64::INFINITY;
             let mut max_von_mises = 0.0;
@@ -213,13 +207,19 @@ impl StressAnalysis {
             let mut max_vm_loc = Point::new(0.0, 0.0);
 
             for p in &fem_points {
-                if p.sigma_z > max_sigma_z { max_sigma_z = p.sigma_z; }
-                if p.sigma_z < min_sigma_z { min_sigma_z = p.sigma_z; }
+                if p.sigma_z > max_sigma_z {
+                    max_sigma_z = p.sigma_z;
+                }
+                if p.sigma_z < min_sigma_z {
+                    min_sigma_z = p.sigma_z;
+                }
                 if p.von_mises > max_von_mises {
                     max_von_mises = p.von_mises;
                     max_vm_loc = Point::new(p.x, p.y);
                 }
-                if p.tau_zxy > max_tau { max_tau = p.tau_zxy; }
+                if p.tau_zxy > max_tau {
+                    max_tau = p.tau_zxy;
+                }
             }
 
             return StressAnalysisResult {
@@ -292,8 +292,16 @@ impl StressAnalysis {
                 (0.0, 0.0)
             };
 
-            let sig_zz_m11 = if i11 > 1e-15 { loads.m11 * y22 / i11 } else { 0.0 };
-            let sig_zz_m22 = if i22 > 1e-15 { -loads.m22 * x11 / i22 } else { 0.0 };
+            let sig_zz_m11 = if i11 > 1e-15 {
+                loads.m11 * y22 / i11
+            } else {
+                0.0
+            };
+            let sig_zz_m22 = if i22 > 1e-15 {
+                -loads.m22 * x11 / i22
+            } else {
+                0.0
+            };
 
             // Shear stress breakdown
             let sig_zx_vx = loads.vx / ay;
@@ -555,9 +563,7 @@ mod tests {
 
     #[test]
     fn stress_principal_bending() {
-        let angle = crate::section_library::steel::AngleSection::new(
-            0.1, 0.075, 0.008, 0.0, 0.0,
-        );
+        let angle = crate::section_library::steel::AngleSection::new(0.1, 0.075, 0.008, 0.0, 0.0);
         let section = angle.build();
         let analysis = StressAnalysis::new(section, STEEL_S355);
 
@@ -616,7 +622,9 @@ mod tests {
 
         // FEM evaluates at mesh nodes, some near neutral axis where σ ≈ 0.
         // Check that the maximum bending stress is non-zero.
-        let max_mxx = result.point_stresses.iter()
+        let max_mxx = result
+            .point_stresses
+            .iter()
             .map(|s| s.sig_zz_mxx.abs())
             .fold(0.0_f64, f64::max);
         assert!(max_mxx > 1e-3);
@@ -740,10 +748,25 @@ mod tests {
         for s in &result.point_stresses {
             // FEM shear from Vx has both x and y components.
             // With Vy=0: sig_zx_v ≈ sig_zx_vx, sig_zy_v ≈ sig_zy_vx
-            assert!((s.sig_zx_v - s.sig_zx_vx).abs() < 1e-6, "sig_zx_v mismatch at ({}, {})", s.x, s.y);
-            assert!((s.sig_zy_v - s.sig_zy_vx).abs() < 1e-6, "sig_zy_v mismatch at ({}, {})", s.x, s.y);
+            assert!(
+                (s.sig_zx_v - s.sig_zx_vx).abs() < 1e-6,
+                "sig_zx_v mismatch at ({}, {})",
+                s.x,
+                s.y
+            );
+            assert!(
+                (s.sig_zy_v - s.sig_zy_vx).abs() < 1e-6,
+                "sig_zy_v mismatch at ({}, {})",
+                s.x,
+                s.y
+            );
             // No torsion: tau_xz ≈ sig_zx_v
-            assert!((s.tau_xz - s.sig_zx_v).abs() < 1e-6, "tau_xz mismatch at ({}, {})", s.x, s.y);
+            assert!(
+                (s.tau_xz - s.sig_zx_v).abs() < 1e-6,
+                "tau_xz mismatch at ({}, {})",
+                s.x,
+                s.y
+            );
         }
     }
 
@@ -766,8 +789,18 @@ mod tests {
         for s in &result.point_stresses {
             // FEM torsion has both x and y components.
             // No shear: tau_xz ≈ sig_zx_mzz, tau_yz ≈ sig_zy_mzz
-            assert!((s.tau_xz - s.sig_zx_mzz).abs() < 1e-3, "tau_xz mismatch at ({}, {})", s.x, s.y);
-            assert!((s.tau_yz - s.sig_zy_mzz).abs() < 1e-3, "tau_yz mismatch at ({}, {})", s.x, s.y);
+            assert!(
+                (s.tau_xz - s.sig_zx_mzz).abs() < 1e-3,
+                "tau_xz mismatch at ({}, {})",
+                s.x,
+                s.y
+            );
+            assert!(
+                (s.tau_yz - s.sig_zy_mzz).abs() < 1e-3,
+                "tau_yz mismatch at ({}, {})",
+                s.x,
+                s.y
+            );
         }
     }
 
@@ -775,9 +808,7 @@ mod tests {
     fn stress_unsymmetric_section_bending_formula() {
         // Angle section (ixy != 0): verify bending stress formula
         // σ_z = Mxx*(Iyy*y - Ixy*x)/denom + Myy*(Ixy*y - Ixx*x)/denom
-        let angle = crate::section_library::steel::AngleSection::new(
-            0.1, 0.075, 0.008, 0.0, 0.0,
-        );
+        let angle = crate::section_library::steel::AngleSection::new(0.1, 0.075, 0.008, 0.0, 0.0);
         let section = angle.build();
         let props = crate::section_properties::SectionProperties::from_section(&section);
         let analysis = StressAnalysis::new(section, STEEL_S355);

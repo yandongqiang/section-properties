@@ -3,8 +3,8 @@
 use crate::geometry::{Point, Polygon};
 use crate::section::Section;
 use crate::section_library::{
-    ParametricSection, circle_polygon, draw_radius, hollow_circle_polygon, rectangle_polygon,
-    rotate_point, rounded_rectangle_polygon,
+    ParametricSection, circle_polygon, draw_radius, hollow_circle_polygon, rotate_point,
+    rounded_rectangle_polygon,
 };
 use std::f64::consts::PI;
 
@@ -28,7 +28,19 @@ impl RectangularSection {
 
 impl ParametricSection for RectangularSection {
     fn build(&self) -> Section {
-        Section::new(rectangle_polygon(self.width, self.height), Vec::new())
+        // Match Python sectionproperties: bottom-left corner at the origin,
+        // extending to (b, d).
+        let b = self.width;
+        let d = self.height;
+        Section::new(
+            Polygon::new(vec![
+                Point::new(0.0, 0.0),
+                Point::new(b, 0.0),
+                Point::new(b, d),
+                Point::new(0.0, d),
+            ]),
+            Vec::new(),
+        )
     }
 
     fn designation(&self) -> String {
@@ -416,7 +428,10 @@ pub struct EllipticalHollowSection {
 
 impl EllipticalHollowSection {
     pub fn new(d_x: f64, d_y: f64, t: f64, n: usize) -> Self {
-        assert!(d_x > 0.0 && d_y > 0.0 && t > 0.0, "Dimensions must be positive");
+        assert!(
+            d_x > 0.0 && d_y > 0.0 && t > 0.0,
+            "Dimensions must be positive"
+        );
         assert!(2.0 * t < d_x && 2.0 * t < d_y, "Thickness too large");
         assert!(n >= 3, "Need at least 3 points");
         Self { d_x, d_y, t, n }
@@ -590,10 +605,216 @@ impl ParametricSection for TriangularRadiusSection {
     }
 }
 
-#[cfg(test)]
+/// Pentagon section.
+///
+/// Mirrors Python `pentagon_section(d, n, rot)`. `d` is the diameter of the
+/// circumscribed circle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PentagonSection {
+    pub d: f64,
+    pub n: usize,
+}
+
+impl PentagonSection {
+    pub fn new(d: f64) -> Self {
+        Self::with_vertices(d, 64)
+    }
+
+    pub fn with_vertices(d: f64, n: usize) -> Self {
+        assert!(d > 0.0, "Diameter must be positive");
+        Self { d, n }
+    }
+}
+
+impl ParametricSection for PentagonSection {
+    fn build(&self) -> Section {
+        RegularPolygonSection::new(self.d / 2.0, 5).build()
+    }
+
+    fn designation(&self) -> String {
+        format!("PENTAGON Ø{:.0}", self.d * 1000.0)
+    }
+}
+
+/// Hexagon section.
+///
+/// Mirrors Python `hexagon_section(d, n, rot)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HexagonSection {
+    pub d: f64,
+    pub n: usize,
+}
+
+impl HexagonSection {
+    pub fn new(d: f64) -> Self {
+        Self::with_vertices(d, 64)
+    }
+
+    pub fn with_vertices(d: f64, n: usize) -> Self {
+        assert!(d > 0.0, "Diameter must be positive");
+        Self { d, n }
+    }
+}
+
+impl ParametricSection for HexagonSection {
+    fn build(&self) -> Section {
+        RegularPolygonSection::new(self.d / 2.0, 6).build()
+    }
+
+    fn designation(&self) -> String {
+        format!("HEXAGON Ø{:.0}", self.d * 1000.0)
+    }
+}
+
+/// Octagon section.
+///
+/// Mirrors Python `octagon_section(d, n, rot)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OctagonSection {
+    pub d: f64,
+    pub n: usize,
+}
+
+impl OctagonSection {
+    pub fn new(d: f64) -> Self {
+        Self::with_vertices(d, 64)
+    }
+
+    pub fn with_vertices(d: f64, n: usize) -> Self {
+        assert!(d > 0.0, "Diameter must be positive");
+        Self { d, n }
+    }
+}
+
+impl ParametricSection for OctagonSection {
+    fn build(&self) -> Section {
+        RegularPolygonSection::new(self.d / 2.0, 8).build()
+    }
+
+    fn designation(&self) -> String {
+        format!("OCTAGON Ø{:.0}", self.d * 1000.0)
+    }
+}
+
+    #[test]
+    fn pentagon_section() {
+        let p = PentagonSection::new(0.1);
+        let sec = p.build();
+        // Area of regular pentagon with circumradius R: (5/2) R^2 sin(72°)
+        let r = 0.05_f64;
+        let expected = 2.5 * r * r * (2.0 * PI * 0.2).sin();
+        assert!((sec.area() - expected).abs() < 1e-8);
+    }
+
+    #[test]
+    fn hexagon_section() {
+        let h = HexagonSection::new(0.12);
+        let sec = h.build();
+        let expected = 3.0 * 3.0_f64.sqrt() / 2.0 * 0.06_f64.powi(2);
+        assert!((sec.area() - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn octagon_section() {
+        let o = OctagonSection::new(0.2);
+        let sec = o.build();
+        let r = 0.1_f64;
+        let expected = 2.0 * 2.0_f64.sqrt() * r * r;
+        assert!((sec.area() - expected).abs() < 1e-8);
+    }
+
+    #[test]
+    fn geometry_align_center_and_mirror() {
+        use crate::geometry::{Axis, Geometry};
+        let rect = Geometry::new(
+            Polygon::new(vec![
+                Point::new(0.0, 0.0),
+                Point::new(2.0, 0.0),
+                Point::new(2.0, 1.0),
+                Point::new(0.0, 1.0),
+            ]),
+            vec![],
+        );
+        let c = rect.align_center().apply_transforms();
+        assert!((c.centroid().x - 0.0).abs() < 1e-12);
+        assert!((c.centroid().y - 0.0).abs() < 1e-12);
+
+        let m = rect.clone().mirror(Axis::Y).apply_transforms();
+        assert!((m.centroid().x + 1.0).abs() < 1e-12);
+
+        let s = rect.clone().shift(1.0, -3.0).apply_transforms();
+        assert!((s.centroid().x - 2.0).abs() < 1e-12);
+        assert!((s.centroid().y + 2.5).abs() < 1e-12);
+
+        // Rotate about origin by 90 degrees: area preserved, centroid moved
+        let r = rect.clone().rotate_about(90.0, Point::new(0.0, 0.0)).apply_transforms();
+        assert!((r.area() - rect.area()).abs() < 1e-12);
+        assert!((r.centroid().x + 0.5).abs() < 1e-9);
+        assert!((r.centroid().y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn geometry_align_to() {
+        use crate::geometry::Geometry;
+        let a = Geometry::new(
+            Polygon::new(vec![
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 0.0),
+                Point::new(1.0, 1.0),
+                Point::new(0.0, 1.0),
+            ]),
+            vec![],
+        );
+        let b = Geometry::new(
+            Polygon::new(vec![
+                Point::new(10.0, 10.0),
+                Point::new(11.5, 10.0),
+                Point::new(11.5, 11.0),
+                Point::new(10.0, 11.0),
+            ]),
+            vec![],
+        );
+        let aligned = a.align_to(&b).apply_transforms();
+        assert!((aligned.centroid().y - 10.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn geometry_offset_rectangle() {
+        use crate::geometry::Geometry;
+        let rect = Geometry::new(
+            Polygon::new(vec![
+                Point::new(0.0, 0.0),
+                Point::new(2.0, 0.0),
+                Point::new(2.0, 1.0),
+                Point::new(0.0, 1.0),
+            ]),
+            vec![],
+        );
+        // Grow by 0.1: area = 2.2 * 1.2
+        let grown = rect.offset(0.1).unwrap().apply_transforms();
+        assert!((grown.area() - 2.64).abs() < 1e-9);
+        // Shrink by 0.2: area = 1.6 * 0.6
+        let shrunk = rect.offset(-0.2).unwrap().apply_transforms();
+        assert!((shrunk.area() - 0.96).abs() < 1e-9);
+        // Over-shrink degenerates -> None
+        assert!(rect.offset(-0.6).is_none());
+    }
+
+    #[test]
+    fn geometry_offset_circle() {
+        use crate::geometry::Geometry;
+        use std::f64::consts::PI;
+        let r = 0.5_f64;
+        let circ = Geometry::from_section(&CircularSection::new(r).build());
+        let grown = circ.offset(0.05).unwrap();
+        let expected = PI * (r + 0.05_f64).powi(2);
+        assert!((grown.area() - expected).abs() / expected < 5e-3);
+    }
+
+    #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::material::presets::STEEL_S355;
+    
     use std::f64::consts::PI;
 
     #[test]

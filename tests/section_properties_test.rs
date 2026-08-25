@@ -1,4 +1,13 @@
-use section_properties::{Point, Polygon, Section, SectionProperties, section_library::steel::ISection, section_library::ParametricSection, plastic::warping::WarpingProperties, section_library::steel::{NastranBar, NastranBox, NastranChan, NastranCross, NastranI, NastranTee, NastranTube, NastranZed, SuperTGirder, SuperTType, IGirder, IGirderType, UGirder}};
+use section_properties::{
+    Point, Polygon, Section, SectionProperties,
+    plastic::warping::WarpingProperties,
+    section_library::ParametricSection,
+    section_library::steel::ISection,
+    section_library::steel::{
+        IGirder, IGirderType, NastranBar, NastranBox, NastranChan, NastranCross, NastranI,
+        NastranTee, NastranTube, NastranZed, SuperTGirder, SuperTType, UGirder,
+    },
+};
 
 #[test]
 fn rectangle_section() {

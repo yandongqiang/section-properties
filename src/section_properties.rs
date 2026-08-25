@@ -237,10 +237,26 @@ impl SectionProperties {
         let max_fiber_x = x_max.abs().max(x_min.abs());
 
         // Section moduli about centroidal axes (positive/negative fibres)
-        let zxx_plus = if y_max.abs() > 1e-15 { ix_c / y_max.abs() } else { 0.0 };
-        let zxx_minus = if y_min.abs() > 1e-15 { ix_c / y_min.abs() } else { 0.0 };
-        let zyy_plus = if x_max.abs() > 1e-15 { iy_c / x_max.abs() } else { 0.0 };
-        let zyy_minus = if x_min.abs() > 1e-15 { iy_c / x_min.abs() } else { 0.0 };
+        let zxx_plus = if y_max.abs() > 1e-15 {
+            ix_c / y_max.abs()
+        } else {
+            0.0
+        };
+        let zxx_minus = if y_min.abs() > 1e-15 {
+            ix_c / y_min.abs()
+        } else {
+            0.0
+        };
+        let zyy_plus = if x_max.abs() > 1e-15 {
+            iy_c / x_max.abs()
+        } else {
+            0.0
+        };
+        let zyy_minus = if x_min.abs() > 1e-15 {
+            iy_c / x_min.abs()
+        } else {
+            0.0
+        };
 
         // Principal axis section moduli
         let principal = {
@@ -267,16 +283,37 @@ impl SectionProperties {
                 (x1, y2)
             })
             .fold(
-                (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+                (
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ),
                 |(x1n, x1x, y2n, y2x), (x1, y2)| {
                     (x1n.min(x1), x1x.max(x1), y2n.min(y2), y2x.max(y2))
                 },
             );
 
-        let z11_plus = if y2_max.abs() > 1e-15 { i11 / y2_max.abs() } else { 0.0 };
-        let z11_minus = if y2_min.abs() > 1e-15 { i11 / y2_min.abs() } else { 0.0 };
-        let z22_plus = if x1_max.abs() > 1e-15 { i22 / x1_max.abs() } else { 0.0 };
-        let z22_minus = if x1_min.abs() > 1e-15 { i22 / x1_min.abs() } else { 0.0 };
+        let z11_plus = if y2_max.abs() > 1e-15 {
+            i11 / y2_max.abs()
+        } else {
+            0.0
+        };
+        let z11_minus = if y2_min.abs() > 1e-15 {
+            i11 / y2_min.abs()
+        } else {
+            0.0
+        };
+        let z22_plus = if x1_max.abs() > 1e-15 {
+            i22 / x1_max.abs()
+        } else {
+            0.0
+        };
+        let z22_minus = if x1_min.abs() > 1e-15 {
+            i22 / x1_min.abs()
+        } else {
+            0.0
+        };
 
         // Perimeter (sum of outer + holes across all regions)
         let perimeter = polygons.iter().map(|p| p.perimeter()).sum::<f64>();
@@ -387,6 +424,63 @@ impl SectionProperties {
     pub fn section_modulus_22(&self) -> f64 {
         self.principal.z22_plus.min(self.principal.z22_minus)
     }
+
+    /// Format all computed properties as an aligned text table.
+    ///
+    /// Mirrors Python `Section.print_results()` (geometric + frame sections).
+    pub fn format_results(&self) -> String {
+        let mut s = String::new();
+        let row = |s: &mut String, name: &str, value: f64| {
+            s.push_str(&format!("  {:<24}{:>14.6e}\n", name, value));
+        };
+
+        s.push_str("Section Properties:\n");
+        s.push_str("===================\n");
+        row(&mut s, "Area", self.area);
+        row(&mut s, "Perimeter", self.perimeter);
+        s.push('\n');
+
+        s.push_str("Centroid:\n");
+        row(&mut s, "cx", self.centroid.x);
+        row(&mut s, "cy", self.centroid.y);
+        s.push('\n');
+
+        s.push_str("Second Moments of Area:\n");
+        row(&mut s, "Ixx (about cx)", self.ix);
+        row(&mut s, "Iyy (about cy)", self.iy);
+        row(&mut s, "Ixy", self.ixy);
+        row(&mut s, "I11 (principal)", self.principal.i11);
+        row(&mut s, "I22 (principal)", self.principal.i22);
+        row(&mut s, "Phi (angle)", self.principal.phi.to_degrees());
+        s.push('\n');
+
+        s.push_str("Section Moduli:\n");
+        row(&mut s, "Zxx+", self.zxx_plus);
+        row(&mut s, "Zxx-", self.zxx_minus);
+        row(&mut s, "Zyy+", self.zyy_plus);
+        row(&mut s, "Zyy-", self.zyy_minus);
+        row(&mut s, "Z11+", self.principal.z11_plus);
+        row(&mut s, "Z11-", self.principal.z11_minus);
+        row(&mut s, "Z22+", self.principal.z22_plus);
+        row(&mut s, "Z22-", self.principal.z22_minus);
+        s.push('\n');
+
+        s.push_str("Radii of Gyration:\n");
+        row(&mut s, "rx", self.gyration.rx);
+        row(&mut s, "ry", self.gyration.ry);
+        row(&mut s, "r11", self.gyration.r11);
+        row(&mut s, "r22", self.gyration.r22);
+        row(&mut s, "rp (polar)", self.gyration.polar);
+
+        s
+    }
+
+    /// Print the properties table to stdout.
+    ///
+    /// Mirrors Python `Section.print_results()`.
+    pub fn print_results(&self) {
+        print!("{}", self.format_results());
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +528,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn format_results_contains_sections() {
+        let props = SectionProperties::from_section(&rectangle(0.1, 0.2));
+        let table = props.format_results();
+        assert!(table.contains("Section Properties:"));
+        assert!(table.contains("Second Moments of Area:"));
+        assert!(table.contains("Radii of Gyration:"));
+        // area row present with scientific notation
+        assert!(table.contains("Area"));
+    }
     #[test]
     fn rectangular_section_modulus_values() {
         let b = 0.1_f64;
@@ -662,10 +766,8 @@ mod tests {
     fn compound_with_transform_translate() {
         // A 0.1 x 0.2 rectangle built at origin, then translated to (1.0, 2.0).
         let mut g = Geometry::new(rect_polygon(0.1, 0.2, 0.0, 0.0), vec![]);
-        g.transforms.push(crate::geometry::Transform::Translate {
-            dx: 1.0,
-            dy: 2.0,
-        });
+        g.transforms
+            .push(crate::geometry::Transform::Translate { dx: 1.0, dy: 2.0 });
         let compound = CompoundGeometry::new(vec![g]);
         let props = SectionProperties::from_compound(&compound);
 
@@ -776,7 +878,10 @@ mod tests {
         );
         // Principal angle should be non-zero and not 90°
         let phi = props.principal.phi;
-        assert!(phi.abs() > 1e-8, "L-section principal angle should be non-zero");
+        assert!(
+            phi.abs() > 1e-8,
+            "L-section principal angle should be non-zero"
+        );
         assert!(
             (phi.abs() - std::f64::consts::FRAC_PI_2).abs() > 1e-8,
             "L-section principal angle should not be 90°"
@@ -877,7 +982,10 @@ mod tests {
         let props = SectionProperties::from_section(&section);
 
         // Ixy should be non-zero after rotation
-        assert!(props.ixy.abs() > 1e-6, "rotated rectangle should have Ixy != 0");
+        assert!(
+            props.ixy.abs() > 1e-6,
+            "rotated rectangle should have Ixy != 0"
+        );
 
         // Principal angle should be ≈ ±30° (or ±30° + 90°)
         let phi = props.principal.phi;
@@ -1007,3 +1115,4 @@ mod tests {
         assert!((props.ixy - l_props.ixy).abs() / props.ixy.abs() < 1e-10);
     }
 }
+

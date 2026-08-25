@@ -2,7 +2,9 @@
 //!
 //! Provides nominal capacity predictions for local, distortional, and global buckling.
 
+use crate::cold_formed_analysis::distortional::{DistortionalBuckling, DistortionalParams};
 use crate::material::Material;
+use crate::plastic::warping::WarpingProperties;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
 
@@ -20,34 +22,64 @@ pub struct DsmParams {
 }
 
 impl DsmParams {
-    /// Compute DSM parameters from section properties.
-    pub fn from_section(section: &Section, material: &Material) -> Self {
+    /// Compute DSM parameters from section properties with a given span.
+    ///
+    /// `span` is the unbraced length [m] for lateral-torsional buckling.
+    pub fn from_section_with_span(section: &Section, material: &Material, span: f64) -> Self {
         let props = SectionProperties::from_section(section);
+        let warping = WarpingProperties::from_section(section);
         let fy = material.yield_strength;
         let e = material.youngs_modulus;
-
-        // Simplified elastic buckling moments
-        // Real implementation would use FSM (finite strip method)
-        let _iy = props.iy;
-        let iz = props.ix;
-        let _iw = props.ix; // Approximate
-
-        // Global buckling (flexural-torsional)
-        let l = 6.0; // Assume 6m span
         let g = material.shear_modulus;
-        let j = 0.0; // Approximate
+        let nu = material.poissons_ratio;
 
-        let m_cr_e = std::f64::consts::PI / l * (e * iz * g * j).sqrt();
-        let m_cr_l = m_cr_e * 0.8; // Approximate
-        let m_cr_d = m_cr_e * 0.6; // Approximate
-        let m_y = fy * props.ix / props.max_fiber_distance_y();
+        let iy = props.iy;
+        let j = warping.j;
+        let iw = warping.iw;
+        let z_x = props.section_modulus_x();
+
+        let m_y = fy * z_x;
+
+        // Elastic global (lateral-torsional) buckling moment:
+        // M_cr = (π/L) * sqrt(E * Iy * (G*J + (π/L)² * E * Iw))
+        let pi_over_l = std::f64::consts::PI / span;
+        let m_cr_e = pi_over_l * (e * iy * (g * j + pi_over_l * pi_over_l * e * iw)).sqrt();
+
+        // Elastic distortional buckling moment from distortional analysis.
+        let dist_params = DistortionalParams::default();
+        let dist = DistortionalBuckling::analyze(section, material, &dist_params);
+        let m_cr_d = dist.sigma_crd * z_x;
+
+        // Elastic local buckling moment: simplified plate buckling estimate.
+        // Plate buckling stress sigma_cr = k * pi² * E * t² / (12*(1-ν²)*b²)
+        // for a simply supported plate of width b. The plate width b and
+        // thickness t are rough estimates from the bounding box and area, so
+        // this is only an approximation until a proper FSM/strip analysis.
+        let (min_x, max_x, min_y, max_y) = section.bounds();
+        let h = max_y - min_y;
+        let b = max_x - min_x;
+        // Effective thickness estimate from area / perimeter (rough)
+        let t_est = props.area / (2.0 * (h + b));
+        let k_local = 4.0; // simply supported plate buckling coefficient
+        let m_cr_l = if t_est > 1e-10 && h > 1e-10 {
+            let sigma_cr_l = k_local * std::f64::consts::PI.powi(2) * e * t_est.powi(2)
+                / (12.0 * (1.0 - nu * nu) * h * h);
+            sigma_cr_l * z_x
+        } else {
+            m_cr_e // fallback: assume local buckling doesn't control
+        };
 
         Self {
-            m_cr_l: m_cr_l.max(1.0),
-            m_cr_d: m_cr_d.max(1.0),
-            m_cr_e: m_cr_e.max(1.0),
-            m_y: m_y.max(1.0),
+            m_cr_l: m_cr_l.max(1e-6),
+            m_cr_d: m_cr_d.max(1e-6),
+            m_cr_e: m_cr_e.max(1e-6),
+            m_y: m_y.max(1e-6),
         }
+    }
+
+    /// Compute DSM parameters from section properties (default span = 6 m).
+    pub fn from_section(section: &Section, material: &Material) -> Self {
+        Self::from_section_with_span(section, material, 6.0)
     }
 }
 
@@ -157,4 +189,3 @@ mod tests {
         assert!(strengths.m_n <= strengths.m_n_g);
     }
 }
-

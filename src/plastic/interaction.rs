@@ -206,21 +206,12 @@ impl InteractionDiagram {
     }
 
     /// Intersect segment (a, b) with line n·x = c.
-    fn line_intersection(
-        a: Point,
-        b: Point,
-        n_x: f64,
-        n_y: f64,
-        c: f64,
-    ) -> Point {
+    fn line_intersection(a: Point, b: Point, n_x: f64, n_y: f64, c: f64) -> Point {
         let proj_a = n_x * a.x + n_y * a.y;
         let proj_b = n_x * b.x + n_y * b.y;
         let t = (c - proj_a) / (proj_b - proj_a);
 
-        Point::new(
-            a.x + t * (b.x - a.x),
-            a.y + t * (b.y - a.y),
-        )
+        Point::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y))
     }
 
     /// Clip a polygon by the half-space n·x &lt;= c (or >= c when below=false).
@@ -248,9 +239,7 @@ impl InteractionDiagram {
             let curr_inside = Self::inside_halfspace(curr, n_x, n_y, c, below);
 
             if prev_inside != curr_inside {
-                out.push(Self::line_intersection(
-                    prev, curr, n_x, n_y, c,
-                ));
+                out.push(Self::line_intersection(prev, curr, n_x, n_y, c));
             }
 
             if curr_inside {

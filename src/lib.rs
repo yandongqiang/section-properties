@@ -24,12 +24,16 @@ pub use crate::fire::{
     FireAnalysis, FireExposure, FireProtection, FireResistanceResult, MaterialPropertiesAtTemp,
     ProtectionType, SectionFactor, TemperatureProfile, composite,
 };
-pub use crate::geometry::{CompoundGeometry, Geometry, Point, Polygon, Transform};
+pub use crate::geometry::{Axis, CompoundGeometry, Geometry, Point, Polygon, Transform};
 pub use crate::io::{
     CsvExportOptions, DxfColor, DxfExportOptions, ExportFormat, JsonMaterial, JsonSection,
     SectionExporter, SectionImporter, SvgExportOptions, export_section_library, from_csv,
-    from_json, section_from_composite, section_from_parametric, to_csv, to_dxf, to_json, to_svg,
+    from_json, plot_centroids, section_from_composite, section_from_parametric,
+    to_csv, to_dxf, to_json, to_nastran, to_svg, to_vtk,
 };
+
+/// Alias for the interactive HTML viewer export.
+pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
 pub use crate::mesh::{
     AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
@@ -41,11 +45,10 @@ pub use crate::plastic::{
     PlasticProperties, PlasticSection, SectionClass, SectionClassification, StressDistribution,
     TorsionAnalysis, WarpingProperties, aisc360, classify_section, effective, en1993,
 };
-pub use crate::section::Section;
+pub use crate::section::{FrameProperties, Section};
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{
     GeometricProperties, GyrationProperties, PrincipalProperties, SectionProperties,
-};
-pub use crate::stress::{
+};pub use crate::stress::{
     SectionLoads, StressAnalysis, StressAnalysisResult, StressAtPoint, YieldCheckResult,
 };

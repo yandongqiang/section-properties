@@ -13,6 +13,9 @@ use std::f64::consts::PI;
 pub struct CompositeSection {
     pub outer: Polygon,
     pub holes: Vec<Polygon>,
+    /// Additional independent outer regions (e.g. steel beam + concrete slab
+    /// as two separate solids, not a hole).
+    pub extra_outers: Vec<Polygon>,
     pub material_groups: Vec<MaterialGroup>,
     /// Reference material for transformation (usually first group)
     pub reference_material: Material,
@@ -25,6 +28,7 @@ impl CompositeSection {
         Self {
             outer: section.outer,
             holes: section.holes,
+            extra_outers: Vec::new(),
             material_groups: vec![MaterialGroup::new(material, vec![0])],
             reference_material,
         }
@@ -39,6 +43,7 @@ impl CompositeSection {
         Self {
             outer,
             holes,
+            extra_outers: Vec::new(),
             material_groups,
             reference_material,
         }
@@ -50,46 +55,56 @@ impl CompositeSection {
     }
 
     /// Create a composite section from multiple parametric sections with different materials.
+    ///
+    /// Each component is an independent solid region. The first component's
+    /// outer polygon becomes `outer`; subsequent components' outer polygons
+    /// are stored in `extra_outers` (NOT treated as holes).
     pub fn from_components(components: Vec<(Box<dyn ParametricSection>, Point, Material)>) -> Self {
-        let mut all_polygons = Vec::new();
-        let mut material_groups = Vec::new();
-        let mut current_polygon_index = 0;
+        if components.is_empty() {
+            return Self::new(Polygon::new(vec![]), Vec::new(), Vec::new());
+        }
+
+        let mut outers: Vec<Polygon> = Vec::new();
+        let mut all_holes: Vec<Polygon> = Vec::new();
+        // Explicit material per region: (outer index, hole indices). Avoids
+        // inferring materials from fragile polygon-index arithmetic.
+        let mut region_materials: Vec<(usize, Vec<usize>, Material)> = Vec::new();
 
         for (section, offset, material) in components {
             let built = section.build();
-            // Apply offset to outer
             let mut outer = built.outer;
             for v in &mut outer.vertices {
                 v.x += offset.x;
                 v.y += offset.y;
             }
-            all_polygons.push(outer);
+            let outer_index = outers.len();
+            outers.push(outer);
 
-            let n_holes = built.holes.len();
-
-            // Apply offset to holes
+            let mut hole_indices = Vec::new();
             for mut hole in built.holes {
                 for v in &mut hole.vertices {
                     v.x += offset.x;
                     v.y += offset.y;
                 }
-                all_polygons.push(hole);
+                hole_indices.push(all_holes.len());
+                all_holes.push(hole);
             }
-
-            let n_polygons = 1 + n_holes;
-            material_groups.push(MaterialGroup::new(
-                material,
-                (current_polygon_index..current_polygon_index + n_polygons).collect(),
-            ));
-            current_polygon_index += n_polygons;
+            region_materials.push((outer_index, hole_indices, material));
         }
 
-        // For the composite section, we use the first polygon as outer
-        // and the rest as holes (simplified - real impl would do boolean union)
-        let outer = all_polygons[0].clone();
-        let holes = all_polygons[1..].to_vec();
+        let reference_material = region_materials[0].2.clone();
+        let outer = outers.remove(0);
 
-        Self::new(outer, holes, material_groups)
+        Self {
+            outer,
+            holes: all_holes,
+            extra_outers: outers,
+            material_groups: region_materials
+                .into_iter()
+                .map(|(_o, h, m)| MaterialGroup::new(m, h))
+                .collect(),
+            reference_material,
+        }
     }
 
     /// Get the reference material.
@@ -173,6 +188,27 @@ impl CompositeSection {
             }
         }
 
+        // Process extra_outers (independent solid regions, positive area).
+        // Group j (j >= 1) corresponds to extra_outer j-1: each component
+        // contributes one group, and the first component's group owns `outer`.
+        for (i, extra) in self.extra_outers.iter().enumerate() {
+            if let Some(group) = self.material_groups.get(i + 1) {
+                let n = group.material.modular_ratio(&self.reference_material);
+                let signed_area = extra.signed_area() * n;
+                let centroid = extra.centroid();
+                let i_x = extra.moment_of_inertia_x() * n;
+                let i_y = extra.moment_of_inertia_y() * n;
+                let i_xy = extra.product_of_inertia_xy() * n;
+
+                total_area += signed_area;
+                first_moment_x += signed_area * centroid.x;
+                first_moment_y += signed_area * centroid.y;
+                ix += i_x;
+                iy += i_y;
+                ixy += i_xy;
+            }
+        }
+
         assert!(
             total_area.abs() > f64::EPSILON,
             "Transformed section area too small"
@@ -191,6 +227,7 @@ impl CompositeSection {
             .vertices
             .iter()
             .chain(self.holes.iter().flat_map(|p| p.vertices.iter()))
+            .chain(self.extra_outers.iter().flat_map(|p| p.vertices.iter()))
             .map(|v| (v.y - centroid.y).abs())
             .fold(0.0, f64::max);
         let max_fiber_x = self
@@ -198,6 +235,7 @@ impl CompositeSection {
             .vertices
             .iter()
             .chain(self.holes.iter().flat_map(|p| p.vertices.iter()))
+            .chain(self.extra_outers.iter().flat_map(|p| p.vertices.iter()))
             .map(|v| (v.x - centroid.x).abs())
             .fold(0.0, f64::max);
 
@@ -295,6 +333,7 @@ impl CompositeSection {
             .vertices
             .iter()
             .chain(self.holes.iter().flat_map(|p| p.vertices.iter()))
+            .chain(self.extra_outers.iter().flat_map(|p| p.vertices.iter()))
             .map(|v| (v.y - centroid.y).abs())
             .fold(0.0, f64::max);
         let max_fiber_x = self
@@ -302,6 +341,7 @@ impl CompositeSection {
             .vertices
             .iter()
             .chain(self.holes.iter().flat_map(|p| p.vertices.iter()))
+            .chain(self.extra_outers.iter().flat_map(|p| p.vertices.iter()))
             .map(|v| (v.x - centroid.x).abs())
             .fold(0.0, f64::max);
 
@@ -312,7 +352,7 @@ impl CompositeSection {
         let i22 = avg - radius;
         let phi = 0.5 * (2.0 * ixy_c).atan2(ix_c - iy_c);
 
-Some(crate::section_properties::SectionProperties {
+        Some(crate::section_properties::SectionProperties {
             geometric: crate::section_properties::GeometricProperties {
                 area,
                 centroid,
@@ -776,7 +816,7 @@ mod tests {
     use crate::section_library::ParametricSection;
     use crate::section_library::concrete::RectangularConcreteSection;
     use crate::section_library::steel::ISection;
-    use std::f64::consts::PI;
+    
 
     #[test]
     fn composite_single_material() {
@@ -890,7 +930,7 @@ mod tests {
             v.y += 0.255; // Place steel on top of concrete
         }
 
-        let groups = vec![
+        let _groups = vec![
             MaterialGroup::new(CONCRETE_C30_37, vec![0]),
             MaterialGroup::new(STEEL_S355, vec![1]),
         ];
@@ -939,4 +979,3 @@ mod tests {
         assert!(props.centroid.y.abs() < 1e-6);
     }
 }
-

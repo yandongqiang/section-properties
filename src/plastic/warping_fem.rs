@@ -5,11 +5,11 @@
 //! functions ψ, φ, then computes J, Iw, shear centre, shear areas and monosymmetry
 //! constants via Gaussian quadrature.
 
+use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6};
 use crate::geometry::Point;
+use crate::mesh::{MeshParams, mesh_section};
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
-use crate::fea::{tri3_to_tri6, Tri6, Tri6Mesh, solve_lagrange_sparse, SparseMatrix};
-use crate::mesh::{mesh_section, MeshParams};
 
 /// Full FEM solution (mesh + fields) for stress analysis.
 pub struct FemSolution {
@@ -31,7 +31,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let ixx = props.ix;
     let iyy = props.iy;
     let ixy = props.ixy;
-    let ea = props.area;
+    let _ea = props.area;
     let nu = 0.0;
 
     let bounds = section.bounds();
@@ -39,14 +39,17 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let min_edge = min_edge_length(section);
     let target_size = (max_dim / 15.0).min(min_edge * 1.5).max(1e-4);
 
-    let mesh = mesh_section(section, MeshParams {
-        target_size,
-        max_size: target_size * 2.0,
-        min_size: target_size * 0.3,
-        quality_threshold: 0.3,
-        use_delaunay: true,
-        max_iterations: 10,
-    });
+    let mesh = mesh_section(
+        section,
+        MeshParams {
+            target_size,
+            max_size: target_size * 2.0,
+            min_size: target_size * 0.3,
+            quality_threshold: 0.3,
+            use_delaunay: true,
+            max_iterations: 10,
+        },
+    );
 
     if mesh.elements.is_empty() {
         return None;
@@ -54,7 +57,13 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
 
     let mut refined_nodes = mesh.nodes.clone();
     let mut refined_elements = mesh.elements.clone();
-    refine_mesh(&mut refined_nodes, &mut refined_elements, target_size, 10, 300);
+    refine_mesh(
+        &mut refined_nodes,
+        &mut refined_elements,
+        target_size,
+        10,
+        300,
+    );
 
     let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
     let n = tri6_mesh.nodes.len();
@@ -87,7 +96,11 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
 
     let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
 
-    let omega_dot_f: f64 = omega.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
+    let omega_dot_f: f64 = omega
+        .iter()
+        .zip(f_torsion.iter())
+        .map(|(&a, &b)| a * b)
+        .sum();
     let j = ixx + iyy - omega_dot_f;
 
     let mut f_psi = vec![0.0; n];
@@ -143,18 +156,28 @@ pub fn estimate_shear_areas_fallback(section: &Section, props: &SectionPropertie
 
 fn is_symmetric_about_x(section: &Section) -> bool {
     for v in &section.outer.vertices {
-        let found = section.outer.vertices.iter()
+        let found = section
+            .outer
+            .vertices
+            .iter()
             .any(|v2| (v2.x - v.x).abs() < 1e-6 && (v2.y + v.y).abs() < 1e-6);
-        if !found { return false; }
+        if !found {
+            return false;
+        }
     }
     true
 }
 
 fn is_symmetric_about_y(section: &Section) -> bool {
     for v in &section.outer.vertices {
-        let found = section.outer.vertices.iter()
+        let found = section
+            .outer
+            .vertices
+            .iter()
             .any(|v2| (v2.y - v.y).abs() < 1e-6 && (v2.x + v.x).abs() < 1e-6);
-        if !found { return false; }
+        if !found {
+            return false;
+        }
     }
     true
 }
@@ -202,7 +225,9 @@ fn refine_mesh(
 ) {
     use std::collections::HashMap;
     for _ in 0..max_iterations {
-        if nodes.len() >= max_nodes { break; }
+        if nodes.len() >= max_nodes {
+            break;
+        }
         let mut edge_map: HashMap<(usize, usize), usize> = HashMap::new();
         let mut new_elements = Vec::new();
         let mut refined = false;
@@ -233,7 +258,9 @@ fn refine_mesh(
         }
 
         *elements = new_elements;
-        if !refined { break; }
+        if !refined {
+            break;
+        }
     }
 }
 
@@ -274,14 +301,17 @@ pub fn compute_fem_warping_properties(
     let min_edge = min_edge_length(section);
     let target_size = (max_dim / 15.0).min(min_edge * 1.5).max(1e-4);
 
-    let mesh = mesh_section(section, MeshParams {
-        target_size,
-        max_size: target_size * 2.0,
-        min_size: target_size * 0.3,
-        quality_threshold: 0.3,
-        use_delaunay: true,
-        max_iterations: 10,
-    });
+    let mesh = mesh_section(
+        section,
+        MeshParams {
+            target_size,
+            max_size: target_size * 2.0,
+            min_size: target_size * 0.3,
+            quality_threshold: 0.3,
+            use_delaunay: true,
+            max_iterations: 10,
+        },
+    );
 
     if mesh.elements.is_empty() {
         return FemWarpingResult {
@@ -301,7 +331,13 @@ pub fn compute_fem_warping_properties(
 
     let mut refined_nodes = mesh.nodes.clone();
     let mut refined_elements = mesh.elements.clone();
-    refine_mesh(&mut refined_nodes, &mut refined_elements, target_size, 10, 300);
+    refine_mesh(
+        &mut refined_nodes,
+        &mut refined_elements,
+        target_size,
+        10,
+        300,
+    );
 
     let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
     let n = tri6_mesh.nodes.len();
@@ -334,7 +370,11 @@ pub fn compute_fem_warping_properties(
 
     let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
 
-    let omega_dot_f: f64 = omega.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
+    let omega_dot_f: f64 = omega
+        .iter()
+        .zip(f_torsion.iter())
+        .map(|(&a, &b)| a * b)
+        .sum();
     let j = ixx + iyy - omega_dot_f;
 
     let mut f_psi = vec![0.0; n];
@@ -367,8 +407,7 @@ pub fn compute_fem_warping_properties(
             }
             e
         };
-        let (sx, sy, qo, io, ixo, iyo) =
-            tri6.shear_warping_integrals(ixx, iyy, ixy, &omega_el);
+        let (sx, sy, qo, io, ixo, iyo) = tri6.shear_warping_integrals(ixx, iyy, ixy, &omega_el);
         sc_xint += sx;
         sc_yint += sy;
         q_omega += qo;
@@ -437,9 +476,21 @@ pub fn compute_fem_warping_properties(
         kappa_xy += kxy;
     }
 
-    let a_sx = if kappa_x.abs() > 1e-15 { delta_s * delta_s / kappa_x } else { 0.0 };
-    let a_sy = if kappa_y.abs() > 1e-15 { delta_s * delta_s / kappa_y } else { 0.0 };
-    let a_sxy = if kappa_xy.abs() > 1e-15 { delta_s * delta_s / kappa_xy } else { 0.0 };
+    let a_sx = if kappa_x.abs() > 1e-15 {
+        delta_s * delta_s / kappa_x
+    } else {
+        0.0
+    };
+    let a_sy = if kappa_y.abs() > 1e-15 {
+        delta_s * delta_s / kappa_y
+    } else {
+        0.0
+    };
+    let a_sxy = if kappa_xy.abs() > 1e-15 {
+        delta_s * delta_s / kappa_xy
+    } else {
+        0.0
+    };
 
     // Principal axis shear areas via tensor rotation (Python method)
     let principal = props.principal_properties();
@@ -456,8 +507,16 @@ pub fn compute_fem_warping_properties(
     let rot_11 = (-sin_phi) * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
         + cos_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
 
-    let a_s11 = if rot_00.abs() > 1e-15 { ea / rot_00 } else { 0.0 };
-    let a_s22 = if rot_11.abs() > 1e-15 { ea / rot_11 } else { 0.0 };
+    let a_s11 = if rot_00.abs() > 1e-15 {
+        ea / rot_00
+    } else {
+        0.0
+    };
+    let a_s22 = if rot_11.abs() > 1e-15 {
+        ea / rot_11
+    } else {
+        0.0
+    };
 
     let mut int_x = 0.0;
     let mut int_y = 0.0;
@@ -468,8 +527,16 @@ pub fn compute_fem_warping_properties(
         int_y += iy;
     }
 
-    let beta_x_plus = if ixx.abs() > 1e-15 { -int_x / ixx + 2.0 * y_se } else { 0.0 };
-    let beta_y_plus = if iyy.abs() > 1e-15 { -int_y / iyy + 2.0 * x_se } else { 0.0 };
+    let beta_x_plus = if ixx.abs() > 1e-15 {
+        -int_x / ixx + 2.0 * y_se
+    } else {
+        0.0
+    };
+    let beta_y_plus = if iyy.abs() > 1e-15 {
+        -int_y / iyy + 2.0 * x_se
+    } else {
+        0.0
+    };
 
     FemWarpingResult {
         j: j.max(0.0),
@@ -485,4 +552,3 @@ pub fn compute_fem_warping_properties(
         a_s22,
     }
 }
-

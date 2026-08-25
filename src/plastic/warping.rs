@@ -1,12 +1,12 @@
-﻿//! Warping torsion analysis.
+//! Warping torsion analysis.
 //!
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
+use super::warping_fem::{compute_fem_warping_properties, estimate_shear_areas_fallback};
 use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
-use super::warping_fem::{compute_fem_warping_properties, estimate_shear_areas_fallback};
 
 /// Warping torsion properties for open and closed sections.
 #[derive(Debug, Clone)]
@@ -132,8 +132,7 @@ impl WarpingProperties {
             (fem.a_s11, fem.a_s22)
         } else {
             let rotated_outer = section.outer.rotate(-phi);
-            let rotated_holes: Vec<_> =
-                section.holes.iter().map(|h| h.rotate(-phi)).collect();
+            let rotated_holes: Vec<_> = section.holes.iter().map(|h| h.rotate(-phi)).collect();
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_props = SectionProperties::from_section(&rotated_section);
             let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props);
@@ -149,8 +148,7 @@ impl WarpingProperties {
             (beta_x, beta_y)
         } else {
             let rotated_outer = section.outer.rotate(-phi);
-            let rotated_holes: Vec<_> =
-                section.holes.iter().map(|h| h.rotate(-phi)).collect();
+            let rotated_holes: Vec<_> = section.holes.iter().map(|h| h.rotate(-phi)).collect();
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_props = SectionProperties::from_section(&rotated_section);
             let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props);
@@ -222,8 +220,11 @@ impl WarpingProperties {
     }
 }
 
-/// Check if section is thin-walled.
-trait ThinWalledCheck {
+/// Check if a section is thin-walled (open profile heuristic).
+///
+/// A section is considered thin-walled when its material area is a small
+/// fraction of its bounding box (< 15% solid).
+pub trait ThinWalledCheck {
     fn is_thin_walled(&self) -> bool;
 }
 
@@ -238,7 +239,7 @@ impl ThinWalledCheck for Section {
 }
 
 /// Torsional constant beta for rectangle (h/b ratio).
-fn torsional_constant_beta(ratio: f64) -> f64 {
+pub fn torsional_constant_beta(ratio: f64) -> f64 {
     // From Roark's formulas
     match ratio {
         r if r >= 10.0 => 1.0 / 3.0,
@@ -376,14 +377,17 @@ pub mod exact {
         // ∇²�?= 0 with boundary condition: ∂�?∂n = y*n_x - x*n_y on boundary
         // This is the exact Trefftz method for shear center and warping analysis.
 
-        let mesh = mesh_section(section, MeshParams {
-            target_size: 0.005,
-            max_size: 0.01,
-            min_size: 0.001,
-            quality_threshold: 0.3,
-            use_delaunay: true,
-            max_iterations: 10,
-        });
+        let mesh = mesh_section(
+            section,
+            MeshParams {
+                target_size: 0.005,
+                max_size: 0.01,
+                min_size: 0.001,
+                quality_threshold: 0.3,
+                use_delaunay: true,
+                max_iterations: 10,
+            },
+        );
 
         let n_nodes = mesh.n_nodes();
         let n_dof = n_nodes; // 1 DOF per node (ω)
@@ -400,7 +404,7 @@ pub mod exact {
 
         for element in &mesh.elements {
             let ke = sectorial_stiffness_tri3(&mesh, element);
-            
+
             let mut dof_indices = [0; 3];
             for (i, &node) in element.iter().enumerate() {
                 dof_indices[i] = dof_map[&node];
@@ -416,7 +420,7 @@ pub mod exact {
         // Build force vector from boundary condition
         // ∂�?∂n = y*n_x - x*n_y on boundary
         let mut f_global = vec![0.0; n_dof];
-        
+
         // Apply boundary condition: ∂�?∂n = y*n_x - x*n_y
         // This is applied via Neumann BC in FEM
         apply_sectorial_bc(&mesh, &mut f_global);
@@ -444,10 +448,12 @@ pub mod exact {
 
         // Solve
         k_global.finalize();
-        let omega = k_global.solve_cholesky(&f_global).unwrap_or(vec![0.0; n_dof]);
+        let omega = k_global
+            .solve_cholesky(&f_global)
+            .unwrap_or(vec![0.0; n_dof]);
 
         // Compute sectorial static moments and shear center
-        let (_shear_center, iw, q_omega_x, q_omega_y) = 
+        let (_shear_center, iw, q_omega_x, q_omega_y) =
             compute_sectorial_properties(&mesh, &omega, &dof_map);
 
         // Shear center relative to centroid:
@@ -528,7 +534,10 @@ pub mod exact {
             let centroid = Point::new((p1.x + p2.x + p3.x) / 3.0, (p1.y + p2.y + p3.y) / 3.0);
 
             // Average omega over element
-            let omega_elem = (omega[dof_map[&element[0]]] + omega[dof_map[&element[1]]] + omega[dof_map[&element[2]]]) / 3.0;
+            let omega_elem = (omega[dof_map[&element[0]]]
+                + omega[dof_map[&element[1]]]
+                + omega[dof_map[&element[2]]])
+                / 3.0;
 
             q_omega_x += omega_elem * centroid.y * area;
             q_omega_y += omega_elem * centroid.x * area;
@@ -569,7 +578,9 @@ pub mod exact {
         }
 
         pub fn add(&mut self, row: usize, col: usize, value: f64) {
-            if value.abs() < 1e-15 { return; }
+            if value.abs() < 1e-15 {
+                return;
+            }
             self.triplets.push((row, col, value));
             self.finalized = false;
         }
@@ -591,7 +602,9 @@ pub mod exact {
         }
 
         fn finalize(&mut self) {
-            if self.finalized { return; }
+            if self.finalized {
+                return;
+            }
             self.triplets.sort_by_key(|&(r, c, _)| (r, c));
 
             let mut combined: Vec<(usize, usize, f64)> = Vec::new();
@@ -663,7 +676,9 @@ pub mod exact {
                             sum -= l[i][k] * l[j][k];
                         }
                         if i == j {
-                            if sum <= 1e-12 { return None; }
+                            if sum <= 1e-12 {
+                                return None;
+                            }
                             l[i][j] = sum.sqrt();
                         } else {
                             l[i][j] = sum / l[j][j];
@@ -717,7 +732,11 @@ mod tests {
         let props = WarpingProperties::from_section(&section);
 
         assert!(props.j > 0.0);
-        assert!(props.iw.abs() < 1e-6, "solid Iw should be ~0, got {}", props.iw);
+        assert!(
+            props.iw.abs() < 1e-6,
+            "solid Iw should be ~0, got {}",
+            props.iw
+        );
         assert!(props.shear_center.x.abs() < 1e-4);
         assert!(props.shear_center.y.abs() < 1e-4);
     }
@@ -733,7 +752,11 @@ mod tests {
         let expected_j = std::f64::consts::PI * r.powi(4) / 2.0;
         assert!((props.j - expected_j).abs() / expected_j < 0.2); // Approximate
 
-        assert!(props.iw.abs() < 1e-6, "circle Iw should be ~0, got {}", props.iw);
+        assert!(
+            props.iw.abs() < 1e-6,
+            "circle Iw should be ~0, got {}",
+            props.iw
+        );
     }
 
     #[test]
@@ -789,7 +812,9 @@ mod tests {
         let props = WarpingProperties::from_section(&section);
 
         // Principal angle ~ 0 or pi/2
-        let angle_norm = props.principal_angle.rem_euclid(std::f64::consts::FRAC_PI_2);
+        let angle_norm = props
+            .principal_angle
+            .rem_euclid(std::f64::consts::FRAC_PI_2);
         assert!(angle_norm < 1e-4 || (angle_norm - std::f64::consts::FRAC_PI_2).abs() < 1e-4);
 
         // Shear areas should be positive
@@ -807,9 +832,8 @@ mod tests {
     #[test]
     fn warping_principal_axes_channel() {
         // Channel: singly symmetric (about x-axis), principal angle ~ 0
-        let channel = crate::section_library::steel::ChannelSection::new(
-            0.2, 0.1, 0.008, 0.008, 0.0, 0.0,
-        );
+        let channel =
+            crate::section_library::steel::ChannelSection::new(0.2, 0.1, 0.008, 0.008, 0.0, 0.0);
         let section = channel.build();
         let props = WarpingProperties::from_section(&section);
 
@@ -827,9 +851,7 @@ mod tests {
     #[test]
     fn warping_principal_axes_angle() {
         // Angle section: unsymmetric, principal angle != 0
-        let angle = crate::section_library::steel::AngleSection::new(
-            0.1, 0.075, 0.008, 0.0, 0.0,
-        );
+        let angle = crate::section_library::steel::AngleSection::new(0.1, 0.075, 0.008, 0.0, 0.0);
         let section = angle.build();
         let props = WarpingProperties::from_section(&section);
 
@@ -876,9 +898,8 @@ mod tests {
     #[test]
     fn warping_trefftz_shear_center_channel() {
         // Channel section: singly-symmetric, shear center outside web
-        let channel = crate::section_library::steel::ChannelSection::new(
-            0.2, 0.1, 0.008, 0.008, 0.0, 0.0,
-        );
+        let channel =
+            crate::section_library::steel::ChannelSection::new(0.2, 0.1, 0.008, 0.008, 0.0, 0.0);
         let section = channel.build();
         let props = WarpingProperties::from_section(&section);
 
@@ -903,9 +924,8 @@ mod tests {
     #[test]
     fn monosymmetry_plus_minus_relation() {
         // Verify beta_minus = -beta_plus (Python convention)
-        let channel = crate::section_library::steel::ChannelSection::new(
-            0.2, 0.1, 0.008, 0.008, 0.0, 0.0,
-        );
+        let channel =
+            crate::section_library::steel::ChannelSection::new(0.2, 0.1, 0.008, 0.008, 0.0, 0.0);
         let section = channel.build();
         let props = WarpingProperties::from_section(&section);
 
@@ -940,12 +960,7 @@ mod tests {
         let props = WarpingProperties::from_section(&section);
 
         let bimoment = 1e3;
-        let analysis = TorsionAnalysis::constrained_torsion(
-            &section,
-            0.0,
-            bimoment,
-            &STEEL_S355,
-        );
+        let analysis = TorsionAnalysis::constrained_torsion(&section, 0.0, bimoment, &STEEL_S355);
 
         if props.iw > 0.0 {
             let omega_max = analysis.sigma_w_max * props.iw / bimoment;
@@ -1026,6 +1041,10 @@ mod tests {
         let props = WarpingProperties::from_section(&section);
 
         // Iw should be positive for an open section
-        assert!(props.iw > 0.0, "channel Iw should be positive, got {}", props.iw);
+        assert!(
+            props.iw > 0.0,
+            "channel Iw should be positive, got {}",
+            props.iw
+        );
     }
 }

@@ -3,14 +3,16 @@
 use crate::geometry::{Point, Polygon};
 use crate::material::Material;
 use crate::section::Section;
-use crate::section_library::{ParametricSection, circle_polygon, rectangle_polygon, rounded_rectangle_polygon};
+use crate::section_library::{
+    ParametricSection, circle_polygon, rectangle_polygon, rounded_rectangle_polygon,
+};
 use std::f64::consts::PI;
 
 /// Rectangular concrete section.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectangularConcreteSection {
-    pub width: f64,   // b
-    pub height: f64,  // h
+    pub width: f64,  // b
+    pub height: f64, // h
 }
 
 impl RectangularConcreteSection {
@@ -26,7 +28,11 @@ impl ParametricSection for RectangularConcreteSection {
     }
 
     fn designation(&self) -> String {
-        format!("CONC RECT {:.0}x{:.0}", self.width * 1000.0, self.height * 1000.0)
+        format!(
+            "CONC RECT {:.0}x{:.0}",
+            self.width * 1000.0,
+            self.height * 1000.0
+        )
     }
 }
 
@@ -45,13 +51,19 @@ impl CircularConcreteSection {
     pub fn with_vertices(diameter: f64, n_vertices: usize) -> Self {
         assert!(diameter > 0.0, "Diameter must be positive");
         assert!(n_vertices >= 8, "At least 8 vertices");
-        Self { diameter, n_vertices }
+        Self {
+            diameter,
+            n_vertices,
+        }
     }
 }
 
 impl ParametricSection for CircularConcreteSection {
     fn build(&self) -> Section {
-        Section::new(circle_polygon(self.diameter / 2.0, self.n_vertices), Vec::new())
+        Section::new(
+            circle_polygon(self.diameter / 2.0, self.n_vertices),
+            Vec::new(),
+        )
     }
 
     fn designation(&self) -> String {
@@ -62,18 +74,29 @@ impl ParametricSection for CircularConcreteSection {
 /// T-beam concrete section (flanged beam).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TBeamConcreteSection {
-    pub flange_width: f64,      // b_f (effective flange width)
-    pub web_width: f64,         // b_w
-    pub height: f64,            // h
-    pub flange_thickness: f64,  // h_f
+    pub flange_width: f64,     // b_f (effective flange width)
+    pub web_width: f64,        // b_w
+    pub height: f64,           // h
+    pub flange_thickness: f64, // h_f
 }
 
 impl TBeamConcreteSection {
     pub fn new(flange_width: f64, web_width: f64, height: f64, flange_thickness: f64) -> Self {
         assert!(flange_width > 0.0 && web_width > 0.0 && height > 0.0 && flange_thickness > 0.0);
-        assert!(web_width <= flange_width, "Web width cannot exceed flange width");
-        assert!(flange_thickness < height, "Flange thickness must be less than height");
-        Self { flange_width, web_width, height, flange_thickness }
+        assert!(
+            web_width <= flange_width,
+            "Web width cannot exceed flange width"
+        );
+        assert!(
+            flange_thickness < height,
+            "Flange thickness must be less than height"
+        );
+        Self {
+            flange_width,
+            web_width,
+            height,
+            flange_thickness,
+        }
     }
 }
 
@@ -125,9 +148,20 @@ pub struct LBeamConcreteSection {
 impl LBeamConcreteSection {
     pub fn new(flange_width: f64, web_width: f64, height: f64, flange_thickness: f64) -> Self {
         assert!(flange_width > 0.0 && web_width > 0.0 && height > 0.0 && flange_thickness > 0.0);
-        assert!(web_width <= flange_width, "Web width cannot exceed flange width");
-        assert!(flange_thickness < height, "Flange thickness must be less than height");
-        Self { flange_width, web_width, height, flange_thickness }
+        assert!(
+            web_width <= flange_width,
+            "Web width cannot exceed flange width"
+        );
+        assert!(
+            flange_thickness < height,
+            "Flange thickness must be less than height"
+        );
+        Self {
+            flange_width,
+            web_width,
+            height,
+            flange_thickness,
+        }
     }
 }
 
@@ -189,11 +223,27 @@ impl BoxConcreteSection {
         assert!(wall_thickness > 0.0 && bottom_thickness > 0.0 && top_thickness > 0.0);
         assert!(2.0 * wall_thickness < outer_width);
         assert!(top_thickness + bottom_thickness < outer_height);
-        Self { outer_width, outer_height, wall_thickness, bottom_thickness, top_thickness, outer_radius, inner_radius }
+        Self {
+            outer_width,
+            outer_height,
+            wall_thickness,
+            bottom_thickness,
+            top_thickness,
+            outer_radius,
+            inner_radius,
+        }
     }
 
     pub fn uniform(outer_width: f64, outer_height: f64, thickness: f64) -> Self {
-        Self::new(outer_width, outer_height, thickness, thickness, thickness, 0.0, 0.0)
+        Self::new(
+            outer_width,
+            outer_height,
+            thickness,
+            thickness,
+            thickness,
+            0.0,
+            0.0,
+        )
     }
 }
 
@@ -225,7 +275,11 @@ impl ParametricSection for BoxConcreteSection {
 
         // Need to center the inner polygon
         let inner_centered = Polygon::new(
-            inner.vertices.iter().map(|v| Point::new(v.x, v.y + (tb - tt) / 2.0)).collect()
+            inner
+                .vertices
+                .iter()
+                .map(|v| Point::new(v.x, v.y + (tb - tt) / 2.0))
+                .collect(),
         );
 
         Section::new(outer, vec![inner_centered])
@@ -252,10 +306,10 @@ pub struct ReinforcedConcreteSection {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RebarLayer {
-    pub y: f64,           // Distance from centroid (positive up)
-    pub z: f64,           // Distance from centroid (positive right)
-    pub diameter: f64,    // Bar diameter
-    pub count: usize,     // Number of bars
+    pub y: f64,        // Distance from centroid (positive up)
+    pub z: f64,        // Distance from centroid (positive right)
+    pub diameter: f64, // Bar diameter
+    pub count: usize,  // Number of bars
     pub material: Material,
 }
 
@@ -267,8 +321,21 @@ impl ReinforcedConcreteSection {
         }
     }
 
-    pub fn add_rebar(mut self, y: f64, z: f64, diameter: f64, count: usize, material: Material) -> Self {
-        self.reinforcement.push(RebarLayer { y, z, diameter, count, material });
+    pub fn add_rebar(
+        mut self,
+        y: f64,
+        z: f64,
+        diameter: f64,
+        count: usize,
+        material: Material,
+    ) -> Self {
+        self.reinforcement.push(RebarLayer {
+            y,
+            z,
+            diameter,
+            count,
+            material,
+        });
         self
     }
 
@@ -337,7 +404,15 @@ impl HollowCoreSlab {
         assert!(n_cores > 0);
         assert!(bottom_flange > 0.0 && top_flange > 0.0);
         assert!(core_diameter + top_flange + bottom_flange < height);
-        Self { width, height, core_diameter, core_spacing, n_cores, bottom_flange, top_flange }
+        Self {
+            width,
+            height,
+            core_diameter,
+            core_spacing,
+            n_cores,
+            bottom_flange,
+            top_flange,
+        }
     }
 }
 
@@ -370,9 +445,13 @@ impl ParametricSection for HollowCoreSlab {
             let cy = 0.0; // centered vertically
             let mut core_vertices = Vec::new();
             let nv = 64;
-            for j in (0..nv).rev() { // CW for hole
+            for j in (0..nv).rev() {
+                // CW for hole
                 let theta = 2.0 * PI * j as f64 / nv as f64;
-                core_vertices.push(Point::new(cx + d / 2.0 * theta.cos(), cy + d / 2.0 * theta.sin()));
+                core_vertices.push(Point::new(
+                    cx + d / 2.0 * theta.cos(),
+                    cy + d / 2.0 * theta.sin(),
+                ));
             }
             holes.push(Polygon::new(core_vertices));
         }
@@ -413,7 +492,11 @@ impl ConcretePile {
         assert!(wall_thickness >= 0.0);
         assert!(2.0 * wall_thickness <= diameter);
         assert!(n_vertices >= 8);
-        Self { diameter, wall_thickness, n_vertices }
+        Self {
+            diameter,
+            wall_thickness,
+            n_vertices,
+        }
     }
 }
 
@@ -426,13 +509,20 @@ impl ParametricSection for ConcretePile {
             let (outer, inner) = hollow_circle_polygon(ro, ri, self.n_vertices);
             Section::new(outer, vec![inner])
         } else {
-            Section::new(circle_polygon(self.diameter / 2.0, self.n_vertices), Vec::new())
+            Section::new(
+                circle_polygon(self.diameter / 2.0, self.n_vertices),
+                Vec::new(),
+            )
         }
     }
 
     fn designation(&self) -> String {
         if self.wall_thickness > 0.0 {
-            format!("PILE Ø{:.0}x{:.0}", self.diameter * 1000.0, self.wall_thickness * 1000.0)
+            format!(
+                "PILE Ø{:.0}x{:.0}",
+                self.diameter * 1000.0,
+                self.wall_thickness * 1000.0
+            )
         } else {
             format!("PILE Ø{:.0}", self.diameter * 1000.0)
         }
@@ -511,7 +601,7 @@ mod tests {
     #[test]
     fn reinforced_concrete_section() {
         let rc = RectangularConcreteSection::new(0.3, 0.5);
-        let mut rcs = ReinforcedConcreteSection::new(rc)
+        let rcs = ReinforcedConcreteSection::new(rc)
             .add_rebar(-0.2, -0.1, 0.02, 4, STEEL_S355)
             .add_rebar(0.2, -0.1, 0.02, 4, STEEL_S355)
             .add_rebar(-0.2, 0.1, 0.016, 2, STEEL_S355)

@@ -1,5 +1,14 @@
 use super::{Point, Polygon};
 
+/// Axis selector for mirroring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// Reflect about the x-axis.
+    X,
+    /// Reflect about the y-axis.
+    Y,
+}
+
 /// A rigid or affine transformation applied to a [`Geometry`]'s vertices.
 ///
 /// Mirrors `sectionproperties.pre.geometry.Transform`.
@@ -69,9 +78,142 @@ impl Geometry {
         }
     }
 
+    /// Create a geometry from outer and hole point loops.
+    ///
+    /// Mirrors `Geometry.from_points(points, holes=...)`.
+    pub fn from_points(points: Vec<Point>, holes: Vec<Vec<Point>>) -> Self {
+        Self::new(
+            Polygon::new(points),
+            holes.into_iter().map(Polygon::new).collect(),
+        )
+    }
+
     /// Convert a single-boundary [`Section`](crate::section::Section) into a geometry.
     pub fn from_section(section: &crate::section::Section) -> Self {
         Self::new(section.outer.clone(), section.holes.clone())
+    }
+
+    /// Rotate counter-clockwise about the origin by `angle_degrees` degrees.
+    ///
+    /// Mirrors `Geometry.rotate(angle_degrees, rot_point)`.
+    pub fn rotate(mut self, angle_degrees: f64) -> Self {
+        self.transforms
+            .push(Transform::Rotate { angle: angle_degrees.to_radians() });
+        self
+    }
+
+    /// Rotate about an explicit point.
+    pub fn rotate_about(mut self, angle_degrees: f64, point: Point) -> Self {
+        self.transforms.push(Transform::Translate { dx: -point.x, dy: -point.y });
+        self.transforms
+            .push(Transform::Rotate { angle: angle_degrees.to_radians() });
+        self.transforms.push(Transform::Translate { dx: point.x, dy: point.y });
+        self
+    }
+
+    /// Reflect about the x or y axis.
+    ///
+    /// Mirrors `Geometry.mirror(axis, mirror_point)`; here reflection is always
+    /// about the global axes.
+    pub fn mirror(mut self, axis: Axis) -> Self {
+        self.transforms.push(match axis {
+            Axis::X => Transform::MirrorX,
+            Axis::Y => Transform::MirrorY,
+        });
+        self
+    }
+
+    /// Translate by `(dx, dy)`.
+    ///
+    /// Mirrors `Geometry.shift(x_offset, y_offset)`.
+    pub fn shift(mut self, dx: f64, dy: f64) -> Self {
+        self.transforms.push(Transform::Translate { dx, dy });
+        self
+    }
+
+    /// Return a copy translated so that the centroid sits at the origin.
+    ///
+    /// Mirrors `Geometry.align_center()`.
+    pub fn align_center(&self) -> Self {
+        let c = self.centroid();
+        let mut g = self.clone();
+        g.transforms.push(Transform::Translate { dx: -c.x, dy: -c.y });
+        g
+    }
+
+    /// Translate this geometry so its bounding box aligns with `other`.
+    ///
+    /// For each axis independently the nearest bounding-box edge is moved onto
+    /// the corresponding edge of `other`'s box, matching the behaviour of
+    /// `Geometry.align_to(other, pt=(0, 0))`.
+    pub fn align_to(&self, other: &Self) -> Self {
+        let (l1, r1, b1, t1) = self.bounds();
+        let (l2, r2, b2, t2) = other.bounds();
+
+        let dx = if (l1 - l2).abs() < (r1 - r2).abs() { l2 - l1 } else { r2 - r1 };
+        let dy = if (b1 - b2).abs() < (t1 - t2).abs() { b2 - b1 } else { t2 - t1 };
+
+        if dx == 0.0 && dy == 0.0 {
+            return self.clone();
+        }
+        let mut g = self.clone();
+        g.transforms.push(Transform::Translate { dx, dy });
+        g
+    }
+
+    /// Offset the geometry by `amount` using mitred corners.
+    ///
+    /// Positive amounts grow the geometry, negative amounts shrink it. The
+    /// outer boundary is offset by `+amount` and each hole by `-amount`.
+    /// Returns `None` if any boundary degenerates.
+    ///
+    /// Mirrors `Geometry.offset(amount)`.
+    pub fn offset(&self, amount: f64) -> Option<Self> {
+        let outer = self.apply_transforms().outer.offset(amount)?;
+        let mut holes = Vec::with_capacity(self.holes.len());
+        for h in &self.holes {
+            holes.push(h.offset(-amount)?);
+        }
+        Some(Self { outer, holes, transforms: Vec::new() })
+    }
+
+    /// Boolean union with `other`.
+    ///
+    /// Mirrors `Geometry | other` (shapely `union`). Operates on the outer
+    /// boundaries; returns the largest resulting region, or `None` if empty.
+    pub fn union(&self, other: &Self) -> Option<Self> {
+        self.boolean(other, super::boolean::BoolOp::Union)
+    }
+
+    /// Boolean intersection with `other`.
+    ///
+    /// Mirrors `Geometry & other` (shapely `intersection`).
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        self.boolean(other, super::boolean::BoolOp::Intersection)
+    }
+
+    /// Boolean difference: this geometry minus `other`.
+    ///
+    /// Mirrors `Geometry - other` (shapely `difference`).
+    pub fn subtract(&self, other: &Self) -> Option<Self> {
+        self.boolean(other, super::boolean::BoolOp::Difference)
+    }
+
+    fn boolean(&self, other: &Self, op: super::boolean::BoolOp) -> Option<Self> {
+        let a = Geometry::from_section(&crate::section::Section::new(
+            self.apply_transforms().outer,
+            Vec::new(),
+        ));
+        let b = Geometry::from_section(&crate::section::Section::new(
+            other.apply_transforms().outer,
+            Vec::new(),
+        ));
+
+        let results = super::boolean::polygon_boolean(&a.outer, &b.outer, op);
+        let best = results
+            .into_iter()
+            .max_by(|x, y| x.area().partial_cmp(&y.area()).unwrap())?;
+        Some(Geometry::new(best, Vec::new()))
     }
 
     /// Return a copy of this geometry with the transforms applied to all vertices.
@@ -85,11 +227,7 @@ impl Geometry {
             Polygon::new(
                 poly.vertices
                     .iter()
-                    .map(|&v| {
-                        self.transforms
-                            .iter()
-                            .fold(v, |p, t| t.apply(p))
-                    })
+                    .map(|&v| self.transforms.iter().fold(v, |p, t| t.apply(p)))
                     .collect(),
             )
         };

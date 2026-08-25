@@ -110,7 +110,7 @@ impl FemSectionAnalysis {
     ) -> Result<StressPost, FemError> {
         // Ensure geometric properties are computed (needed for section moduli)
         self.calculate_geometric_properties();
-        
+
         // Ensure warping properties are computed if shear/torsion present
         if vx.abs() > 1e-12 || vy.abs() > 1e-12 || mzz.abs() > 1e-12 {
             self.calculate_warping_properties();
@@ -120,7 +120,18 @@ impl FemSectionAnalysis {
         let fem_props = self.fem_geometric_props.as_ref().unwrap();
         let warping_props = self.fem_warping_props.as_ref();
 
-        compute_fem_stress(&mesh, &self.material, fem_props, warping_props, n, vx, vy, mxx, myy, mzz)
+        compute_fem_stress(
+            &mesh,
+            &self.material,
+            fem_props,
+            warping_props,
+            n,
+            vx,
+            vy,
+            mxx,
+            myy,
+            mzz,
+        )
     }
 
     /// Get the analytical section properties for comparison.
@@ -132,10 +143,11 @@ impl FemSectionAnalysis {
     pub fn validate_properties(&mut self) -> PropertyComparison {
         let analytical = self.analytical_properties();
         let fem = self.calculate_geometric_properties();
-        
-        let centroid_diff = ((fem.centroid.x - analytical.centroid.x).powi(2) + 
-                            (fem.centroid.y - analytical.centroid.y).powi(2)).sqrt();
-        
+
+        let centroid_diff = ((fem.centroid.x - analytical.centroid.x).powi(2)
+            + (fem.centroid.y - analytical.centroid.y).powi(2))
+        .sqrt();
+
         PropertyComparison {
             area_diff_pct: ((fem.area - analytical.area) / analytical.area * 100.0).abs(),
             centroid_diff,
@@ -254,12 +266,16 @@ impl StressPost {
     /// Plot stress contours (returns data for visualization).
     pub fn plot_stress_data(&self, mesh: &Mesh) -> StressPlotData {
         StressPlotData {
-            element_centroids: mesh.elements.iter().map(|elem| {
-                let p0 = mesh.nodes[elem[0]];
-                let p1 = mesh.nodes[elem[1]];
-                let p2 = mesh.nodes[elem[2]];
-                Point::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0)
-            }).collect(),
+            element_centroids: mesh
+                .elements
+                .iter()
+                .map(|elem| {
+                    let p0 = mesh.nodes[elem[0]];
+                    let p1 = mesh.nodes[elem[1]];
+                    let p2 = mesh.nodes[elem[2]];
+                    Point::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0)
+                })
+                .collect(),
             von_mises: self.element_stresses.iter().map(|s| s.von_mises).collect(),
             sigma_x: self.element_stresses.iter().map(|s| s.sigma_x).collect(),
             sigma_y: self.element_stresses.iter().map(|s| s.sigma_y).collect(),
@@ -274,7 +290,7 @@ impl StressPost {
     /// Uses barycentric coordinate interpolation within the containing Tri3 element.
     pub fn stress_at_point(&self, point: Point, mesh: &Mesh) -> Option<StressResult> {
         // Find the element containing the point
-        for (el_idx, elem) in mesh.elements.iter().enumerate() {
+        for (_el_idx, elem) in mesh.elements.iter().enumerate() {
             let p0 = mesh.nodes[elem[0]];
             let p1 = mesh.nodes[elem[1]];
             let p2 = mesh.nodes[elem[2]];
@@ -300,7 +316,10 @@ impl StressPost {
                 let tau_xy = l0 * n0.tau_xy + l1 * n1.tau_xy + l2 * n2.tau_xy;
 
                 // Compute von Mises and principal stresses from interpolated components
-                let von_mises = (sigma_x * sigma_x - sigma_x * sigma_y + sigma_y * sigma_y + 3.0 * tau_xy * tau_xy).sqrt();
+                let von_mises = (sigma_x * sigma_x - sigma_x * sigma_y
+                    + sigma_y * sigma_y
+                    + 3.0 * tau_xy * tau_xy)
+                    .sqrt();
                 let avg = (sigma_x + sigma_y) / 2.0;
                 let disc = ((sigma_x - sigma_y) / 2.0).powi(2) + tau_xy * tau_xy;
                 let sqrt_disc = disc.sqrt();
@@ -336,7 +355,14 @@ impl StressPost {
         for (i, s) in self.element_stresses.iter().enumerate() {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{},{}\n",
-                i, s.sigma_x, s.sigma_y, s.tau_xy, s.von_mises, s.sigma_1, s.sigma_2, s.principal_angle
+                i,
+                s.sigma_x,
+                s.sigma_y,
+                s.tau_xy,
+                s.von_mises,
+                s.sigma_1,
+                s.sigma_2,
+                s.principal_angle
             ));
         }
         csv
@@ -353,6 +379,25 @@ pub struct StressPlotData {
     pub tau_xy: Vec<f64>,
     pub sigma_1: Vec<f64>,
     pub sigma_2: Vec<f64>,
+}
+
+/// Reconstruct a Section from a Mesh, preserving hole boundaries.
+///
+/// The outer boundary is taken from the mesh's ordered boundary nodes when
+/// available; otherwise all nodes are used as a fallback (approximate).
+fn section_from_mesh(mesh: &Mesh) -> Section {
+    let outer_vertices: Vec<_> = if mesh.boundary_nodes.is_empty() {
+        mesh.nodes.clone()
+    } else {
+        mesh.boundary_nodes.iter().map(|&i| mesh.nodes[i]).collect()
+    };
+    let outer = Polygon::new(outer_vertices);
+    let holes: Vec<Polygon> = mesh
+        .hole_boundary_nodes
+        .iter()
+        .map(|indices| Polygon::new(indices.iter().map(|&i| mesh.nodes[i]).collect()))
+        .collect();
+    Section::new(outer, holes)
 }
 
 /// Compute geometric properties using FEM (unit strain method).
@@ -373,12 +418,9 @@ fn compute_fem_geometric_properties(mesh: &Mesh, _material: &Material) -> FemGeo
     // 4. Apply unit shear -> get shear areas
     //
     // This requires solving multiple FEM problems with specific BCs.
-    
-    let analytical = SectionProperties::from_section(&Section::new(
-        Polygon::new(mesh.nodes.iter().cloned().collect()),
-        Vec::new()
-    ));
-    
+
+    let analytical = SectionProperties::from_section(&section_from_mesh(mesh));
+
     let (i1, i2, angle) = analytical.principal_moments();
     let (rx, ry, rp) = analytical.radius_of_gyration();
     let zx = analytical.section_modulus_x();
@@ -413,12 +455,9 @@ fn compute_fem_warping_properties(mesh: &Mesh, _material: &Material) -> FemWarpi
     //
     // For now, delegate to existing analytical warping module
     use crate::plastic::warping::WarpingProperties;
-    let section = Section::new(
-        Polygon::new(mesh.nodes.iter().cloned().collect()),
-        Vec::new()
-    );
+    let section = section_from_mesh(mesh);
     let wp = WarpingProperties::from_section(&section);
-    
+
     FemWarpingProperties {
         j: wp.j,
         iw: wp.iw,
@@ -464,16 +503,16 @@ fn compute_fem_stress(
 
     // Build global stiffness matrix
     let mut k_global = SprsMatrix::new(n_dof);
-    
+
     for (_elem_idx, element) in mesh.elements.iter().enumerate() {
         let ke = element_stiffness_tri3(mesh, element, &mat_props);
-        
+
         let mut dof_indices = [0; 6];
         for (i, &node) in element.iter().enumerate() {
             dof_indices[2 * i] = dof_map[&(node, 0)];
             dof_indices[2 * i + 1] = dof_map[&(node, 1)];
         }
-        
+
         for i in 0..6 {
             for j in 0..6 {
                 k_global.add(dof_indices[i], dof_indices[j], ke[i][j]);
@@ -483,37 +522,38 @@ fn compute_fem_stress(
 
     // Build force vector from section forces
     let mut f_global = vec![0.0; n_dof];
-    
+
     // 1. Axial force N -> uniform normal stress -> equivalent nodal forces
     if n.abs() > 1e-12 {
         let area = fem_props.area;
         let sigma_axial = n / area;
-        
+
         // For each element, apply consistent nodal forces for constant stress
         for element in &mesh.elements {
             let p1 = mesh.nodes[element[0]];
             let p2 = mesh.nodes[element[1]];
             let p3 = mesh.nodes[element[2]];
-            let area_elem = 0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
-            
+            let area_elem =
+                0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
+
             // Nodal forces for constant σ_x over triangle
             // f = B^T * D * ε * A, with ε = [σ/E, 0, 0]^T
             let exx = sigma_axial / material.youngs_modulus;
             let fe = [
-                d_matrix[0][0] * exx * area_elem / 3.0,  // node 1, x
-                d_matrix[1][0] * exx * area_elem / 3.0,  // node 1, y
-                d_matrix[0][0] * exx * area_elem / 3.0,  // node 2, x
-                d_matrix[1][0] * exx * area_elem / 3.0,  // node 2, y
-                d_matrix[0][0] * exx * area_elem / 3.0,  // node 3, x
-                d_matrix[1][0] * exx * area_elem / 3.0,  // node 3, y
+                d_matrix[0][0] * exx * area_elem / 3.0, // node 1, x
+                d_matrix[1][0] * exx * area_elem / 3.0, // node 1, y
+                d_matrix[0][0] * exx * area_elem / 3.0, // node 2, x
+                d_matrix[1][0] * exx * area_elem / 3.0, // node 2, y
+                d_matrix[0][0] * exx * area_elem / 3.0, // node 3, x
+                d_matrix[1][0] * exx * area_elem / 3.0, // node 3, y
             ];
-            
+
             let mut dof_indices = [0; 6];
             for (i, &node) in element.iter().enumerate() {
                 dof_indices[2 * i] = dof_map[&(node, 0)];
                 dof_indices[2 * i + 1] = dof_map[&(node, 1)];
             }
-            
+
             for i in 0..6 {
                 f_global[dof_indices[i]] += fe[i];
             }
@@ -525,21 +565,22 @@ fn compute_fem_stress(
     if mxx.abs() > 1e-12 || myy.abs() > 1e-12 {
         let cx = fem_props.centroid.x;
         let cy = fem_props.centroid.y;
-        
+
         for element in &mesh.elements {
             let p1 = mesh.nodes[element[0]];
             let p2 = mesh.nodes[element[1]];
             let p3 = mesh.nodes[element[2]];
-            let area_elem = 0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
-            
+            let area_elem =
+                0.5 * ((p2.x - p1.x) * (p3.y - p1.y) - (p3.x - p1.x) * (p2.y - p1.y)).abs();
+
             // Centroid of element
             let xc = (p1.x + p2.x + p3.x) / 3.0;
             let yc = (p1.y + p2.y + p3.y) / 3.0;
-            
+
             // Stress at element centroid from bending
-            let sigma_bending = mxx * (yc - cy) / fem_props.ix.max(1e-12) 
-                              + myy * (xc - cx) / fem_props.iy.max(1e-12);
-            
+            let sigma_bending = mxx * (yc - cy) / fem_props.ix.max(1e-12)
+                + myy * (xc - cx) / fem_props.iy.max(1e-12);
+
             let exx = sigma_bending / material.youngs_modulus;
             let fe = [
                 d_matrix[0][0] * exx * area_elem / 3.0,
@@ -549,13 +590,13 @@ fn compute_fem_stress(
                 d_matrix[0][0] * exx * area_elem / 3.0,
                 d_matrix[1][0] * exx * area_elem / 3.0,
             ];
-            
+
             let mut dof_indices = [0; 6];
             for (i, &node) in element.iter().enumerate() {
                 dof_indices[2 * i] = dof_map[&(node, 0)];
                 dof_indices[2 * i + 1] = dof_map[&(node, 1)];
             }
-            
+
             for i in 0..6 {
                 f_global[dof_indices[i]] += fe[i];
             }
@@ -569,7 +610,7 @@ fn compute_fem_stress(
         // Simplified: distribute V uniformly along boundary
         let boundary_nodes = mesh.boundary_nodes.clone();
         let n_boundary = boundary_nodes.len().max(1) as f64;
-        
+
         for &node in &boundary_nodes {
             if let Some(&dof_x) = dof_map.get(&(node, 0)) {
                 f_global[dof_x] += vx / n_boundary;
@@ -587,15 +628,16 @@ fn compute_fem_stress(
             // Simplified: apply as distributed moment
             let boundary_nodes = mesh.boundary_nodes.clone();
             let n_boundary = boundary_nodes.len().max(1) as f64;
-            
+
             for &node in &boundary_nodes {
                 let p = mesh.nodes[node];
-                let r = ((p.x - wp.shear_center.x).powi(2) + (p.y - wp.shear_center.y).powi(2)).sqrt();
-                
+                let r =
+                    ((p.x - wp.shear_center.x).powi(2) + (p.y - wp.shear_center.y).powi(2)).sqrt();
+
                 // Tangential force per unit length from torsion
                 let tau = mzz * r / wp.j.max(1e-12);
                 let force_per_node = tau * 0.001 / n_boundary; // Simplified
-                
+
                 // Tangential direction
                 let dx = p.x - wp.shear_center.x;
                 let dy = p.y - wp.shear_center.y;
@@ -615,14 +657,14 @@ fn compute_fem_stress(
     // Fix one node completely, constrain another in one direction
     let fixed_node = 0; // First node
     let constrained_node = if n_nodes > 1 { 1 } else { 0 };
-    
+
     let mut fixed_dofs = vec![false; n_dof];
-    fixed_dofs[dof_map[&(fixed_node, 0)]] = true;  // ux = 0
-    fixed_dofs[dof_map[&(fixed_node, 1)]] = true;  // uy = 0
+    fixed_dofs[dof_map[&(fixed_node, 0)]] = true; // ux = 0
+    fixed_dofs[dof_map[&(fixed_node, 1)]] = true; // uy = 0
     if n_nodes > 1 {
         fixed_dofs[dof_map[&(constrained_node, 1)]] = true; // uy = 0 (prevent rotation)
     }
-    
+
     // Apply BCs to force vector
     for i in 0..n_dof {
         if fixed_dofs[i] {
@@ -639,7 +681,9 @@ fn compute_fem_stress(
     }
 
     // Solve (solve_cholesky calls finalize internally)
-    let u_global = k_global.solve_cholesky(&f_global).ok_or(FemError::SingularMatrix)?;
+    let u_global = k_global
+        .solve_cholesky(&f_global)
+        .ok_or(FemError::SingularMatrix)?;
 
     // Extract stresses
     let mut element_stresses = Vec::with_capacity(mesh.n_elements());
@@ -663,7 +707,7 @@ fn compute_fem_stress(
     // Nodal stresses by averaging
     let mut nodal_stress_sum = vec![StressResult::from_stress(0.0, 0.0, 0.0); n_nodes];
     let mut nodal_count = vec![0; n_nodes];
-    
+
     for (elem_idx, element) in mesh.elements.iter().enumerate() {
         let stress = element_stresses[elem_idx];
         for &node in element {
@@ -757,7 +801,9 @@ fn compute_element_stress(
         }
     }
 
-    Ok(StressResult::from_strain(strain[0], strain[1], strain[2], props))
+    Ok(StressResult::from_strain(
+        strain[0], strain[1], strain[2], props,
+    ))
 }
 
 /// High-level FEM analysis for composite sections.
@@ -784,7 +830,10 @@ impl FemCompositeAnalysis {
 
     fn get_mesh(&mut self) -> &Mesh {
         if self.mesh.is_none() {
-            self.mesh = Some(crate::mesh::mesh_composite_section(&self.composite, self.mesh_params));
+            self.mesh = Some(crate::mesh::mesh_composite_section(
+                &self.composite,
+                self.mesh_params,
+            ));
         }
         self.mesh.as_ref().unwrap()
     }
@@ -810,7 +859,7 @@ impl FemCompositeAnalysis {
         let mesh = self.get_mesh().clone();
         let fem_props = self.calculate_transformed_properties();
         let ref_mat = self.composite.reference_material().clone();
-        
+
         compute_fem_stress(&mesh, &ref_mat, &fem_props, None, n, vx, vy, mxx, myy, mzz)
     }
 }
@@ -833,11 +882,14 @@ mod tests {
             Point::new(0.0, 0.1),
         ]);
         let section = Section::new(poly, vec![]);
-        let mut analysis = FemSectionAnalysis::new(section, STEEL_S355)
-            .with_mesh_params(MeshParams { target_size: 0.01, ..Default::default() });
-        
+        let mut analysis =
+            FemSectionAnalysis::new(section, STEEL_S355).with_mesh_params(MeshParams {
+                target_size: 0.01,
+                ..Default::default()
+            });
+
         let props = analysis.calculate_geometric_properties();
-        
+
         assert!((props.area - 0.02).abs() / 0.02 < 0.05);
         assert!((props.ix - 1.6667e-5).abs() / 1.6667e-5 < 0.05);
         assert!((props.iy - 6.6667e-5).abs() / 6.6667e-5 < 0.05);
@@ -852,11 +904,16 @@ mod tests {
             Point::new(-0.1, 0.05),
         ]);
         let section = Section::new(poly, vec![]);
-        let mut analysis = FemSectionAnalysis::new(section, STEEL_S355)
-            .with_mesh_params(MeshParams { target_size: 0.02, ..Default::default() });
-        
-        let stress = analysis.calculate_stress(100e3, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
-        
+        let mut analysis =
+            FemSectionAnalysis::new(section, STEEL_S355).with_mesh_params(MeshParams {
+                target_size: 0.02,
+                ..Default::default()
+            });
+
+        let stress = analysis
+            .calculate_stress(100e3, 0.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
+
         // Just verify it runs and returns results
         assert!(!stress.element_stresses.is_empty());
         assert!(!stress.nodal_stresses.is_empty());
@@ -867,12 +924,17 @@ mod tests {
     fn fem_stress_analysis_bending() {
         let i = ISection::new(0.3, 0.15, 0.007, 0.01, 0.012);
         let section = i.build();
-        let mut analysis = FemSectionAnalysis::new(section, STEEL_S355)
-            .with_mesh_params(MeshParams { target_size: 0.01, ..Default::default() });
-        
+        let mut analysis =
+            FemSectionAnalysis::new(section, STEEL_S355).with_mesh_params(MeshParams {
+                target_size: 0.01,
+                ..Default::default()
+            });
+
         // 10 kNm bending about x-axis
-        let stress = analysis.calculate_stress(0.0, 0.0, 0.0, 10e3, 0.0, 0.0).unwrap();
-        
+        let stress = analysis
+            .calculate_stress(0.0, 0.0, 0.0, 10e3, 0.0, 0.0)
+            .unwrap();
+
         // Just verify it runs and returns results
         assert!(!stress.element_stresses.is_empty());
         assert!(!stress.nodal_stresses.is_empty());
@@ -883,11 +945,14 @@ mod tests {
     fn fem_validation_comparison() {
         let i = ISection::new(0.3, 0.15, 0.007, 0.01, 0.012);
         let section = i.build();
-        let mut analysis = FemSectionAnalysis::new(section, STEEL_S355)
-            .with_mesh_params(MeshParams { target_size: 0.005, ..Default::default() });
-        
+        let mut analysis =
+            FemSectionAnalysis::new(section, STEEL_S355).with_mesh_params(MeshParams {
+                target_size: 0.005,
+                ..Default::default()
+            });
+
         let comparison = analysis.validate_properties();
-        
+
         // With fine mesh, should be within 5%
         assert!(comparison.area_diff_pct < 5.0);
         assert!(comparison.ix_diff_pct < 5.0);

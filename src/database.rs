@@ -524,9 +524,9 @@ pub fn build_standard_database() -> SectionDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
+    
     use crate::material::presets::STEEL_S355;
-    use crate::section::Section;
+    
     use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn database_property_filter() {
-        let mut db = build_standard_database();
+        let db = build_standard_database();
 
         let mut filter = SearchFilter::default();
         filter.min_area = Some(5e-3); // 5000 mm²
@@ -599,8 +599,11 @@ mod tests {
         assert!(db.len() > 20);
 
         // Check variety
-        let tags: std::collections::HashSet<_> =
-            db.all().into_iter().flat_map(|e| e.tags.iter().cloned()).collect();
+        let tags: std::collections::HashSet<_> = db
+            .all()
+            .into_iter()
+            .flat_map(|e| e.tags.iter().cloned())
+            .collect();
 
         assert!(tags.contains("i-section"));
         assert!(tags.contains("channel"));

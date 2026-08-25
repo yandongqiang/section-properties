@@ -159,10 +159,70 @@ impl Section {
     }
 
     /// Frame properties with custom material (for composite sections).
-    pub fn frame_properties_with_material(&self, _material: &crate::material::Material) -> (f64, f64, f64, f64, f64, f64) {
+    pub fn frame_properties_with_material(
+        &self,
+        _material: &crate::material::Material,
+    ) -> (f64, f64, f64, f64, f64, f64) {
         // For composite sections, would use transformed section method
         // For now, return geometric properties
         self.frame_properties()
+    }
+}
+
+/// Full frame (beam) analysis results, mirroring the 11-value tuple returned
+/// by Python `Section.calculate_frame_properties()`.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameProperties {
+    /// Cross-sectional area.
+    pub area: f64,
+    /// Centroidal second moment about x.
+    pub ixx: f64,
+    /// Centroidal second moment about y.
+    pub iyy: f64,
+    /// Centroidal product of inertia.
+    pub ixy: f64,
+    /// St. Venant torsion constant.
+    pub j: f64,
+    /// Principal axis angle (radians, CCW from x).
+    pub phi: f64,
+    /// Major principal second moment.
+    pub i11: f64,
+    /// Minor principal second moment.
+    pub i22: f64,
+    /// Shear centre x-coordinate (global axes).
+    pub delta_x: f64,
+    /// Shear centre y-coordinate (global axes).
+    pub delta_y: f64,
+    /// Warping constant.
+    pub iw: f64,
+}
+
+impl Section {
+    /// Full frame properties including shear centre and warping constant.
+    ///
+    /// Mirrors Python `Section.calculate_frame_properties()` (without the FEA
+    /// shear areas, see `mesh` module for those).
+    pub fn frame_properties_full(&self) -> FrameProperties {
+        use crate::plastic::warping::WarpingProperties;
+        use crate::section_properties::SectionProperties;
+
+        let props = SectionProperties::from_section(self);
+        let principal = props.principal_properties();
+        let warping = WarpingProperties::from_section(self);
+
+        FrameProperties {
+            area: props.area,
+            ixx: props.ix,
+            iyy: props.iy,
+            ixy: props.ixy,
+            j: warping.j,
+            phi: principal.phi,
+            i11: principal.i11,
+            i22: principal.i22,
+            delta_x: warping.shear_center.x,
+            delta_y: warping.shear_center.y,
+            iw: warping.iw,
+        }
     }
 }
 
@@ -173,5 +233,52 @@ impl crate::section_library::ParametricSection for Section {
 
     fn designation(&self) -> String {
         "Section".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::section_library::ParametricSection;
+
+    #[test]
+    fn frame_properties_full_i_section() {
+        let i = crate::section_library::steel::ISection::from_designation("IPE300").unwrap();
+        let sec = i.build();
+        let fp = sec.frame_properties_full();
+        assert!(fp.area > 0.0);
+        assert!(fp.iw.abs() > 0.0, "I-section must have warping constant");
+        // Doubly symmetric: shear centre at centroid
+        let c = sec.centroid();
+        assert!((fp.delta_x - c.x).abs() < 1e-6);
+        assert!((fp.delta_y - c.y).abs() < 1e-6);
+        assert!((fp.j / (fp.area * 1e6)).abs() < 1e3); // sanity
+    }
+
+    #[test]
+    fn geometry_from_points_rectangle() {
+        let pts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.2, 0.0),
+            Point::new(0.2, 0.1),
+            Point::new(0.0, 0.1),
+        ];
+        let g = crate::geometry::Geometry::from_points(pts, vec![]);
+        assert!((g.area() - 0.02).abs() < 1e-12);
+
+        let outer = vec![
+            Point::new(0.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(4.0, 4.0),
+            Point::new(0.0, 4.0),
+        ];
+        let hole = vec![
+            Point::new(1.0, 1.0),
+            Point::new(3.0, 1.0),
+            Point::new(3.0, 3.0),
+            Point::new(1.0, 3.0),
+        ];
+        let g2 = crate::geometry::Geometry::from_points(outer, vec![hole]);
+        assert!((g2.area() - 12.0).abs() < 1e-12);
     }
 }

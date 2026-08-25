@@ -7,10 +7,7 @@ pub struct Polygon {
 
 impl Polygon {
     pub fn new(vertices: Vec<Point>) -> Self {
-        assert!(
-            vertices.len() >= 3,
-            "Polygon needs at least 3 vertices"
-        );
+        assert!(vertices.len() >= 3, "Polygon needs at least 3 vertices");
 
         for (i, v) in vertices.iter().enumerate() {
             assert!(
@@ -46,6 +43,86 @@ impl Polygon {
         );
 
         poly
+    }
+
+    /// Offset the polygon by `distance` using mitred corners.
+    ///
+    /// Positive distances grow a CCW polygon outward; negative distances shrink
+    /// it. Returns `None` if the offset polygon degenerates (e.g. an inward
+    /// offset larger than the polygon size).
+    ///
+    /// Mirrors shapely's `buffer(distance, join_style=mitre)` used by Python
+    /// `sectionproperties`' `Geometry.offset()`.
+    pub fn offset(&self, distance: f64) -> Option<Polygon> {
+        // Work with CCW orientation so that positive = grow.
+        let ccw: Vec<Point> = if self.signed_area() < 0.0 {
+            self.vertices.iter().rev().copied().collect()
+        } else {
+            self.vertices.clone()
+        };
+        let n = ccw.len();
+        if n < 3 {
+            return None;
+        }
+
+        let mut out: Vec<Point> = Vec::with_capacity(n);
+        for i in 0..n {
+            let p0 = ccw[(i + n - 1) % n];
+            let p1 = ccw[i];
+            let p2 = ccw[(i + 1) % n];
+
+            let d1x = p1.x - p0.x;
+            let d1y = p1.y - p0.y;
+            let d2x = p2.x - p1.x;
+            let d2y = p2.y - p1.y;
+
+            let l1 = (d1x * d1x + d1y * d1y).sqrt();
+            let l2 = (d2x * d2x + d2y * d2y).sqrt();
+            if l1 < f64::EPSILON || l2 < f64::EPSILON {
+                continue;
+            }
+
+            // Outward unit normals (right side of travel direction for CCW).
+            let n1 = (d1y / l1, -d1x / l1);
+            let n2 = (d2y / l2, -d2x / l2);
+
+            // Offset lines: point + t * direction.
+            // Line A through (p0 + d*n1) along (d1x,d1y); line B through
+            // (p1 + d*n2) along (d2x,d2y).
+            let ax = p0.x + distance * n1.0;
+            let ay = p0.y + distance * n1.1;
+            let bx = p1.x + distance * n2.0;
+            let by = p1.y + distance * n2.1;
+
+            let denom = d1x * d2y - d1y * d2x;
+            if denom.abs() < 1e-14 {
+                // Collinear edges: use the simple offset vertex.
+                out.push(Point::new(p1.x + distance * n2.0, p1.y + distance * n2.1));
+                continue;
+            }
+
+            let t = ((bx - ax) * d2y - (by - ay) * d2x) / denom;
+            out.push(Point::new(ax + t * d1x, ay + t * d1y));
+        }
+
+        if out.len() < 3 {
+            return None;
+        }
+        let poly_area = out
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let q = &out[(i + 1) % out.len()];
+                p.x * q.y - q.x * p.y
+            })
+            .sum::<f64>()
+            / 2.0;
+
+        // Degenerate or self-intersecting after inward offset.
+        if poly_area.abs() < f64::EPSILON || poly_area < 0.0 {
+            return None;
+        }
+        Some(Polygon::new(out))
     }
 
     /// Calculate the signed area of the polygon.
@@ -167,15 +244,17 @@ impl Polygon {
         self.product_of_inertia_xy() - area * centroid.x * centroid.y
     }
 
-/// Rotate all vertices about the origin by `angle` radians (CCW positive).
+    /// Rotate all vertices about the origin by `angle` radians (CCW positive).
     pub fn rotate(&self, angle: f64) -> Self {
         Polygon::new(
             self.vertices
                 .iter()
-                .map(|v| Point::new(
-                    v.x * angle.cos() - v.y * angle.sin(),
-                    v.x * angle.sin() + v.y * angle.cos(),
-                ))
+                .map(|v| {
+                    Point::new(
+                        v.x * angle.cos() - v.y * angle.sin(),
+                        v.x * angle.sin() + v.y * angle.cos(),
+                    )
+                })
                 .collect(),
         )
     }

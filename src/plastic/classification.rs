@@ -148,7 +148,10 @@ fn web_limits(eps: f64, stress: StressDistribution) -> ClassLimit {
             let alpha = alpha.clamp(0.0, 1.0);
             let psi = 4.0 * alpha - 3.0;
             let (class1, class2) = if alpha > 0.5 {
-                (396.0 * eps / (13.0 * alpha - 1.0), 456.0 * eps / (13.0 * alpha - 1.0))
+                (
+                    396.0 * eps / (13.0 * alpha - 1.0),
+                    456.0 * eps / (13.0 * alpha - 1.0),
+                )
             } else if alpha > 0.0 {
                 (36.0 * eps / alpha, 41.5 * eps / alpha)
             } else {
@@ -821,9 +824,9 @@ impl SectionSymmetryCheck for Section {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
+    
     use crate::material::presets::STEEL_S355;
-    use crate::section::Section;
+    
     use crate::section_library::ParametricSection;
     use crate::section_library::steel::ISection;
 
@@ -936,8 +939,8 @@ mod tests {
     fn stress_distribution_variants() {
         let bending = StressDistribution::pure_bending();
         let compression = StressDistribution::pure_compression();
-        let web_bc = StressDistribution::web_bending_compression(0.5);
-        let flange_bc = StressDistribution::flange_bending_compression(-0.5);
+        let _web_bc = StressDistribution::web_bending_compression(0.5);
+        let _flange_bc = StressDistribution::flange_bending_compression(-0.5);
 
         assert_eq!(bending, StressDistribution::Bending);
         assert_eq!(compression, StressDistribution::UniformCompression);

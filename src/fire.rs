@@ -3,8 +3,8 @@
 //! Provides section factor (A_m/V), temperature analysis, and
 //! load-bearing resistance in fire.
 
-use crate::section::Section;
 use crate::material::Material;
+use crate::section::Section;
 use crate::section_properties::SectionProperties;
 
 /// Fire exposure curves.
@@ -30,13 +30,17 @@ impl FireExposure {
             }
             FireExposure::Hydrocarbon => {
                 // Hydrocarbon: T = 20 + 1080 * (1 - 0.325*exp(-0.167*t) - 0.675*exp(-2.5*t))
-                20.0 + 1080.0 * (1.0 - 0.325 * (-0.167 * t_min).exp() - 0.675 * (-2.5 * t_min).exp())
+                20.0 + 1080.0
+                    * (1.0 - 0.325 * (-0.167 * t_min).exp() - 0.675 * (-2.5 * t_min).exp())
             }
             FireExposure::External => {
                 // Simplified external fire
                 20.0 + 660.0 * (1.0 - (-0.1 * t_min).exp())
             }
-            FireExposure::Parametric { opening_factor, fire_load } => {
+            FireExposure::Parametric {
+                opening_factor,
+                fire_load,
+            } => {
                 // Simplified parametric
                 let t_eq = fire_load / (opening_factor * 1000.0); // equivalent time
                 20.0 + 345.0 * (8.0 * t_eq + 1.0).log10()
@@ -48,10 +52,10 @@ impl FireExposure {
 /// Section factor A_m/V (heated perimeter / cross-sectional area).
 #[derive(Debug, Clone)]
 pub struct SectionFactor {
-    pub am_v: f64,          // [1/m] - section factor
-    pub am: f64,            // [m²/m] - heated perimeter per unit length
-    pub v: f64,             // [m²] - cross-sectional area
-    pub shadow_factor: f64, // Shadow effect factor (k_sh)
+    pub am_v: f64,            // [1/m] - section factor
+    pub am: f64,              // [m²/m] - heated perimeter per unit length
+    pub v: f64,               // [m²] - cross-sectional area
+    pub shadow_factor: f64,   // Shadow effect factor (k_sh)
     pub box_protection: bool, // Box protection (k_sh = 1.0)
 }
 
@@ -67,12 +71,8 @@ impl SectionFactor {
                 // 3-sided or 4-sided exposure
                 section.heated_perimeter_3sided()
             }
-            FireExposure::External => {
-                section.heated_perimeter_4sided()
-            }
-            FireExposure::Parametric { .. } => {
-                section.heated_perimeter_4sided()
-            }
+            FireExposure::External => section.heated_perimeter_4sided(),
+            FireExposure::Parametric { .. } => section.heated_perimeter_4sided(),
         };
 
         let am_v = am / v;
@@ -97,8 +97,15 @@ impl SectionFactor {
     }
 
     /// For fire protection (intumescent, board, spray).
-    pub fn with_protection(mut self, thickness: f64, conductivity: f64, density: f64, specific_heat: f64) -> Self {
-        self.am_v = self.am / self.v * (1.0 / (1.0 + thickness * conductivity / (density * specific_heat)));
+    pub fn with_protection(
+        mut self,
+        thickness: f64,
+        conductivity: f64,
+        density: f64,
+        specific_heat: f64,
+    ) -> Self {
+        self.am_v =
+            self.am / self.v * (1.0 / (1.0 + thickness * conductivity / (density * specific_heat)));
         self
     }
 }
@@ -106,9 +113,9 @@ impl SectionFactor {
 /// Temperature distribution in section at given time.
 #[derive(Debug, Clone)]
 pub struct TemperatureProfile {
-    pub time: f64,           // Time [min]
+    pub time: f64, // Time [min]
     pub exposure: FireExposure,
-    pub temps: Vec<f64>,     // Temperature at each fiber/node [°C]
+    pub temps: Vec<f64>, // Temperature at each fiber/node [°C]
     pub max_temp: f64,
     pub avg_temp: f64,
 }
@@ -153,9 +160,9 @@ impl TemperatureProfile {
 #[derive(Debug, Clone)]
 pub struct MaterialPropertiesAtTemp {
     pub temperature: f64,
-    pub ky: f64,      // Reduction factor for yield strength
-    pub kp: f64,      // Reduction factor for proportional limit
-    pub ke: f64,      // Reduction factor for Young's modulus
+    pub ky: f64, // Reduction factor for yield strength
+    pub kp: f64, // Reduction factor for proportional limit
+    pub ke: f64, // Reduction factor for Young's modulus
     pub thermal_elongation: f64,
 }
 
@@ -192,24 +199,78 @@ impl MaterialPropertiesAtTemp {
             1.1e-2
         };
 
-        Self { temperature: temp, ky, kp, ke, thermal_elongation }
+        Self {
+            temperature: temp,
+            ky,
+            kp,
+            ke,
+            thermal_elongation,
+        }
     }
 
     /// Stainless steel per EN 1993-1-2 Table C.1.
     pub fn stainless_steel(temp: f64) -> Self {
         // Simplified - similar to carbon but different curve
-        let ky = if temp <= 100.0 { 1.0 } else if temp <= 500.0 { 0.8 } else if temp <= 700.0 { 0.5 } else { 0.2 };
-        let kp = if temp <= 100.0 { 1.0 } else if temp <= 500.0 { 0.6 } else if temp <= 700.0 { 0.3 } else { 0.1 };
-        let ke = if temp <= 100.0 { 1.0 } else if temp <= 500.0 { 0.8 } else if temp <= 700.0 { 0.4 } else { 0.2 };
+        let ky = if temp <= 100.0 {
+            1.0
+        } else if temp <= 500.0 {
+            0.8
+        } else if temp <= 700.0 {
+            0.5
+        } else {
+            0.2
+        };
+        let kp = if temp <= 100.0 {
+            1.0
+        } else if temp <= 500.0 {
+            0.6
+        } else if temp <= 700.0 {
+            0.3
+        } else {
+            0.1
+        };
+        let ke = if temp <= 100.0 {
+            1.0
+        } else if temp <= 500.0 {
+            0.8
+        } else if temp <= 700.0 {
+            0.4
+        } else {
+            0.2
+        };
 
-        Self { temperature: temp, ky, kp, ke, thermal_elongation: 0.0 }
+        Self {
+            temperature: temp,
+            ky,
+            kp,
+            ke,
+            thermal_elongation: 0.0,
+        }
     }
 
     /// Concrete per EN 1992-1-2.
     pub fn concrete(temp: f64, _fc20: f64) -> Self {
-        let kc = if temp <= 100.0 { 1.0 } else if temp <= 200.0 { 0.95 } else if temp <= 400.0 { 0.75 } else if temp <= 600.0 { 0.45 } else if temp <= 800.0 { 0.25 } else { 0.1 };
+        let kc = if temp <= 100.0 {
+            1.0
+        } else if temp <= 200.0 {
+            0.95
+        } else if temp <= 400.0 {
+            0.75
+        } else if temp <= 600.0 {
+            0.45
+        } else if temp <= 800.0 {
+            0.25
+        } else {
+            0.1
+        };
 
-        Self { temperature: temp, ky: kc, kp: kc, ke: kc, thermal_elongation: 0.0 }
+        Self {
+            temperature: temp,
+            ky: kc,
+            kp: kc,
+            ke: kc,
+            thermal_elongation: 0.0,
+        }
     }
 }
 
@@ -239,11 +300,11 @@ pub struct FireAnalysis {
 #[derive(Debug, Clone)]
 pub struct FireProtection {
     pub protection_type: ProtectionType,
-    pub thickness: f64,           // [m]
-    pub conductivity: f64,        // [W/mK]
-    pub density: f64,             // [kg/m³]
-    pub specific_heat: f64,       // [J/kgK]
-    pub moisture_content: f64,    // [kg/m³] for gypsum/board
+    pub thickness: f64,        // [m]
+    pub conductivity: f64,     // [W/mK]
+    pub density: f64,          // [kg/m³]
+    pub specific_heat: f64,    // [J/kgK]
+    pub moisture_content: f64, // [kg/m³] for gypsum/board
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,7 +385,8 @@ impl FireAnalysis {
         let mut t = 0.0;
         let mut theta_a = 20.0;
 
-        while theta_a < theta_cr && t < 300.0 { // Max 5 hours
+        while theta_a < theta_cr && t < 300.0 {
+            // Max 5 hours
             let theta_g = self.exposure.temperature(t); // t is in minutes
 
             // Net heat flux
@@ -386,7 +448,12 @@ impl FireAnalysis {
 
         // Section temperature
         let temp_profile = TemperatureProfile::from_heat_transfer(
-            &self.section, &self.material, &section_factor, self.exposure, t_min, 1.0
+            &self.section,
+            &self.material,
+            &section_factor,
+            self.exposure,
+            t_min,
+            1.0,
         );
 
         let theta_a = temp_profile.avg_temp;
@@ -429,22 +496,22 @@ impl FireAnalysis {
 /// Fire resistance result.
 #[derive(Debug, Clone)]
 pub struct FireResistanceResult {
-    pub time: f64,              // Time [min]
-    pub section_temp: f64,      // Average section temperature [°C]
-    pub gas_temp: f64,          // Gas temperature [°C]
-    pub fy_reduced: f64,        // Reduced yield strength [Pa]
-    pub e_reduced: f64,         // Reduced Young's modulus [Pa]
-    pub moment_capacity: f64,   // Moment capacity at temperature [Nm]
-    pub axial_capacity: f64,    // Axial capacity at temperature [N]
-    pub utilization: f64,       // Utilization ratio
-    pub passed: bool,           // Passed fire resistance?
+    pub time: f64,            // Time [min]
+    pub section_temp: f64,    // Average section temperature [°C]
+    pub gas_temp: f64,        // Gas temperature [°C]
+    pub fy_reduced: f64,      // Reduced yield strength [Pa]
+    pub e_reduced: f64,       // Reduced Young's modulus [Pa]
+    pub moment_capacity: f64, // Moment capacity at temperature [Nm]
+    pub axial_capacity: f64,  // Axial capacity at temperature [N]
+    pub utilization: f64,     // Utilization ratio
+    pub passed: bool,         // Passed fire resistance?
 }
 
 /// Composite column fire resistance (EN 1994-1-2).
 pub mod composite {
     use super::*;
-    use crate::section::Section;
     use crate::material::Material;
+    use crate::section::Section;
 
     /// Concrete-filled tube fire analysis.
     pub struct CFTFireAnalysis {
@@ -591,9 +658,9 @@ impl SectionFireProps for Section {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
-    use crate::section::Section;
+    
     use crate::material::presets::STEEL_S355;
+    
     use crate::section_library::ParametricSection;
 
     #[test]
@@ -610,7 +677,9 @@ mod tests {
 
     #[test]
     fn section_factor_hollow() {
-        let rhs = crate::section_library::steel::RectangularHollowSection::new(0.2, 0.1, 0.005, 0.008, 0.003);
+        let rhs = crate::section_library::steel::RectangularHollowSection::new(
+            0.2, 0.1, 0.005, 0.008, 0.003,
+        );
         let section = rhs.build();
 
         let sf = SectionFactor::from_section(&section, FireExposure::Standard);

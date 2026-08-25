@@ -6,12 +6,14 @@
 pub mod csv;
 pub mod dxf;
 pub mod json;
+pub mod mesh_export;
 pub mod svg;
 
 pub use csv::{CsvExportOptions, from_csv, to_csv};
 pub use dxf::{DxfColor, DxfExportOptions, to_dxf};
 pub use json::{JsonMaterial, JsonSection, from_json, to_json};
-pub use svg::{SvgExportOptions, to_svg};
+pub use mesh_export::{to_nastran, to_vtk};
+pub use svg::{SvgExportOptions, plot_centroids, to_interactive_html, to_svg};
 
 use crate::material::Material;
 use crate::section::Section;
@@ -198,9 +200,9 @@ pub fn section_from_composite(composite: &CompositeSection) -> SectionExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
+    
     use crate::material::presets::STEEL_S355;
-    use crate::section::Section;
+    
     use crate::section_library::steel::ISection;
 
     #[test]

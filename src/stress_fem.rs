@@ -4,11 +4,10 @@
 //! computes stress distributions at mesh nodes using Tri6 element stress
 //! computation with Gauss-point extrapolation.
 
-use crate::geometry::Point;
+use crate::plastic::warping_fem::{FemSolution, compute_fem_solution};
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
-use crate::plastic::warping_fem::{FemSolution, compute_fem_solution};
-use crate::stress::{StressAtPoint, SectionLoads};
+use crate::stress::{SectionLoads, StressAtPoint};
 
 /// Compute FEM stresses at all mesh nodes.
 ///
@@ -28,8 +27,8 @@ fn compute_stress_from_fem(
     props: &SectionProperties,
     loads: SectionLoads,
 ) -> Option<Vec<StressAtPoint>> {
-    let cx = props.centroid.x;
-    let cy = props.centroid.y;
+    let _cx = props.centroid.x;
+    let _cy = props.centroid.y;
     let ea = props.area;
     let ixx = props.ix;
     let iyy = props.iy;
@@ -56,15 +55,8 @@ fn compute_stress_from_fem(
 
         // Elements already use centroidal coordinates, so pass cx=0, cy=0
         let stresses = tri6.element_stress(
-            loads.n, loads.mxx, loads.myy,
-            loads.m11, loads.m22, loads.mzz,
-            loads.vx, loads.vy,
-            ea, 0.0, 0.0,
-            ixx, iyy, ixy,
-            i11, i22, phi,
-            j, nu,
-            &omega_el, &psi_el, &phi_el,
-            delta_s,
+            loads.n, loads.mxx, loads.myy, loads.m11, loads.m22, loads.mzz, loads.vx, loads.vy, ea,
+            0.0, 0.0, ixx, iyy, ixy, i11, i22, phi, j, nu, &omega_el, &psi_el, &phi_el, delta_s,
         );
 
         for k in 0..6 {
@@ -95,15 +87,17 @@ fn compute_stress_from_fem(
         let sig_zy_vy = a.sig_zy_vy / c;
 
         let sap = build_stress_at_point(
-            node.x, node.y,
-            sig_zz_n, sig_zz_mxx, sig_zz_myy, sig_zz_m11, sig_zz_m22,
-            sig_zx_vx, sig_zy_vx, sig_zx_vy, sig_zy_vy,
-            sig_zx_mzz, sig_zy_mzz,
+            node.x, node.y, sig_zz_n, sig_zz_mxx, sig_zz_myy, sig_zz_m11, sig_zz_m22, sig_zx_vx,
+            sig_zy_vx, sig_zx_vy, sig_zy_vy, sig_zx_mzz, sig_zy_mzz,
         );
         result.push(sap);
     }
 
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Accumulator for nodal stresses (shared nodes get averaged).
@@ -127,11 +121,17 @@ impl NodeAccum {
     fn new() -> Self {
         Self {
             count: 0,
-            sig_zz_n: 0.0, sig_zz_mxx: 0.0, sig_zz_myy: 0.0,
-            sig_zz_m11: 0.0, sig_zz_m22: 0.0,
-            sig_zx_mzz: 0.0, sig_zy_mzz: 0.0,
-            sig_zx_vx: 0.0, sig_zy_vx: 0.0,
-            sig_zx_vy: 0.0, sig_zy_vy: 0.0,
+            sig_zz_n: 0.0,
+            sig_zz_mxx: 0.0,
+            sig_zz_myy: 0.0,
+            sig_zz_m11: 0.0,
+            sig_zz_m22: 0.0,
+            sig_zx_mzz: 0.0,
+            sig_zy_mzz: 0.0,
+            sig_zx_vx: 0.0,
+            sig_zy_vx: 0.0,
+            sig_zx_vy: 0.0,
+            sig_zy_vy: 0.0,
         }
     }
 
@@ -160,12 +160,19 @@ fn extract_nodal(field: &[f64], node_ids: [usize; 6]) -> [f64; 6] {
 }
 
 fn build_stress_at_point(
-    x: f64, y: f64,
-    sig_zz_n: f64, sig_zz_mxx: f64, sig_zz_myy: f64,
-    sig_zz_m11: f64, sig_zz_m22: f64,
-    sig_zx_vx: f64, sig_zy_vx: f64,
-    sig_zx_vy: f64, sig_zy_vy: f64,
-    sig_zx_mzz: f64, sig_zy_mzz: f64,
+    x: f64,
+    y: f64,
+    sig_zz_n: f64,
+    sig_zz_mxx: f64,
+    sig_zz_myy: f64,
+    sig_zz_m11: f64,
+    sig_zz_m22: f64,
+    sig_zx_vx: f64,
+    sig_zy_vx: f64,
+    sig_zx_vy: f64,
+    sig_zy_vy: f64,
+    sig_zx_mzz: f64,
+    sig_zy_mzz: f64,
 ) -> StressAtPoint {
     let sig_zz_m = sig_zz_mxx + sig_zz_myy + sig_zz_m11 + sig_zz_m22;
     let sig_zxy_mzz = (sig_zx_mzz * sig_zx_mzz + sig_zy_mzz * sig_zy_mzz).sqrt();
@@ -188,13 +195,32 @@ fn build_stress_at_point(
     let sigma_2 = half - disc;
 
     StressAtPoint {
-        x, y,
-        sig_zz_n, sig_zz_mxx, sig_zz_myy, sig_zz_m11, sig_zz_m22,
-        sig_zx_vx, sig_zy_vx, sig_zx_vy, sig_zy_vy,
-        sig_zx_mzz, sig_zy_mzz,
-        sig_zz_m, sig_zxy_mzz, sig_zxy_vx, sig_zxy_vy,
-        sig_zx_v, sig_zy_v, sig_zxy_v,
-        sigma_z, tau_xz, tau_yz, tau_zxy,
-        von_mises, sigma_1, sigma_2,
+        x,
+        y,
+        sig_zz_n,
+        sig_zz_mxx,
+        sig_zz_myy,
+        sig_zz_m11,
+        sig_zz_m22,
+        sig_zx_vx,
+        sig_zy_vx,
+        sig_zx_vy,
+        sig_zy_vy,
+        sig_zx_mzz,
+        sig_zy_mzz,
+        sig_zz_m,
+        sig_zxy_mzz,
+        sig_zxy_vx,
+        sig_zxy_vy,
+        sig_zx_v,
+        sig_zy_v,
+        sig_zxy_v,
+        sigma_z,
+        tau_xz,
+        tau_yz,
+        tau_zxy,
+        von_mises,
+        sigma_1,
+        sigma_2,
     }
 }

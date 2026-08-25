@@ -212,8 +212,8 @@ pub fn mesh_composite_section(composite: &CompositeSection, params: MeshParams) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
-    use crate::section::Section;
+    use crate::geometry::Point;
+    
 
     #[test]
     fn mesh_quality_metrics() {

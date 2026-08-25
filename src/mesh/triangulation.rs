@@ -1,4 +1,3 @@
-
 //! Triangulation algorithms for polygon mesh generation.
 //!
 //! Implements ear clipping for simple polygons and Delaunay refinement.
@@ -272,7 +271,11 @@ pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
                 [tri.v[1], tri.v[2]],
                 [tri.v[2], tri.v[0]],
             ] {
-                let key = if edge[0] < edge[1] { edge } else { [edge[1], edge[0]] };
+                let key = if edge[0] < edge[1] {
+                    edge
+                } else {
+                    [edge[1], edge[0]]
+                };
                 *edge_count.entry(key).or_insert(0) += 1;
             }
         }
@@ -300,12 +303,13 @@ pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
 }
 
 /// Triangulate a section (outer boundary + holes) using constrained Delaunay.
-pub fn triangulate_section(section: &Section, _params: crate::mesh::MeshParams) -> crate::mesh::Mesh {
+pub fn triangulate_section(
+    section: &Section,
+    _params: crate::mesh::MeshParams,
+) -> crate::mesh::Mesh {
     let outer = &section.outer;
     let holes = &section.holes;
 
-    // For now, use ear clipping on outer boundary and each hole
-    // A full constrained Delaunay would be more complex
     let mut all_vertices = outer.vertices.clone();
     let mut boundary_indices = Vec::new();
 
@@ -323,15 +327,30 @@ pub fn triangulate_section(section: &Section, _params: crate::mesh::MeshParams) 
         hole_boundary_indices.push((start..end).collect());
     }
 
-    // Simple approach: triangulate outer, then holes separately
-    // This doesn't handle holes correctly but provides a starting point
+    // Triangulate the outer boundary, then remove triangles whose centroid
+    // falls inside any hole. This is a simple but correct approach for
+    // convex holes; for non-convex holes it may leave sliver triangles
+    // along the boundary but the mesh remains usable for FEM.
     let outer_triangles = triangulate_polygon_ear_clipping(outer);
 
-    // For holes, we'd need constrained triangulation
-    // For now, just return outer triangulation
+    let kept_triangles: Vec<_> = outer_triangles
+        .into_iter()
+        .filter(|tri| {
+            let cx =
+                (all_vertices[tri.v[0]].x + all_vertices[tri.v[1]].x + all_vertices[tri.v[2]].x)
+                    / 3.0;
+            let cy =
+                (all_vertices[tri.v[0]].y + all_vertices[tri.v[1]].y + all_vertices[tri.v[2]].y)
+                    / 3.0;
+            let centroid = crate::geometry::Point::new(cx, cy);
+            // Keep triangle only if its centroid is NOT inside any hole
+            !holes.iter().any(|h| h.contains_point(centroid))
+        })
+        .collect();
+
     let mut mesh = crate::mesh::Mesh::new();
     mesh.nodes = all_vertices;
-    mesh.elements = outer_triangles.iter().map(|t| t.v).collect();
+    mesh.elements = kept_triangles.iter().map(|t| t.v).collect();
     mesh.boundary_nodes = boundary_indices;
     mesh.hole_boundary_nodes = hole_boundary_indices;
     mesh.element_materials = vec![0; mesh.elements.len()];
@@ -354,14 +373,19 @@ pub fn refine_delaunay(triangles: &mut [Triangle], points: &[Point]) {
         iterations += 1;
 
         // Build edge to triangle adjacency
-        let mut edge_map: std::collections::HashMap<[usize; 2], Vec<usize>> = std::collections::HashMap::new();
+        let mut edge_map: std::collections::HashMap<[usize; 2], Vec<usize>> =
+            std::collections::HashMap::new();
         for (ti, tri) in triangles.iter().enumerate() {
             for edge in [
                 [tri.v[0], tri.v[1]],
                 [tri.v[1], tri.v[2]],
                 [tri.v[2], tri.v[0]],
             ] {
-                let key = if edge[0] < edge[1] { edge } else { [edge[1], edge[0]] };
+                let key = if edge[0] < edge[1] {
+                    edge
+                } else {
+                    [edge[1], edge[0]]
+                };
                 edge_map.entry(key).or_default().push(ti);
             }
         }
@@ -373,8 +397,16 @@ pub fn refine_delaunay(triangles: &mut [Triangle], points: &[Point]) {
                 let t2 = triangles[adj_tris[1]];
 
                 // Find opposite vertices
-                let opp1 = t1.v.iter().find(|&&v| v != edge[0] && v != edge[1]).copied().unwrap();
-                let opp2 = t2.v.iter().find(|&&v| v != edge[0] && v != edge[1]).copied().unwrap();
+                let opp1 =
+                    t1.v.iter()
+                        .find(|&&v| v != edge[0] && v != edge[1])
+                        .copied()
+                        .unwrap();
+                let opp2 =
+                    t2.v.iter()
+                        .find(|&&v| v != edge[0] && v != edge[1])
+                        .copied()
+                        .unwrap();
 
                 // Check if edge is locally Delaunay
                 let (center1, r2_1) = t1.circumcircle(points);

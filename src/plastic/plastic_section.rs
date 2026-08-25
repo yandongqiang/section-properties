@@ -174,7 +174,7 @@ impl PlasticSection {
     }
 
     /// Compute area on one side of a line.
-    fn area_on_side(&self, axis: PlasticAxis, position: f64, above: bool) -> f64 {
+    pub fn area_on_side(&self, axis: PlasticAxis, position: f64, above: bool) -> f64 {
         // Simplified: use fiber integration
         let n = 200;
         let (min_c, max_c) = self.section_bounds(axis);
@@ -220,10 +220,10 @@ impl PlasticSection {
         let props_x = self.plastic_properties(PlasticAxis::X);
         let props_y = self.plastic_properties(PlasticAxis::Y);
 
-        let shape_factor_x = props_x.plastic_section_modulus
-            / (props_x.yield_moment / self.material.yield_strength);
-        let shape_factor_y = props_y.plastic_section_modulus
-            / (props_y.yield_moment / self.material.yield_strength);
+        let shape_factor_x =
+            props_x.plastic_section_modulus / (props_x.yield_moment / self.material.yield_strength);
+        let shape_factor_y =
+            props_y.plastic_section_modulus / (props_y.yield_moment / self.material.yield_strength);
 
         // Principal axis plastic properties
         let sect_props = SectionProperties::from_section(&self.section);
@@ -232,27 +232,21 @@ impl PlasticSection {
 
         let (props_11, props_22, sf_11, sf_22) = if phi.abs() < 1e-10 {
             // Already aligned with principal axes
-            (
-                props_x,
-                props_y,
-                shape_factor_x,
-                shape_factor_y,
-            )
+            (props_x, props_y, shape_factor_x, shape_factor_y)
         } else {
             // Rotate section by -phi so principal axes align with x/y
             let rotated_outer = self.section.outer.rotate(-phi);
-            let rotated_holes: Vec<_> =
-                self.section.holes.iter().map(|h| h.rotate(-phi)).collect();
+            let rotated_holes: Vec<_> = self.section.holes.iter().map(|h| h.rotate(-phi)).collect();
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_plastic =
                 PlasticSection::new(rotated_section, self.material).with_fibers(self.n_fibers);
 
             let p11 = rotated_plastic.plastic_properties(PlasticAxis::X);
             let p22 = rotated_plastic.plastic_properties(PlasticAxis::Y);
-            let sf11 = p11.plastic_section_modulus
-                / (p11.yield_moment / self.material.yield_strength);
-            let sf22 = p22.plastic_section_modulus
-                / (p22.yield_moment / self.material.yield_strength);
+            let sf11 =
+                p11.plastic_section_modulus / (p11.yield_moment / self.material.yield_strength);
+            let sf22 =
+                p22.plastic_section_modulus / (p22.yield_moment / self.material.yield_strength);
             (p11, p22, sf11, sf22)
         };
 
@@ -267,14 +261,46 @@ impl PlasticSection {
         let syy = props_y.plastic_section_modulus;
         let s11 = props_11.plastic_section_modulus;
         let s22 = props_22.plastic_section_modulus;
-        let sf_xx_plus = if sect_props.zxx_plus > 1e-15 { sxx / sect_props.zxx_plus } else { 0.0 };
-        let sf_xx_minus = if sect_props.zxx_minus > 1e-15 { sxx / sect_props.zxx_minus } else { 0.0 };
-        let sf_yy_plus = if sect_props.zyy_plus > 1e-15 { syy / sect_props.zyy_plus } else { 0.0 };
-        let sf_yy_minus = if sect_props.zyy_minus > 1e-15 { syy / sect_props.zyy_minus } else { 0.0 };
-        let sf_11_plus = if sect_props.principal.z11_plus > 1e-15 { s11 / sect_props.principal.z11_plus } else { 0.0 };
-        let sf_11_minus = if sect_props.principal.z11_minus > 1e-15 { s11 / sect_props.principal.z11_minus } else { 0.0 };
-        let sf_22_plus = if sect_props.principal.z22_plus > 1e-15 { s22 / sect_props.principal.z22_plus } else { 0.0 };
-        let sf_22_minus = if sect_props.principal.z22_minus > 1e-15 { s22 / sect_props.principal.z22_minus } else { 0.0 };
+        let sf_xx_plus = if sect_props.zxx_plus > 1e-15 {
+            sxx / sect_props.zxx_plus
+        } else {
+            0.0
+        };
+        let sf_xx_minus = if sect_props.zxx_minus > 1e-15 {
+            sxx / sect_props.zxx_minus
+        } else {
+            0.0
+        };
+        let sf_yy_plus = if sect_props.zyy_plus > 1e-15 {
+            syy / sect_props.zyy_plus
+        } else {
+            0.0
+        };
+        let sf_yy_minus = if sect_props.zyy_minus > 1e-15 {
+            syy / sect_props.zyy_minus
+        } else {
+            0.0
+        };
+        let sf_11_plus = if sect_props.principal.z11_plus > 1e-15 {
+            s11 / sect_props.principal.z11_plus
+        } else {
+            0.0
+        };
+        let sf_11_minus = if sect_props.principal.z11_minus > 1e-15 {
+            s11 / sect_props.principal.z11_minus
+        } else {
+            0.0
+        };
+        let sf_22_plus = if sect_props.principal.z22_plus > 1e-15 {
+            s22 / sect_props.principal.z22_plus
+        } else {
+            0.0
+        };
+        let sf_22_minus = if sect_props.principal.z22_minus > 1e-15 {
+            s22 / sect_props.principal.z22_minus
+        } else {
+            0.0
+        };
 
         FullPlasticProperties {
             x_axis: props_x,
@@ -432,7 +458,12 @@ pub mod exact {
     use crate::geometry::{Point, Polygon};
 
     /// Compute exact area on one side of the PNA using polygon clipping.
-    pub fn exact_area_on_side(section: &Section, axis: PlasticAxis, pna_pos: f64, above: bool) -> f64 {
+    pub fn exact_area_on_side(
+        section: &Section,
+        axis: PlasticAxis,
+        pna_pos: f64,
+        above: bool,
+    ) -> f64 {
         let mut area = 0.0;
         if let Some(outer_part) = clip_polygon_halfspace(&section.outer, axis, pna_pos, above) {
             area += outer_part.area();
@@ -750,9 +781,7 @@ mod tests {
     #[test]
     fn plastic_principal_axes_angle_section() {
         // Unsymmetric angle section: principal axes != centroidal axes
-        let angle = crate::section_library::steel::AngleSection::new(
-            0.1, 0.075, 0.008, 0.0, 0.0,
-        );
+        let angle = crate::section_library::steel::AngleSection::new(0.1, 0.075, 0.008, 0.0, 0.0);
         let section = angle.build();
         let plastic = PlasticSection::new(section, STEEL_S355).with_fibers(500);
 
@@ -773,9 +802,8 @@ mod tests {
     #[test]
     fn plastic_principal_axes_channel() {
         // Channel section: singly-symmetric (symmetric about y-axis)
-        let channel = crate::section_library::steel::ChannelSection::new(
-            0.2, 0.1, 0.008, 0.008, 0.0, 0.0,
-        );
+        let channel =
+            crate::section_library::steel::ChannelSection::new(0.2, 0.1, 0.008, 0.008, 0.0, 0.0);
         let section = channel.build();
         let plastic = PlasticSection::new(section, STEEL_S355).with_fibers(500);
 
@@ -785,8 +813,8 @@ mod tests {
         assert!(full.principal_angle.abs() < 1e-4);
 
         // Principal 11 (strong axis) should match x-axis
-        let ratio_11 = full.principal_11.plastic_section_modulus
-            / full.x_axis.plastic_section_modulus;
+        let ratio_11 =
+            full.principal_11.plastic_section_modulus / full.x_axis.plastic_section_modulus;
         assert!((ratio_11 - 1.0).abs() < 0.02);
     }
 
@@ -941,7 +969,7 @@ mod tests {
             Point::new(-0.1, 0.08),
         ]);
         let section = Section::new(poly, vec![]);
-        let props = SectionProperties::from_section(&section);
+        let _props = SectionProperties::from_section(&section);
         let plastic = PlasticSection::new(section, STEEL_S355).with_fibers(500);
 
         let full = plastic.full_plastic_properties();

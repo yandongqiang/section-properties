@@ -30,8 +30,10 @@ pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
             (25.0 / 48.0, 0.2, 0.2, 0.6),
         ],
         6 => {
-            let g1 = 1.0 / 18.0 * (8.0 - (10f64).sqrt() + (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
-            let g2 = 1.0 / 18.0 * (8.0 - (10f64).sqrt() - (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
+            let g1 =
+                1.0 / 18.0 * (8.0 - (10f64).sqrt() + (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
+            let g2 =
+                1.0 / 18.0 * (8.0 - (10f64).sqrt() - (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
             let w1 = (620.0 + (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
             let w2 = (620.0 - (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
             vec![
@@ -132,7 +134,13 @@ pub fn shape_function(coords: &[[f64; 6]; 2], gp: (f64, f64, f64)) -> ShapeFunct
         y += n[i] * coords[1][i];
     }
 
-    ShapeFunctionResult { n, b, j: jacobian, x, y }
+    ShapeFunctionResult {
+        n,
+        b,
+        j: jacobian,
+        x,
+        y,
+    }
 }
 
 /// Inverse of a 3×3 matrix.
@@ -290,13 +298,27 @@ pub struct Tri6 {
 
 impl Tri6 {
     /// Create a Tri6 element from 6 points and node ids.
-    pub fn from_points(el_id: usize, points: [Point; 6], node_ids: [usize; 6], em: f64, gm: f64, rho: f64) -> Self {
+    pub fn from_points(
+        el_id: usize,
+        points: [Point; 6],
+        node_ids: [usize; 6],
+        em: f64,
+        gm: f64,
+        rho: f64,
+    ) -> Self {
         let mut coords = [[0.0; 6]; 2];
         for i in 0..6 {
             coords[0][i] = points[i].x;
             coords[1][i] = points[i].y;
         }
-        Self { el_id, coords, node_ids, elastic_modulus: em, shear_modulus: gm, density: rho }
+        Self {
+            el_id,
+            coords,
+            node_ids,
+            elastic_modulus: em,
+            shear_modulus: gm,
+            density: rho,
+        }
     }
 
     /// Calculate geometric properties: (area, qx, qy, ixx, iyy, ixy).
@@ -348,7 +370,13 @@ impl Tri6 {
     }
 
     /// Calculate shear load vectors f_psi and f_phi.
-    pub fn shear_load_vectors(&self, ixx: f64, iyy: f64, ixy: f64, nu: f64) -> ([f64; 6], [f64; 6]) {
+    pub fn shear_load_vectors(
+        &self,
+        ixx: f64,
+        iyy: f64,
+        ixy: f64,
+        nu: f64,
+    ) -> ([f64; 6], [f64; 6]) {
         let mut f_psi = [0.0; 6];
         let mut f_phi = [0.0; 6];
 
@@ -359,15 +387,13 @@ impl Tri6 {
 
             for i in 0..6 {
                 // f_psi += weight * (nu/2 * B^T * [d1, d2] + 2*(1+nu) * N * (ixx*x - ixy*y))
-                f_psi[i] += weight * (
-                    nu / 2.0 * (sf.b[0][i] * d1 + sf.b[1][i] * d2)
-                    + 2.0 * (1.0 + nu) * sf.n[i] * (ixx * sf.x - ixy * sf.y)
-                );
+                f_psi[i] += weight
+                    * (nu / 2.0 * (sf.b[0][i] * d1 + sf.b[1][i] * d2)
+                        + 2.0 * (1.0 + nu) * sf.n[i] * (ixx * sf.x - ixy * sf.y));
                 // f_phi += weight * (nu/2 * B^T * [h1, h2] + 2*(1+nu) * N * (iyy*y - ixy*x))
-                f_phi[i] += weight * (
-                    nu / 2.0 * (sf.b[0][i] * h1 + sf.b[1][i] * h2)
-                    + 2.0 * (1.0 + nu) * sf.n[i] * (iyy * sf.y - ixy * sf.x)
-                );
+                f_phi[i] += weight
+                    * (nu / 2.0 * (sf.b[0][i] * h1 + sf.b[1][i] * h2)
+                        + 2.0 * (1.0 + nu) * sf.n[i] * (iyy * sf.y - ixy * sf.x));
             }
         }
 
@@ -542,7 +568,7 @@ impl Tri6 {
         ];
 
         let gps = gauss_points(6);
-        for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+        for (i, &(_w, eta, xi, zeta)) in gps.iter().enumerate() {
             let sf = shape_function(&coords_c, (eta, xi, zeta));
             let (nx_11, ny_22) = principal_coordinate(phi, sf.x, sf.y);
             let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
@@ -640,7 +666,10 @@ pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6M
         tri6_elements.push([n0, n1, n2, mid01, mid12, mid20]);
     }
 
-    Tri6Mesh { nodes, elements: tri6_elements }
+    Tri6Mesh {
+        nodes,
+        elements: tri6_elements,
+    }
 }
 
 fn get_or_create_midpoint(
@@ -692,11 +721,18 @@ pub struct SparseMatrix {
 
 impl SparseMatrix {
     pub fn new(n: usize) -> Self {
-        Self { n, rows: Vec::new(), cols: Vec::new(), vals: Vec::new() }
+        Self {
+            n,
+            rows: Vec::new(),
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, row: usize, col: usize, val: f64) {
-        if val.abs() < 1e-20 { return; }
+        if val.abs() < 1e-20 {
+            return;
+        }
         self.rows.push(row);
         self.cols.push(col);
         self.vals.push(val);
@@ -740,14 +776,18 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
     for _ in 0..max_iter {
         let ap = a.matvec(&p);
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(a, b)| a * b).sum();
-        if p_ap.abs() < 1e-20 { break; }
+        if p_ap.abs() < 1e-20 {
+            break;
+        }
         let alpha = rz_old / p_ap;
         for i in 0..n {
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
         }
         let rs_new: f64 = r.iter().map(|v| v * v).sum();
-        if rs_new.sqrt() < tol { break; }
+        if rs_new.sqrt() < tol {
+            break;
+        }
         for i in 0..n {
             z[i] = r[i] * m_inv[i];
         }

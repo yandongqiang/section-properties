@@ -424,7 +424,7 @@ impl ParametricSection for SigmaSection {
         let h = self.depth;
         let bt = self.top_flange;
         let bb = self.bottom_flange;
-        let ct = self.top_lip;
+        let _ct = self.top_lip;
         let cb = self.bottom_lip;
         let t = self.thickness;
 
@@ -900,4 +900,3 @@ mod tests {
         assert!((sec.area() - 0.01).abs() < 1e-10);
     }
 }
-

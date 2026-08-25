@@ -29,6 +29,8 @@ pub struct MaterialProps {
     pub youngs_modulus: f64,
     /// Poisson's ratio
     pub poissons_ratio: f64,
+    /// Shear modulus (G = E / (2(1+nu)))
+    pub shear_modulus: f64,
     /// Density (for mass matrix)
     pub density: f64,
     /// Plane stress (true) or plane strain (false)
@@ -43,6 +45,7 @@ impl MaterialProps {
         Self {
             youngs_modulus: material.youngs_modulus,
             poissons_ratio: material.poissons_ratio,
+            shear_modulus: material.shear_modulus,
             density: material.density,
             plane_stress,
             shear_correction: 5.0 / 6.0,
@@ -848,9 +851,9 @@ impl std::error::Error for FemError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{Point, Polygon};
+    use crate::geometry::Point;
     use crate::material::presets::STEEL_S355;
-    use crate::section::Section;
+    
 
     #[test]
     fn material_props_d_matrix() {
@@ -925,4 +928,3 @@ mod tests {
         assert!(disp.y < 0.0);
     }
 }
-
