@@ -652,9 +652,21 @@ mod tests {
         };
         let result = analysis.calculate_stress(loads);
 
+        // Shear components must be non-zero somewhere (individual sample
+        // points on symmetry lines can legitimately be zero).
+        let max_zx_vx = result
+            .point_stresses
+            .iter()
+            .map(|s| s.sig_zx_vx.abs())
+            .fold(0.0_f64, f64::max);
+        let max_zy_vy = result
+            .point_stresses
+            .iter()
+            .map(|s| s.sig_zy_vy.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_zx_vx > 0.0);
+        assert!(max_zy_vy > 0.0);
         for s in &result.point_stresses {
-            assert!(s.sig_zx_vx.abs() > 0.0);
-            assert!(s.sig_zy_vy.abs() > 0.0);
             assert!(s.sig_zz_n.abs() < 1e-6);
         }
     }

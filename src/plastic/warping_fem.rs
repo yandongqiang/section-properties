@@ -37,9 +37,11 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
-    let target_size = (max_dim / 15.0).min(min_edge * 1.5).max(1e-4);
+    let _ = props;
+    let target_size = (max_dim / 30.0).min(min_edge * 1.5).max(1e-4);
 
-    let mesh = mesh_section(
+    // Bridged triangulation keeps hole boundaries as exact mesh edges.
+    let base_mesh = mesh_section(
         section,
         MeshParams {
             target_size,
@@ -50,20 +52,24 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
             max_iterations: 10,
         },
     );
-
-    if mesh.elements.is_empty() {
+    if base_mesh.elements.is_empty() {
         return None;
     }
 
-    let mut refined_nodes = mesh.nodes.clone();
-    let mut refined_elements = mesh.elements.clone();
+    let mut refined_nodes = base_mesh.nodes.clone();
+    let mut refined_elements = base_mesh.elements.clone();
     refine_mesh(
         &mut refined_nodes,
         &mut refined_elements,
         target_size,
         10,
-        300,
+        5000,
     );
+
+    if refined_elements.is_empty() {
+        return None;
+    }
+
 
     let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
     let n = tri6_mesh.nodes.len();
@@ -224,43 +230,43 @@ fn refine_mesh(
     max_nodes: usize,
 ) {
     use std::collections::HashMap;
-    for _ in 0..max_iterations {
-        if nodes.len() >= max_nodes {
-            break;
-        }
-        let mut edge_map: HashMap<(usize, usize), usize> = HashMap::new();
-        let mut new_elements = Vec::new();
-        let mut refined = false;
 
-        for &elem in elements.iter() {
+    // Uniform (red) refinement: subdivide every element each pass so the
+    // mesh stays conforming. Selective refinement would create hanging
+    // nodes, which breaks stiffness assembly and prevents convergence.
+    for _ in 0..max_iterations {
+        // Does any element still exceed the target size?
+        let needs = elements.iter().any(|elem| {
             let p0 = nodes[elem[0]];
             let p1 = nodes[elem[1]];
             let p2 = nodes[elem[2]];
-
             let d01 = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2)).sqrt();
             let d12 = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
             let d20 = ((p0.x - p2.x).powi(2) + (p0.y - p2.y).powi(2)).sqrt();
-            let max_edge = d01.max(d12).max(d20);
+            d01.max(d12).max(d20) > target_size * 1.5
+        });
+        if !needs || nodes.len() >= max_nodes / 4 {
+            break;
+        }
 
-            if max_edge > target_size * 1.5 && nodes.len() < max_nodes {
-                let m01 = get_or_create_midpoint_refine(nodes, &mut edge_map, elem[0], elem[1]);
-                let m12 = get_or_create_midpoint_refine(nodes, &mut edge_map, elem[1], elem[2]);
-                let m20 = get_or_create_midpoint_refine(nodes, &mut edge_map, elem[2], elem[0]);
+        let mut edge_map: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut new_elements = Vec::with_capacity(elements.len() * 4);
 
-                new_elements.push([elem[0], m01, m20]);
-                new_elements.push([m01, elem[1], m12]);
-                new_elements.push([m20, m12, elem[2]]);
-                new_elements.push([m01, m12, m20]);
-                refined = true;
-            } else {
-                new_elements.push(elem);
-            }
+        for &elem in elements.iter() {
+            let m01 =
+                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[0], elem[1]);
+            let m12 =
+                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[1], elem[2]);
+            let m20 =
+                get_or_create_midpoint_refine(nodes, &mut edge_map, elem[2], elem[0]);
+
+            new_elements.push([elem[0], m01, m20]);
+            new_elements.push([m01, elem[1], m12]);
+            new_elements.push([m20, m12, elem[2]]);
+            new_elements.push([m01, m12, m20]);
         }
 
         *elements = new_elements;
-        if !refined {
-            break;
-        }
     }
 }
 
@@ -299,7 +305,9 @@ pub fn compute_fem_warping_properties(
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
-    let target_size = (max_dim / 15.0).min(min_edge * 1.5).max(1e-4);
+    let _ = props;
+    let target_size = (max_dim / 30.0).min(min_edge * 1.5).max(1e-4);
+    let _t00 = std::time::Instant::now();
 
     let mesh = mesh_section(
         section,
@@ -312,6 +320,7 @@ pub fn compute_fem_warping_properties(
             max_iterations: 10,
         },
     );
+
 
     if mesh.elements.is_empty() {
         return FemWarpingResult {
@@ -336,7 +345,7 @@ pub fn compute_fem_warping_properties(
         &mut refined_elements,
         target_size,
         10,
-        300,
+        5000,
     );
 
     let tri6_mesh = tri3_to_tri6(&refined_nodes, &refined_elements);
@@ -552,3 +561,7 @@ pub fn compute_fem_warping_properties(
         a_s22,
     }
 }
+
+
+
+

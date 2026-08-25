@@ -100,8 +100,17 @@ impl WarpingProperties {
         let beta_y = fem.beta_y_plus;
 
         // FEM shear areas may be inaccurate for thin-walled sections with coarse meshes.
-        // Fall back to approximate formulas when FEM gives zero or negative values.
-        let (ay, az) = if fem.a_sx > 0.0 && fem.a_sy > 0.0 {
+        // Fall back to approximate formulas when FEM gives zero, negative or
+        // unphysical values (non-finite or far above the section area).
+        let fem_shear_ok = |sx: f64, sy: f64| {
+            sx.is_finite()
+                && sy.is_finite()
+                && sx > 0.0
+                && sy > 0.0
+                && sx < area * 100.0
+                && sy < area * 100.0
+        };
+        let (ay, az) = if fem_shear_ok(fem.a_sx, fem.a_sy) {
             (fem.a_sx, fem.a_sy)
         } else {
             estimate_shear_areas_fallback(section, &props)
@@ -136,7 +145,7 @@ impl WarpingProperties {
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_props = SectionProperties::from_section(&rotated_section);
             let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props);
-            if rotated_fem.a_sx > 0.0 && rotated_fem.a_sy > 0.0 {
+            if fem_shear_ok(rotated_fem.a_sx, rotated_fem.a_sy) {
                 (rotated_fem.a_sx, rotated_fem.a_sy)
             } else {
                 estimate_shear_areas_fallback(&rotated_section, &rotated_props)

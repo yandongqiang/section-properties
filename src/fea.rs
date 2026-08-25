@@ -746,37 +746,74 @@ impl SparseMatrix {
         }
         y
     }
+
+    /// Diagonal entry of row `i` (summing duplicates).
+    pub fn matvec_diag(&self, i: usize) -> f64 {
+        let mut d = 0.0;
+        for k in 0..self.rows.len() {
+            if self.rows[k] == i && self.cols[k] == i {
+                d += self.vals[k];
+            }
+        }
+        d
+    }
+
+    /// Sum duplicate triplets into a compressed copy (faster matvec).
+    pub fn compressed(&self) -> SparseMatrix {        use std::collections::HashMap;
+        let mut map: HashMap<(usize, usize), f64> = HashMap::with_capacity(self.rows.len());
+        for k in 0..self.rows.len() {
+            *map.entry((self.rows[k], self.cols[k])).or_insert(0.0) += self.vals[k];
+        }
+        let mut m = SparseMatrix::new(self.n);
+        for ((r, c), v) in map {
+            if v.abs() > 0.0 {
+                m.rows.push(r);
+                m.cols.push(c);
+                m.vals.push(v);
+            }
+        }
+        m
+    }
 }
 
 /// Conjugate gradient solver with diagonal preconditioning.
 pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f64> {
     let n = b.len();
 
-    // Diagonal preconditioner: M = diag(A), M_inv = 1/diag(A)
-    let mut m_inv = vec![1.0; n];
+    // Diagonal preconditioner: M = diag(A), M_inv = 1/diag(A).
+    // Entries may be stored as duplicate triplets, so accumulate.
+    let mut diag = vec![0.0; n];
     for k in 0..a.rows.len() {
         if a.rows[k] == a.cols[k] {
-            let d = a.vals[k];
-            if d.abs() > 1e-15 {
-                m_inv[a.rows[k]] = 1.0 / d;
-            }
+            diag[a.rows[k]] += a.vals[k];
+        }
+    }
+    let mut m_inv = vec![1.0; n];
+    for i in 0..n {
+        if diag[i].abs() > 1e-15 {
+            m_inv[i] = 1.0 / diag[i];
         }
     }
 
     let mut x = vec![0.0; n];
     let mut r = b.to_vec();
+
+    // Relative convergence: scale tolerance by ||b|| so that problems with
+    // small absolute magnitudes (e.g. unit-modulus scaled FEM loads) still
+    // iterate to a meaningful solution.
+    let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if b_norm == 0.0 || !b_norm.is_finite() {
+        return x;
+    }
+
     let mut z: Vec<f64> = r.iter().zip(m_inv.iter()).map(|(a, b)| a * b).collect();
     let mut p = z.clone();
     let mut rz_old: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
 
-    if rz_old.abs() < tol * tol {
-        return x;
-    }
-
     for _ in 0..max_iter {
         let ap = a.matvec(&p);
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(a, b)| a * b).sum();
-        if p_ap.abs() < 1e-20 {
+        if p_ap.abs() <= 0.0 {
             break;
         }
         let alpha = rz_old / p_ap;
@@ -785,7 +822,10 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
             r[i] -= alpha * ap[i];
         }
         let rs_new: f64 = r.iter().map(|v| v * v).sum();
-        if rs_new.sqrt() < tol {
+        if rs_new.sqrt() < tol * b_norm {
+            break;
+        }
+        if rz_old == 0.0 {
             break;
         }
         for i in 0..n {
@@ -810,15 +850,22 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
 pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Vec<f64> {
     let n = k.n;
 
-    // Regularize K to make it positive definite: K_reg = K + ε*I
-    // This handles the zero eigenvalue (constant null space) of the Laplacian.
-    let mut k_reg = k.clone();
+    // Regularize K to make it positive definite: K_reg = K + ε*I.
+    // Handles the constant null space of the Laplacian. Use a shift scaled
+    // by the average stiffness so tiny elements are not distorted.
+    let mut k_reg = k.compressed();
+    let mut diag_sum = 0.0;
     for i in 0..n {
-        k_reg.add(i, i, 1e-8);
+        diag_sum += k_reg.matvec_diag(i);
     }
+    let eps = diag_sum.max(1e-300) / n as f64 * 1e-9;
+    for i in 0..n {
+        k_reg.add(i, i, eps);
+    }
+    let k_reg = k_reg.compressed();
 
-    let max_iter = (n * 10).max(5000);
-    let tol = 1e-10;
+    let max_iter = (n * 4).clamp(1000, 60000);
+    let tol = 1e-6;
 
     let w1 = cg_solve(&k_reg, f, max_iter, tol);
     let w2 = cg_solve(&k_reg, c, max_iter, tol);

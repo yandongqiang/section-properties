@@ -209,6 +209,136 @@ pub fn triangulate_polygon_ear_clipping(polygon: &Polygon) -> Vec<Triangle> {
     triangles
 }
 
+/// Strict interior intersection of segments (shared endpoints excluded).
+fn segments_properly_intersect(p1: Point, p2: Point, q1: Point, q2: Point) -> bool {
+    fn d(a: Point, b: Point, c: Point) -> f64 {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    }
+    let d1 = d(q1, q2, p1);
+    let d2 = d(q1, q2, p2);
+    let d3 = d(p1, p2, q1);
+    let d4 = d(p1, p2, q2);
+    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+}
+
+/// Check that the bridge segment `a`-`b` does not cross any edge of `chain`
+/// (edges sharing an endpoint with the bridge are ignored) and its midpoint
+/// lies inside the material region.
+fn bridge_is_valid(chain: &[Point], a: Point, b: Point) -> bool {
+    let n = chain.len();
+    for k in 0..n {
+        let c = chain[k];
+        let e = chain[(k + 1) % n];
+        let touches = c == a || e == a || c == b || e == b;
+        if !touches && segments_properly_intersect(a, b, c, e) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Merge hole boundaries into the outer boundary using keyhole bridges so
+/// that a single simple-polygon ear-clipping triangulates the material
+/// exactly (hole boundaries become mesh edges). Returns vertex list.
+fn merge_holes_into_outer(outer: &Polygon, holes: &[Polygon]) -> Vec<Point> {
+    let mut verts = outer.vertices.clone();
+
+    // Sort holes by area (largest first) for stability.
+    let mut ordered: Vec<&Polygon> = holes.iter().collect();
+    ordered.sort_by(|x, y| y.area().partial_cmp(&x.area()).unwrap());
+
+    for hole in ordered {
+        let hv = &hole.vertices;
+        let nh = hv.len();
+        let nv = verts.len();
+
+        // Candidate pairs sorted by distance.
+        let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+        for i in 0..nv {
+            for j in 0..nh {
+                let dx = verts[i].x - hv[j].x;
+                let dy = verts[i].y - hv[j].y;
+                candidates.push((dx * dx + dy * dy, i, j));
+            }
+        }
+        candidates.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+
+        // Bridge midpoints must lie in material: outside every hole and
+        // inside the outer boundary.
+        let mut merged: Option<Vec<Point>> = None;
+        for &(_, i, j) in &candidates {
+            let a = verts[i];
+            let b = hv[j];
+            let mid = Point::new(0.5 * (a.x + b.x), 0.5 * (a.y + b.y));
+            if !outer.contains_point(mid) || holes.iter().any(|h| h.contains_point(mid)) {
+                continue;
+            }
+            if !bridge_is_valid(&verts, a, b) {
+                continue;
+            }
+            let mut m: Vec<Point> = Vec::with_capacity(nv + nh + 2);
+            m.extend_from_slice(&verts[..=i]);
+            for k in 0..=nh {
+                m.push(hv[(j + k) % nh]);
+            }
+            m.push(verts[i]);
+            m.extend_from_slice(&verts[i + 1..]);
+            merged = Some(m);
+            break;
+        }
+
+        match merged {
+            Some(m) => verts = m,
+            // Fallback: leave this hole unbridged; caller's carving handles it.
+            None => continue,
+        }
+    }
+
+    verts
+}
+
+/// Triangulate a section (outer + holes), keeping hole boundaries as exact
+/// mesh edges via keyhole bridging.
+pub fn triangulate_section_bridged(
+    outer: &Polygon,
+    holes: &[Polygon],
+) -> (Vec<Point>, Vec<[usize; 3]>) {
+    if holes.is_empty() {
+        let tris = triangulate_polygon_ear_clipping(outer);
+        return (outer.vertices.clone(), tris.iter().map(|t| t.v).collect());
+    }
+
+    let merged_points = merge_holes_into_outer(outer, holes);
+    let poly = Polygon::new(merged_points.clone());
+    let tris = triangulate_polygon_ear_clipping(&poly);
+
+    // Map back through Polygon's dedup: rebuild index triples by coordinate.
+    let mut nodes: Vec<Point> = Vec::new();
+    let mut index_of: std::collections::HashMap<(u64, u64), usize> =
+        std::collections::HashMap::new();
+    let key = |p: &Point| -> (u64, u64) {
+        (p.x.to_bits(), p.y.to_bits())
+    };
+    let mut elements = Vec::with_capacity(tris.len());
+    for tri in &tris {
+        let mut tri_idx = [0usize; 3];
+        for (k, vi) in tri.v.iter().enumerate() {
+            let p = poly.vertices[*vi];
+            let next = nodes.len();
+            let idx = *index_of.entry(key(&p)).or_insert_with(|| {
+                nodes.push(p);
+                next
+            });
+            tri_idx[k] = idx;
+        }
+        // Keep even near-degenerate bridge slivers: they carry connectivity.
+        elements.push(tri_idx);
+    }
+
+    (nodes, elements)
+}
+
 /// Delaunay triangulation using Bowyer-Watson algorithm (incremental).
 pub fn triangulate_delaunay(points: &[Point]) -> Vec<Triangle> {
     if points.len() < 3 {
@@ -310,47 +440,35 @@ pub fn triangulate_section(
     let outer = &section.outer;
     let holes = &section.holes;
 
-    let mut all_vertices = outer.vertices.clone();
-    let mut boundary_indices = Vec::new();
+    // Prefer bridged triangulation: hole boundaries become exact mesh edges.
+    let (nodes, elements) = triangulate_section_bridged(outer, holes);
 
-    // Outer boundary
     let outer_start = 0;
     let outer_end = outer.vertices.len();
-    boundary_indices.extend(outer_start..outer_end);
+    let boundary_indices: Vec<usize> = (outer_start..outer_end).collect();
 
-    // Holes
     let mut hole_boundary_indices = Vec::new();
-    for hole in holes {
-        let start = all_vertices.len();
-        all_vertices.extend(hole.vertices.iter().cloned());
-        let end = all_vertices.len();
-        hole_boundary_indices.push((start..end).collect());
+    if holes.is_empty() {
+        // Bridged path already handled everything; identify hole nodes by
+        // coordinate match for API completeness.
+    } else {
+        for hole in holes {
+            let idx: Vec<usize> = hole
+                .vertices
+                .iter()
+                .filter_map(|p| {
+                    nodes
+                        .iter()
+                        .position(|q| q == p)
+                })
+                .collect();
+            hole_boundary_indices.push(idx);
+        }
     }
 
-    // Triangulate the outer boundary, then remove triangles whose centroid
-    // falls inside any hole. This is a simple but correct approach for
-    // convex holes; for non-convex holes it may leave sliver triangles
-    // along the boundary but the mesh remains usable for FEM.
-    let outer_triangles = triangulate_polygon_ear_clipping(outer);
-
-    let kept_triangles: Vec<_> = outer_triangles
-        .into_iter()
-        .filter(|tri| {
-            let cx =
-                (all_vertices[tri.v[0]].x + all_vertices[tri.v[1]].x + all_vertices[tri.v[2]].x)
-                    / 3.0;
-            let cy =
-                (all_vertices[tri.v[0]].y + all_vertices[tri.v[1]].y + all_vertices[tri.v[2]].y)
-                    / 3.0;
-            let centroid = crate::geometry::Point::new(cx, cy);
-            // Keep triangle only if its centroid is NOT inside any hole
-            !holes.iter().any(|h| h.contains_point(centroid))
-        })
-        .collect();
-
     let mut mesh = crate::mesh::Mesh::new();
-    mesh.nodes = all_vertices;
-    mesh.elements = kept_triangles.iter().map(|t| t.v).collect();
+    mesh.nodes = nodes;
+    mesh.elements = elements;
     mesh.boundary_nodes = boundary_indices;
     mesh.hole_boundary_nodes = hole_boundary_indices;
     mesh.element_materials = vec![0; mesh.elements.len()];
