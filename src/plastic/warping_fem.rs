@@ -5,7 +5,7 @@
 //! functions ψ, φ, then computes J, Iw, shear centre, shear areas and monosymmetry
 //! constants via Gaussian quadrature.
 
-use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6};
+use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, solve_lagrange_sparse_tol, tri3_to_tri6};
 use crate::geometry::Point;
 use crate::mesh::{MeshParams, mesh_section};
 use crate::section::Section;
@@ -300,7 +300,7 @@ pub fn compute_fem_warping_properties(
     let iyy = props.iy;
     let ixy = props.ixy;
     let ea = props.area;
-    let nu = 0.0;
+    let nu = 0.3;
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
@@ -398,8 +398,8 @@ pub fn compute_fem_warping_properties(
         }
     }
 
-    let psi = solve_lagrange_sparse(&k_global, &c_global, &f_psi);
-    let phi = solve_lagrange_sparse(&k_global, &c_global, &f_phi);
+    let psi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_psi, 1e-11);
+    let phi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_phi, 1e-11);
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
@@ -428,7 +428,9 @@ pub fn compute_fem_warping_properties(
     let denom = ixx * iyy - ixy * ixy;
     let delta_s = 2.0 * (1.0 + nu) * denom;
 
-    // Elastic shear center (Python elasticity approach)
+    // Elastic shear centre exactly as Python sectionproperties
+    // (analysis/section.py): x pairs with phi, y pairs with psi. The
+    // geometric integral terms require a realistic Poisson's ratio.
     let f_torsion_dot_psi: f64 = f_torsion.iter().zip(psi.iter()).map(|(&a, &b)| a * b).sum();
     let f_torsion_dot_phi: f64 = f_torsion.iter().zip(phi.iter()).map(|(&a, &b)| a * b).sum();
 
@@ -443,17 +445,8 @@ pub fn compute_fem_warping_properties(
         0.0
     };
 
-    // Shear center: use sc_xint/sc_yint formula (robust for symmetric sections)
-    let x_se = if denom.abs() > 1e-15 {
-        (ixy * sc_xint - ixx * sc_yint) / denom / ea
-    } else {
-        0.0
-    };
-    let y_se = if denom.abs() > 1e-15 {
-        (iyy * sc_xint - ixy * sc_yint) / denom / ea
-    } else {
-        0.0
-    };
+    let x_se = x_se_elastic;
+    let y_se = y_se_elastic;
 
     let shear_center = Point::new(x_se, y_se);
     let shear_center_elastic = Point::new(x_se_elastic, y_se_elastic);

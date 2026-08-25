@@ -848,12 +848,26 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
 ///
 /// u = K^{-1}*(f - c*λ),  λ = (c^T*K^{-1}*c)^{-1} * c^T*K^{-1}*f
 pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Vec<f64> {
+    solve_lagrange_sparse_tol(k, c, f, 1e-6)
+}
+
+/// Like [`solve_lagrange_sparse`] with an explicit relative CG tolerance.
+pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f64) -> Vec<f64> {
+    // Tight tolerances (needed for shear-centre difference quantities)
+    // require a proportionally larger iteration budget.
     let n = k.n;
+    let max_iter = if tol < 1e-8 {
+        (n * 20).clamp(20000, 600000)
+    } else {
+        (n * 4).clamp(1000, 60000)
+    };
+    let _n = k.n;
 
     // Regularize K to make it positive definite: K_reg = K + ε*I.
     // Handles the constant null space of the Laplacian. Use a shift scaled
     // by the average stiffness so tiny elements are not distorted.
     let mut k_reg = k.compressed();
+    let n = k.n;
     let mut diag_sum = 0.0;
     for i in 0..n {
         diag_sum += k_reg.matvec_diag(i);
@@ -863,9 +877,6 @@ pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Vec<f64>
         k_reg.add(i, i, eps);
     }
     let k_reg = k_reg.compressed();
-
-    let max_iter = (n * 4).clamp(1000, 60000);
-    let tol = 1e-6;
 
     let w1 = cg_solve(&k_reg, f, max_iter, tol);
     let w2 = cg_solve(&k_reg, c, max_iter, tol);
