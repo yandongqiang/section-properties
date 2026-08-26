@@ -541,3 +541,24 @@ fn solve_with_fallback(
     }
     solve_lagrange_sparse(k_reg, c, f)
 }
+
+/// Render the warping function ω as a filled-contour SVG for the section.
+///
+/// Convenience wrapper combining [`compute_fem_solution`] with
+/// `sectionproperties`-style warping contour output.
+pub fn warping_svg(
+    section: &Section,
+    props: &SectionProperties,
+    width: u32,
+    height: u32,
+) -> Option<String> {
+    use crate::io::{SvgExportOptions, plot_warping_svg};
+    let fem = compute_fem_solution(section, props)?;
+    let opts = SvgExportOptions {
+        width,
+        height,
+        title: Some("Warping function omega".to_string()),
+        ..Default::default()
+    };
+    Some(plot_warping_svg(&fem.tri6_mesh, &fem.omega, opts))
+}

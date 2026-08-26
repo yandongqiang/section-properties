@@ -802,3 +802,153 @@ mod tests {
 
 
 
+
+// ---------------------------------------------------------------------------
+// Warping function contour plot (mirrors Python plot_warping_function)
+// ---------------------------------------------------------------------------
+
+/// Diverging colour scale: blue (negative) -> white (zero) -> red (positive).
+fn warp_colour(t: f64) -> String {
+    let t = t.clamp(-1.0, 1.0);
+    let (r, g, b) = if t < 0.0 {
+        let s = -t;
+        (
+            (255.0 * (1.0 - s) + 40.0 * s) as u8,
+            (255.0 * (1.0 - s) + 80.0 * s) as u8,
+            (255.0 * (1.0 - s) + 200.0 * s) as u8,
+        )
+    } else {
+        (
+            (255.0 * (1.0 - t) + 220.0 * t) as u8,
+            (255.0 * (1.0 - t) + 60.0 * t) as u8,
+            (255.0 * (1.0 - t) + 60.0 * t) as u8,
+        )
+    };
+    format!("rgb({r},{g},{b})")
+}
+
+/// Render the warping function ω over the FE mesh as a filled-contour SVG.
+///
+/// Mirrors Python `Section.plot_warping_function()`: the mesh is drawn with
+/// each element coloured by its mean ω, using a diverging blue-white-red
+/// scale normalised by max|ω|, plus a colour legend.
+pub fn plot_warping_svg(
+    mesh: &crate::fea::Tri6Mesh,
+    omega: &[f64],
+    options: SvgExportOptions,
+) -> String {
+    use std::fmt::Write as _;
+
+    let _n = mesh.nodes.len();
+    let omega_max = omega.iter().fold(0.0f64, |m, &v| m.max(v.abs())).max(1e-30);
+
+    // Bounds
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for p in &mesh.nodes {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    let span_x = (max_x - min_x).max(1e-15);
+    let span_y = (max_y - min_y).max(1e-15);
+
+    let avail_w = options.width as f64 - 2.5 * options.margin as f64;
+    let avail_h = options.height as f64 - 2.0 * options.margin as f64;
+    let scale = (avail_w / span_x).min(avail_h / span_y);
+    let ox = options.margin as f64;
+    let oy = options.height as f64 - options.margin as f64;
+
+    let px = |x: f64| ox + (x - min_x) * scale;
+    let py = |y: f64| oy - (y - min_y) * scale;
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg width="{}" height="{}" viewBox="0 0 {} {}" xmlns="http://www.w3.org/2000/svg">"#,
+        options.width, options.height, options.width, options.height
+    ));
+    svg.push('\n');
+    svg.push_str(&format!(
+        r#"<rect width="100%" height="100%" fill="{}"/>"#,
+        options.background_color
+    ));
+    svg.push('\n');
+    if let Some(title) = &options.title {
+        svg.push_str(&format!(
+            r##"<text x="{}" y="{}" font-size="{}" text-anchor="middle" fill="#333">{}</text>"##,
+            options.width / 2,
+            options.margin / 2,
+            options.font_size + 4,
+            title
+        ));
+        svg.push('\n');
+    }
+
+    // Elements coloured by mean nodal ω.
+    for elem in &mesh.elements {
+        let mean_omega: f64 =
+            elem.iter().map(|&ni| omega[ni]).sum::<f64>() / elem.len() as f64;
+        let t = (mean_omega / omega_max).clamp(-1.0, 1.0);
+        let fill = warp_colour(t);
+
+        svg.push_str(r#"<path d=""#);
+        for (k, &ni) in elem.iter().enumerate() {
+            let p = &mesh.nodes[ni];
+            if k == 0 {
+                write!(svg, "M {:.2} {:.2} ", px(p.x), py(p.y)).unwrap();
+            } else {
+                write!(svg, "L {:.2} {:.2} ", px(p.x), py(p.y)).unwrap();
+            }
+        }
+        svg.push_str("Z");
+        svg.push_str(&format!(
+            r#" " fill="{fill}" stroke="{stroke}" stroke-width="0.3"/>"#,
+            stroke = options.outer_stroke_color
+        ));
+        svg.push('\n');
+    }
+
+    // Legend: vertical gradient bar.
+    let bar_x = options.width as i32 - options.margin as i32 / 2 - 10;
+    let bar_top = options.margin;
+    let bar_h = options.height - 2 * options.margin;
+    svg.push_str("<defs><linearGradient id=\"wleg\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">");
+    for s in 0..=10 {
+        let t = -1.0 + 0.2 * s as f64;
+        let offset = (s as f64) / 10.0 * 100.0;
+        let _write_ok = writeln!(
+            svg,
+            r#"<stop offset="{offset:.0}%" stop-color="{}"/>"#,
+            warp_colour(t)
+        );
+    }
+    svg.push_str("</linearGradient></defs>\n");
+    svg.push_str(&format!(
+        r##"<rect x="{}" y="{}" width="14" height="{}" fill="url(#wleg)" stroke="#333" stroke-width="0.5"/>"##,
+        bar_x, bar_top, bar_h
+    ));
+    svg.push('\n');
+
+    let _ = writeln!(
+        svg,
+        r##"<text x="{}" y="{}" font-size="{}" fill="#333">+w max = {:+.3e}</text>"##,
+        bar_x - 4,
+        bar_top as f64 + options.font_size as f64,
+        options.font_size,
+        omega_max
+    );
+    let _ = writeln!(
+        svg,
+        r##"<text x="{}" y="{}" font-size="{}" fill="#333">-w max = {:-.3e}</text>"##,
+        bar_x - 4,
+        bar_top + bar_h,
+        options.font_size,
+        omega_max
+    );
+
+    svg.push_str("</svg>\n");
+    svg
+}

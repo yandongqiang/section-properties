@@ -353,3 +353,49 @@ fn smoke_mass_property() {
     let mass_per_m = props.area * density;
     assert!((mass_per_m - 157.0).abs() < 0.1);
 }
+
+#[test]
+fn smoke_compound_boolean() {
+    use section_properties::{CompoundGeometry, Geometry};
+    // Two disjoint squares as compound A
+    let sq = |cx, cy| {
+        Geometry::new(
+            section_properties::Polygon::new(vec![
+                Point::new(cx - 0.5, cy - 0.5),
+                Point::new(cx + 0.5, cy - 0.5),
+                Point::new(cx + 0.5, cy + 0.5),
+                Point::new(cx - 0.5, cy + 0.5),
+            ]),
+            vec![],
+        )
+    };
+    let a = CompoundGeometry::new(vec![sq(-0.75, 0.0), sq(0.75, 0.0)]);
+    let b = CompoundGeometry::new(vec![sq(0.0, 0.0)]); // overlaps both halves
+
+    // Difference: two half-squares remain (area 0.25 each)
+    let d = a.subtract_compound(&b);
+    // Each square loses its 0.25 overlap with b: 2 - 0.5 = 1.5
+    assert!((d.area() - 1.5).abs() < 5e-3, "diff area {}", d.area());
+
+    // Union: total area = 1 + 1 + overlap-dissolved... b covers middle:
+    // A area=2, B=1, overlap with A = 2*0.25=0.5 -> union = 2+1-0.5=2.5
+    let u = a.union_compound(&b);
+    let expected_union = 2.0 + 1.0 - 0.5;
+    assert!((u.area() - expected_union).abs() < 5e-2, "union {}", u.area());
+
+    // Intersection: b ∩ a = 0.5
+    let i = a.intersection_compound(&b);
+    assert!((i.area() - 0.5).abs() < 5e-2, "inter {}", i.area());
+}
+
+#[test]
+fn smoke_warping_svg() {
+    let sec = ChannelSection::new(0.2, 0.075, 0.005, 0.008, 0.0, 0.0).build();
+    let props = SectionProperties::from_section(&sec);
+    let svg = section_properties::warping_svg(&sec, &props, 800, 600)
+        .expect("warping svg");
+    assert!(svg.contains("<svg"));
+    assert!(svg.contains("wleg")); // legend gradient id
+    assert!(svg.contains("rgb(")); // coloured elements
+    assert!(!svg.contains("NaN"));
+}

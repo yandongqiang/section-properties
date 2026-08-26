@@ -37,6 +37,7 @@ pub use crate::io::{
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
 pub use crate::fea::{solvers, SkylineLdlt};
+pub use crate::plastic::warping_fem::warping_svg;
 pub use crate::mesh::{
     AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
     FemSectionAnalysis, FemSolver, FemWarpingProperties, LoadCase, MaterialProps, Mesh, MeshParams,

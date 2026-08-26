@@ -13,7 +13,7 @@ pub use csv::{CsvExportOptions, from_csv, to_csv};
 pub use dxf::{DxfColor, DxfExportOptions, to_dxf};
 pub use json::{JsonMaterial, JsonSection, from_json, to_json};
 pub use mesh_export::{to_nastran, to_vtk};
-pub use svg::{SvgExportOptions, plot_centroids, to_interactive_html, to_svg};
+pub use svg::{SvgExportOptions, plot_centroids, plot_warping_svg, to_interactive_html, to_svg};
 
 use crate::material::Material;
 use crate::section::Section;

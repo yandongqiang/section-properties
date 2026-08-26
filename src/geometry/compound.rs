@@ -355,6 +355,18 @@ pub struct CompoundGeometry {
     pub geometries: Vec<Geometry>,
 }
 
+/// Quick bounding-box overlap test for two polygons.
+fn bbox_overlap(a: &Polygon, b: &Polygon) -> bool {
+    let bbox = |pts: &[Point]| {
+        pts.iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+            |(l, r, b, t), p| (l.min(p.x), r.max(p.x), b.min(p.y), t.max(p.y)),
+        )
+    };
+    let (al, ar, ab, at) = bbox(&a.vertices);
+    let (bl, br, bb, bt) = bbox(&b.vertices);
+    al <= br && bl <= ar && ab <= bt && bb <= at
+}
 impl CompoundGeometry {
     /// Create a compound geometry from its constituent regions.
     pub fn new(geometries: Vec<Geometry>) -> Self {
@@ -368,6 +380,117 @@ impl CompoundGeometry {
         }
     }
 
+    /// Boolean operation across compound geometries.
+    ///
+    /// Mirrors `CompoundGeometry.combine(other, operation)`:
+    /// - Union: all regions of both compounds unioned pairwise into one
+    ///   accumulated set (dissolves internal overlaps).
+    /// - Intersection: every region pair intersected, keeping non-empty
+    ///   results.
+    /// - Difference: each region of `self` reduced by every region of
+    ///   `other` in sequence.
+    pub fn boolean(&self, other: &Self, op: super::boolean::BoolOp) -> Self {
+        use super::boolean::polygon_boolean;
+
+        match op {
+            super::boolean::BoolOp::Intersection => {
+                let mut out = Vec::new();
+                for ga in &self.geometries {
+                    for gb in &other.geometries {
+                        out.extend(polygon_boolean(&ga.outer, &gb.outer, op));
+                    }
+                }
+                let geometries = out
+                    .into_iter()
+                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+                    .collect();
+                Self { geometries }
+            }
+            super::boolean::BoolOp::Difference => {
+                let mut acc: Vec<Polygon> =
+                    self.geometries.iter().map(|g| g.outer.clone()).collect();
+                for gb in &other.geometries {
+                    let mut next = Vec::new();
+                    for a in &acc {
+                        next.extend(polygon_boolean(a, &gb.outer, op));
+                    }
+                    acc = next;
+                    if acc.is_empty() {
+                        break;
+                    }
+                }
+                let geometries = acc
+                    .into_iter()
+                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+                    .collect();
+                Self { geometries }
+            }
+            super::boolean::BoolOp::Union => {
+                // Collect every region then repeatedly merge overlapping
+                // pairs until a fixed point. Touching-only regions stay
+                // separate (matching Python's compound semantics).
+                let mut acc: Vec<Polygon> = self
+                    .geometries
+                    .iter()
+                    .chain(other.geometries.iter())
+                    .map(|g| g.outer.clone())
+                    .collect();
+
+                loop {
+                    let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
+                    'outer: for i in 0..acc.len() {
+                        for j in (i + 1)..acc.len() {
+                            if !bbox_overlap(&acc[i], &acc[j]) {
+                                continue;
+                            }
+                            let u = polygon_boolean(
+                                &acc[i],
+                                &acc[j],
+                                super::boolean::BoolOp::Union,
+                            );
+                            let u_area: f64 = u.iter().map(|p| p.area().abs()).sum();
+                            let sum_area =
+                                acc[i].area().abs() + acc[j].area().abs();
+                            if u_area < sum_area - 1e-9 {
+                                merged = Some((i, j, u));
+                                break 'outer;
+                            }
+                        }
+                    }
+                    match merged {
+                        Some((i, j, u)) => {
+                            let last = acc.len() - 1;
+                            acc[j] = acc[last].clone();
+                            acc.swap_remove(last);
+                            acc.splice(i..i + 1, u);
+                        }
+                        None => break,
+                    }
+                }
+
+                let geometries = acc
+                    .into_iter()
+                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+                    .collect();
+                Self { geometries }
+            }
+        }
+    }
+
+    /// Boolean union with `other`.
+    pub fn union_compound(&self, other: &Self) -> Self {
+        self.boolean(other, super::boolean::BoolOp::Union)
+    }
+
+    /// Boolean intersection with `other`.
+    pub fn intersection_compound(&self, other: &Self) -> Self {
+        self.boolean(other, super::boolean::BoolOp::Intersection)
+    }
+
+    /// Boolean difference: this compound minus `other`.
+    pub fn subtract_compound(&self, other: &Self) -> Self {
+        self.boolean(other, super::boolean::BoolOp::Difference)
+    }
     /// Total net area across all regions.
     pub fn area(&self) -> f64 {
         self.geometries.iter().map(|g| g.area()).sum()
