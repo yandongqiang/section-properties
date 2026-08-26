@@ -21,11 +21,36 @@ cargo build --release --features pardiso
 The binding uses raw-dylib against `mkl_rt.3`; adjust the version in
 `src/fea/solvers.rs` if your MKL ships a different name.
 
+## Status & known issue
+
+The FFI itself is verified: `pardisoinit` returns err=0 against MKL 2025.2 /
+2026.1 runtimes obtained from pip wheels. However, in ad-hoc environments
+built from partial wheel extractions, the process can crash (access
+violation) inside `pardisoinit` or at thread-layer load because the
+versioned DLL set (`mkl_rt.3` expecting `.2` companions) is incomplete.
+
+For that reason:
+
+* `DirectLagrangeSolver::new` always uses the **skyline LDL^T** backend.
+* To use PARDISO, call `DirectLagrangeSolver::with_kernel(
+  LagrangeKernel::Pardiso, ...)` explicitly inside a full oneAPI environment
+  (`setvars.bat`) where all companion DLLs are provisioned.
+
 ## API
 
 ```rust
-use section_properties::fea::solvers::pardiso::PardisoSolver;
+use section_properties::fea::{
+    DirectLagrangeSolver, LagrangeKernel, solvers::pardiso::PardisoSolver,
+};
 
-let mut s = PardisoSolver::new(&k, &c)?;
-let u = s.solve_direct_lagrange(&f)?;   // multiplier check |u[-1]|/max|u| <= 1e-7
+// Default (skyline):
+let mut s = DirectLagrangeSolver::new(&k, &c)?;
+let u = s.solve(&f)?;
+
+// Explicit PARDISO:
+let mut s = DirectLagrangeSolver::with_kernel(LagrangeKernel::Pardiso, &k, &c)?;
+let u = s.solve(&f)?;
+// or standalone:
+let mut p = PardisoSolver::new(&k, &c)?;
+let u = p.solve_direct_lagrange(&f)?;   // multiplier check |u[-1]|/max|u| <= 1e-7
 ```

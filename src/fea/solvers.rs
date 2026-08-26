@@ -525,6 +525,36 @@ pub mod pardiso {
             Ok(())
         }
 
+        /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns (u, lam).
+        pub fn solve_with_multiplier(&mut self, f: &[f64]) -> Result<(Vec<f64>, f64), String> {
+            self.ensure_factorised()?;
+            let n = self.n;
+            let mut b = f.to_vec();
+            b.push(0.0);
+            let mut x = vec![0.0f64; n + 1];
+
+            unsafe {
+                let mut err: i32 = 0;
+                let phase: i32 = 33; // solve + iterative refinement
+                let nn = (n + 1) as i32;
+                let nrhs: i32 = 1;
+                let msglvl: i32 = 0;
+                pardiso(
+                    self.pt.as_mut_ptr() as *mut c_void,
+                    &MAXFCT, &MNUM, &MTYPE, &phase, &nn,
+                    self.vals.as_ptr(), self.ia.as_ptr(), self.ja.as_ptr(),
+                    std::ptr::null(), &nrhs, self.iparm.as_mut_ptr(), &msglvl,
+                    b.as_ptr(), x.as_mut_ptr(), &mut err,
+                );
+                if err != 0 {
+                    return Err(format!("pardiso solve failed: {err}"));
+                }
+            }
+
+            let lam = x.pop().unwrap_or(0.0);
+            Ok((x, lam))
+        }
+
         /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns u.
         pub fn solve_direct_lagrange(&mut self, f: &[f64]) -> Result<Vec<f64>, String> {
             self.ensure_factorised()?;

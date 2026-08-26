@@ -1099,8 +1099,25 @@ impl CscMatrix {
 pub struct DirectLagrangeSolver {
     /// Size of the leading K block.
     pub n: usize,
-    ldlt: SkylineLdlt,
+    kernel: LagrangeKernelInstance,
     c: Vec<f64>,
+}
+
+/// Numeric backend for the augmented direct solve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LagrangeKernel {
+    /// Skyline LDL^T of the regularised leading block (always available).
+    Skyline,
+    /// Intel MKL PARDISO (requires the `pardiso` feature and MKL runtime).
+    #[cfg(feature = "pardiso")]
+    Pardiso,
+}
+
+enum LagrangeKernelInstance {
+    Skyline(SkylineLdlt),
+    /// PARDISO needs &mut for its internal solve phases.
+    #[cfg(feature = "pardiso")]
+    Pardiso(std::sync::Mutex<crate::fea::solvers::pardiso::PardisoSolver>),
 }
 
 impl DirectLagrangeSolver {
@@ -1125,8 +1142,22 @@ impl DirectLagrangeSolver {
         CscMatrix::from_coo(n + 1, n + 1, &row, &col, &data)
     }
 
-    /// Factor the leading K block of the augmented system once.
+    /// Factor using the default backend: the skyline LDL^T, which is
+    /// self-contained and robust.
+    ///
+    /// PARDISO is powerful but demands a fully provisioned MKL runtime;
+    /// select it explicitly via [`DirectLagrangeSolver::with_kernel`] when
+    /// the environment is known to be complete.
     pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, crate::mesh::fem::FemError> {
+        Self::with_kernel(LagrangeKernel::Skyline, k, c)
+    }
+
+    /// Factor with an explicit kernel.
+    pub fn with_kernel(
+        kernel: LagrangeKernel,
+        k: &SparseMatrix,
+        c: &[f64],
+    ) -> Result<Self, crate::mesh::fem::FemError> {
         // Regularise K slightly for numerical safety (same spirit as CG path).
         let mut m = k.compressed();
         let mut diag_avg = 0.0;
@@ -1137,27 +1168,57 @@ impl DirectLagrangeSolver {
         for i in 0..m.n {
             m.add(i, i, eps);
         }
-        let ldlt = SkylineLdlt::factor(&m)?;
-        Ok(Self { n: k.n, ldlt, c: c.to_vec() })
+        let m = m.compressed();
+
+        let instance = match kernel {
+            LagrangeKernel::Skyline => {
+                LagrangeKernelInstance::Skyline(SkylineLdlt::factor(&m)?)
+            }
+            #[cfg(feature = "pardiso")]
+            LagrangeKernel::Pardiso => LagrangeKernelInstance::Pardiso(std::sync::Mutex::new(
+                crate::fea::solvers::pardiso::PardisoSolver::new(k, c)
+                    .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?,),
+            ),
+        };
+        Ok(Self { n: k.n, kernel: instance, c: c.to_vec() })
     }
 
     /// Solve [K c; c^T 0] [u; lam] = [f; 0] and return u.
     pub fn solve(&self, f: &[f64]) -> Vec<f64> {
-        let w1 = self.ldlt.solve(f);
-        let w2 = self.ldlt.solve(&self.c);
-        let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
-        let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
-        w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
+        let (u, _lam) = self.solve_full(f);
+        u
+    }
+
+    /// Solve returning `(u, lambda)`.
+    pub fn solve_full(&self, f: &[f64]) -> (Vec<f64>, f64) {
+        match &self.kernel {
+            LagrangeKernelInstance::Skyline(ldlt) => {
+                let w1 = ldlt.solve(f);
+                let w2 = ldlt.solve(&self.c);
+                let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+                let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+                let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
+                let u = w1
+                    .iter()
+                    .zip(w2.iter())
+                    .map(|(&a, &b)| a - lambda * b)
+                    .collect();
+                (u, lambda)
+            }
+            #[cfg(feature = "pardiso")]
+            LagrangeKernelInstance::Pardiso(p) => {
+                // The augmented solve yields lambda as the last unknown.
+                match p.lock().unwrap().solve_with_multiplier(f) {
+                    Ok((u, lam)) => (u, lam),
+                    Err(_) => (vec![0.0; self.n], 0.0),
+                }
+            }
+        }
     }
 
     /// Multiplier error metric |lam| / max|u| (Python's u[-1]/max|u|).
     pub fn multiplier_error(&self, f: &[f64], u: &[f64]) -> f64 {
-        let w1 = self.ldlt.solve(f);
-        let w2 = self.ldlt.solve(&self.c);
-        let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
-        let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
+        let (_u_full, lambda) = self.solve_full(f);
         let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
         if max_u > 0.0 {
             lambda.abs() / max_u
@@ -1535,7 +1596,7 @@ mod skyline_tests {
                 k.add(i + 1, i, -1.0);
             }
         }
-        let c: Vec<f64> = (0..n).map(|i| 1.0).collect();
+        let c: Vec<f64> = (0..n).map(|_i| 1.0).collect();
         let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 0.05).collect();
 
         // High-precision CG reference

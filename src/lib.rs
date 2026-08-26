@@ -36,7 +36,7 @@ pub use crate::io::{
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
-pub use crate::fea::{solvers, SkylineLdlt};
+pub use crate::fea::{solvers, LagrangeKernel, SkylineLdlt};
 pub use crate::plastic::warping_fem::warping_svg;
 pub use crate::mesh::{
     AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
