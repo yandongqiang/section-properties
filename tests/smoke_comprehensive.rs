@@ -399,3 +399,65 @@ fn smoke_warping_svg() {
     assert!(svg.contains("rgb(")); // coloured elements
     assert!(!svg.contains("NaN"));
 }
+
+#[test]
+fn smoke_compound_validate_and_dissolve() {
+    use section_properties::{CompoundError, CompoundGeometry, Geometry};
+    let sq = |cx, cy| {
+        Geometry::new(
+            section_properties::Polygon::new(vec![
+                Point::new(cx - 0.5, cy - 0.5),
+                Point::new(cx + 0.5, cy - 0.5),
+                Point::new(cx + 0.5, cy + 0.5),
+                Point::new(cx - 0.5, cy + 0.5),
+            ]),
+            vec![],
+        )
+    };
+
+    // Disjoint: validate passes
+    let disjoint = CompoundGeometry::new(vec![sq(-1.0, 0.0), sq(1.0, 0.0)]);
+    assert!(disjoint.validate().is_ok());
+
+    // Overlapping: validate catches it
+    let overlapping = CompoundGeometry::new(vec![sq(-0.25, 0.0), sq(0.25, 0.0)]);
+    match overlapping.validate() {
+        Err(CompoundError::OverlappingRegions { a: 0, b: 1 }) => {}
+        other => panic!("expected overlap error, got {:?}", other.map(|_| ())),
+    }
+
+    // Naive area double-counts; dissolved does not.
+    // overlap = [−0.25,0.25]×[−0.5,0.5] = 0.5 → naive = 2 − 0.5·2? naive sums
+    // both areas fully (2.0); true union = 1.5.
+    assert!((overlapping.area() - 2.0).abs() < 1e-9);
+    let dissolved = CompoundGeometry::dissolved(vec![sq(-0.25, 0.0), sq(0.25, 0.0)]);
+    assert!(
+        (dissolved.area() - 1.5).abs() < 5e-2,
+        "dissolved area {}",
+        dissolved.area()
+    );
+    assert!(dissolved.validate().is_ok());
+
+    // new_validated rejects overlaps
+    assert!(CompoundGeometry::new_validated(vec![sq(-0.25, 0.0), sq(0.25, 0.0)]).is_err());
+
+    // Hole escaping its outer boundary
+    let outer_bad = Geometry::new(
+        section_properties::Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]),
+        vec![section_properties::Polygon::new(vec![
+            Point::new(0.8, 0.8),
+            Point::new(1.5, 0.8),
+            Point::new(1.5, 1.5),
+            Point::new(0.8, 1.5),
+        ])],
+    );
+    match CompoundGeometry::new(vec![outer_bad]).validate() {
+        Err(CompoundError::HoleNotInsideOuter { region: 0, hole: 0 }) => {}
+        other => panic!("expected hole-outside error, got {:?}", other.map(|_| ())),
+    }
+}

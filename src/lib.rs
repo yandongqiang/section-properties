@@ -25,7 +25,7 @@ pub use crate::fire::{
     FireAnalysis, FireExposure, FireProtection, FireResistanceResult, MaterialPropertiesAtTemp,
     ProtectionType, SectionFactor, TemperatureProfile, composite,
 };
-pub use crate::geometry::{Axis, CompoundGeometry, Geometry, Point, Polygon, Transform};
+pub use crate::geometry::{Axis, CompoundError, CompoundGeometry, Geometry, Point, Polygon, Transform};
 pub use crate::io::{
     CsvExportOptions, DxfColor, DxfExportOptions, ExportFormat, JsonMaterial, JsonSection,
     SectionExporter, SectionImporter, SvgExportOptions, export_section_library, from_csv,

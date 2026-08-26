@@ -349,11 +349,46 @@ impl Geometry {
 /// an angle bolted to a plate, or a built-up girder.
 ///
 /// Mirrors `sectionproperties.pre.geometry.CompoundGeometry`.
+///
+/// # Invariant
+/// Regions are assumed to be **material-disjoint**: no part of one region's
+/// material may overlap another region's material. Properties (`area`,
+/// inertia, ...) are computed by simple summation, which is only correct
+/// under this assumption.
+///
+/// Use [`CompoundGeometry::validate`] to check the invariant, and
+/// [`CompoundGeometry::dissolved`] to merge overlapping inputs into a valid
+/// compound.
 #[derive(Debug, Clone)]
 pub struct CompoundGeometry {
     /// The individual regions that make up the compound section.
     pub geometries: Vec<Geometry>,
 }
+
+/// Errors from compound-geometry topology validation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompoundError {
+    /// Material of region `a` overlaps material of region `b`.
+    OverlappingRegions { a: usize, b: usize },
+    /// Hole `hole` of `region` is not fully inside the region's outer
+    /// boundary.
+    HoleNotInsideOuter { region: usize, hole: usize },
+}
+
+impl std::fmt::Display for CompoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompoundError::OverlappingRegions { a, b } => {
+                write!(f, "regions {a} and {b} have overlapping material")
+            }
+            CompoundError::HoleNotInsideOuter { region, hole } => {
+                write!(f, "hole {hole} of region {region} is not fully inside its outer boundary")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompoundError {}
 
 /// Quick bounding-box overlap test for two polygons.
 fn bbox_overlap(a: &Polygon, b: &Polygon) -> bool {
@@ -369,8 +404,144 @@ fn bbox_overlap(a: &Polygon, b: &Polygon) -> bool {
 }
 impl CompoundGeometry {
     /// Create a compound geometry from its constituent regions.
+    ///
+    /// # Invariant
+    /// The caller guarantees that region materials are **disjoint**.
+    /// Overlapping inputs silently double-count area/inertia in property
+    /// computations. Use [`CompoundGeometry::validate`] to check, or
+    /// [`CompoundGeometry::dissolved`] to merge overlapping inputs.
     pub fn new(geometries: Vec<Geometry>) -> Self {
         Self { geometries }
+    }
+
+    /// Validating constructor: returns an error if any two regions have
+    /// overlapping material or a hole escapes its outer boundary.
+    pub fn new_validated(geometries: Vec<Geometry>) -> Result<Self, CompoundError> {
+        let compound = Self { geometries };
+        compound.validate()?;
+        Ok(compound)
+    }
+
+    /// Merge overlapping inputs into a valid (material-disjoint) compound by
+    /// dissolving overlaps with the boolean union. Holes are dropped during
+    /// dissolution (the merged outline is exact; re-derive holes afterwards
+    /// if required).
+    pub fn dissolved(geometries: Vec<Geometry>) -> Self {
+        use super::boolean::{polygon_boolean, BoolOp};
+
+        let mut acc: Vec<Polygon> =
+            geometries.iter().map(|g| g.apply_transforms().outer).collect();
+
+        loop {
+            let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
+            'outer: for i in 0..acc.len() {
+                for j in (i + 1)..acc.len() {
+                    if !bbox_overlap(&acc[i], &acc[j]) {
+                        continue;
+                    }
+                    let u = polygon_boolean(&acc[i], &acc[j], BoolOp::Union);
+                    let u_area: f64 = u.iter().map(|p| p.area().abs()).sum();
+                    let sum_area = acc[i].area().abs() + acc[j].area().abs();
+                    if u_area < sum_area - 1e-9 {
+                        merged = Some((i, j, u));
+                        break 'outer;
+                    }
+                }
+            }
+            match merged {
+                Some((i, j, u)) => {
+                    let last = acc.len() - 1;
+                    acc[j] = acc[last].clone();
+                    acc.swap_remove(last);
+                    acc.splice(i..i + 1, u);
+                }
+                None => break,
+            }
+        }
+
+        let geometries = acc
+            .into_iter()
+            .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+            .collect();
+        Self { geometries }
+    }
+
+    /// Check the material-disjoint invariant.
+    ///
+    /// * every hole must lie fully inside its own outer boundary,
+    /// * no two regions may claim the same material point (verified with a
+    ///   deterministic Monte-Carlo sweep over the combined bounding box).
+    pub fn validate(&self) -> Result<(), CompoundError> {
+        // Hole containment within its own outer boundary.
+        for (ri, g) in self.geometries.iter().enumerate() {
+            let g = g.apply_transforms();
+            for (hi, hole) in g.holes.iter().enumerate() {
+                let inside = hole.vertices.iter().all(|v| g.outer.contains_point(*v));
+                if !inside {
+                    return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
+                }
+            }
+        }
+
+        // Cross-region material overlap via deterministic sampling.
+        let n = self.geometries.len();
+        if n < 2 {
+            return Ok(());
+        }
+
+        let applied: Vec<Geometry> =
+            self.geometries.iter().map(|g| g.apply_transforms()).collect();
+        let mut lo_x = f64::INFINITY;
+        let mut hi_x = f64::NEG_INFINITY;
+        let mut lo_y = f64::INFINITY;
+        let mut hi_y = f64::NEG_INFINITY;
+        for g in &applied {
+            let pts: Vec<Point> = std::iter::once(g.outer.vertices.as_slice())
+                .chain(g.holes.iter().map(|h| h.vertices.as_slice()))
+                .flatten()
+                .copied()
+                .collect();
+            for p in &pts {
+                lo_x = lo_x.min(p.x);
+                hi_x = hi_x.max(p.x);
+                lo_y = lo_y.min(p.y);
+                hi_y = hi_y.max(p.y);
+            }
+        }
+        if !lo_x.is_finite() || hi_x <= lo_x && hi_y <= lo_y && false {
+            return Ok(());
+        }
+
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next_unit = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            ((rng >> 11) as f64) / (1u64 << 53) as f64
+        };
+
+        let samples = 512usize;
+        for _ in 0..samples {
+            let p = Point::new(
+                lo_x + next_unit() * (hi_x - lo_x),
+                lo_y + next_unit() * (hi_y - lo_y),
+            );
+            let mut claimed_by: Option<usize> = None;
+            for (i, g) in applied.iter().enumerate() {
+                if g.outer.contains_point(p)
+                    && !g.holes.iter().any(|h| h.contains_point(p))
+                {
+                    if let Some(prev) = claimed_by {
+                        return Err(CompoundError::OverlappingRegions {
+                            a: prev,
+                            b: i,
+                        });
+                    }
+                    claimed_by = Some(i);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Build a compound geometry from a slice of [`Section`](crate::section::Section).
