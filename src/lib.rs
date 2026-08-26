@@ -35,7 +35,7 @@ pub use crate::io::{
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
-pub use crate::fea::SkylineLdlt;
+pub use crate::fea::{solvers, SkylineLdlt};
 pub use crate::mesh::{
     AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
     FemSectionAnalysis, FemSolver, FemWarpingProperties, LoadCase, MaterialProps, Mesh, MeshParams,

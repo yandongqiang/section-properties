@@ -1403,6 +1403,7 @@ impl SkylineLdlt {
         w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
     }
 }
+pub mod solvers;
 #[cfg(test)]
 mod direct_lagrange_tests {
     use super::*;
