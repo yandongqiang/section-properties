@@ -547,6 +547,7 @@ fn solve_with_fallback(
 
 /// IC(0)-PCG solves of K w1 = f and K w2 = c, combined with the Lagrange
 /// multiplier correction (lambda = c.w2 / c.w1).
+#[allow(dead_code)]
 fn iccg_lagrange_solve(
     precond: &crate::fea::solvers::Ic0Factor,
     k_reg: &SparseMatrix,
