@@ -86,8 +86,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
     }
 
-    // Direct solver: factor once, solve omega/psi/phi (each with the
-    // Lagrange constraint) via fast skyline back-substitution.
+    // Python-style direct solve: assemble the augmented (N+1)x(N+1)
+    // Lagrangian matrix in CSC format and factor the leading K block once.
     let k_reg = {
         let mut m = k_global.compressed();
         let mut diag_avg = 0.0;
@@ -100,12 +100,13 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
         m.compressed()
     };
-    let direct = match crate::fea::SkylineLdlt::factor(&k_reg) {
+    let _k_lg = crate::fea::DirectLagrangeSolver::assemble_torsion_lagrange(&k_global, &c_global);
+    let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
         Ok(s) => Some(s),
         Err(_) => None,
     };
 
-    let omega = solve_with_fallback(&direct, &k_reg, &c_global, &f_torsion);
+    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion);
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -126,8 +127,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
     }
 
-    let psi = solve_with_fallback(&direct, &k_reg, &c_global, &f_psi);
-    let phi = solve_with_fallback(&direct, &k_reg, &c_global, &f_phi);
+    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi);
+    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi);
 
     let delta_s = 2.0 * (1.0 + nu) * (ixx * iyy - ixy * ixy);
 
@@ -320,12 +321,12 @@ pub fn compute_fem_warping_properties(
         }
         m.compressed()
     };
-    let direct = match crate::fea::SkylineLdlt::factor(&k_reg) {
+    let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
         Ok(s) => Some(s),
         Err(_) => None,
     };
 
-    let omega = solve_with_fallback(&direct, &k_reg, &c_global, &f_torsion);
+    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion);
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -346,8 +347,8 @@ let mut f_psi = vec![0.0; n];
         }
     }
 
-    let psi = solve_with_fallback(&direct, &k_reg, &c_global, &f_psi);
-    let phi = solve_with_fallback(&direct, &k_reg, &c_global, &f_phi);
+    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi);
+    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi);
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
@@ -511,12 +512,12 @@ let mut f_psi = vec![0.0; n];
 /// automatic fallback to CG when the factorised solution fails a relative
 /// residual check (ill-conditioned meshes, e.g. with sliver elements).
 fn solve_with_fallback(
-    direct: &Option<crate::fea::SkylineLdlt>,
+    solver: &Option<crate::fea::DirectLagrangeSolver>,
     k_reg: &SparseMatrix,
     c: &[f64],
     f: &[f64],
 ) -> Vec<f64> {
-    if let Some(s) = direct {
+    if let Some(s) = solver {
         let w1 = s.solve(f);
         let w2 = s.solve(c);
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
