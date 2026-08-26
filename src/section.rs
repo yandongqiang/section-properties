@@ -158,14 +158,49 @@ impl Section {
         )
     }
 
-    /// Frame properties with custom material (for composite sections).
+    /// Frame properties with transformed-section analysis for a homogeneous
+    /// material.
+    ///
+    /// Returns effective stiffnesses E·A, E·I, G·J and the mass per unit
+    /// length. The geometric properties are identical to
+    /// [`frame_properties_full`](Self::frame_properties_full) because a
+    /// single-material section has modular ratio n = 1 everywhere.
+    ///
+    /// # Errors
+    /// [`MaterialError::InvalidMaterial`] when the material fails validation.
+    ///
+    /// For multi-material (genuinely composite) sections use
+    /// [`CompositeSection::transformed_properties`](crate::section_library::CompositeSection::transformed_properties),
+    /// which applies per-group modular ratios.
     pub fn frame_properties_with_material(
         &self,
-        _material: &crate::material::Material,
-    ) -> (f64, f64, f64, f64, f64, f64) {
-        // For composite sections, would use transformed section method
-        // For now, return geometric properties
-        self.frame_properties()
+        material: &crate::material::Material,
+    ) -> Result<TransformedFrameProperties, MaterialError> {
+        if !material.is_valid() {
+            return Err(MaterialError::InvalidMaterial(format!(
+                "E={}, G={}, nu={}, rho={}",
+                material.youngs_modulus,
+                material.shear_modulus,
+                material.poissons_ratio,
+                material.density
+            )));
+        }
+
+        let fp = self.frame_properties_full();
+        let e = material.youngs_modulus;
+        let g = e / (2.0 * (1.0 + material.poissons_ratio));
+
+        Ok(TransformedFrameProperties {
+            e_ref: e,
+            area: fp.area,
+            ea: e * fp.area,
+            ei_xx: e * fp.ixx,
+            ei_yy: e * fp.iyy,
+            ei_w: e * fp.iw,
+            gj: g * fp.j,
+            mass_per_length: material.density * fp.area,
+            geometric: fp,
+        })
     }
 }
 
@@ -195,6 +230,59 @@ pub struct FrameProperties {
     pub delta_y: f64,
     /// Warping constant.
     pub iw: f64,
+}
+
+/// Error returned when a material cannot be used for transformed-section
+/// analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterialError {
+    /// Material properties failed validation (non-positive E or G, invalid
+    /// Poisson's ratio, negative density).
+    InvalidMaterial(String),
+}
+
+impl std::fmt::Display for MaterialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MaterialError::InvalidMaterial(reason) => {
+                write!(f, "invalid material: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MaterialError {}
+
+/// Effective (E-weighted) frame properties from transformed-section analysis
+/// with a single homogeneous material.
+///
+/// The geometric quantities (`area`, `ixx`, ...) are unchanged; the stiffness
+/// terms carry the material modulus:
+/// `ea = E·A`, `ei_x = E·Ixx`, ..., `ej = G·J` where `G = E / 2(1+nu)`.
+///
+/// For multi-material sections use
+/// [`CompositeSection::transformed_properties`](crate::section_library::CompositeSection::transformed_properties)
+/// which applies per-group modular ratios.
+#[derive(Debug, Clone, Copy)]
+pub struct TransformedFrameProperties {
+    /// Reference modulus used for the transformation (= material's E).
+    pub e_ref: f64,
+    /// Geometric area (unchanged by the transformation for n=1).
+    pub area: f64,
+    /// Effective axial stiffness E·A.
+    pub ea: f64,
+    /// Effective bending stiffness about x, E·Ixx.
+    pub ei_xx: f64,
+    /// Effective bending stiffness about y, E·Iyy.
+    pub ei_yy: f64,
+    /// Effective warping stiffness, E·Iw.
+    pub ei_w: f64,
+    /// Effective torsional stiffness G·J with G = E/2(1+nu).
+    pub gj: f64,
+    /// Mass per unit length rho·A.
+    pub mass_per_length: f64,
+    /// Underlying geometric frame properties.
+    pub geometric: FrameProperties,
 }
 
 impl Section {
@@ -280,5 +368,34 @@ mod tests {
         ];
         let g2 = crate::geometry::Geometry::from_points(outer, vec![hole]);
         assert!((g2.area() - 12.0).abs() < 1e-12);
+        #[test]
+    fn frame_properties_with_material_rejects_invalid() {
+        let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+        let mut bad = crate::material::Material::default();
+        bad.youngs_modulus = -1.0;
+        assert!(sec.frame_properties_with_material(&bad).is_err());
     }
+
+    #[test]
+    fn transformed_frame_properties_scale_with_e() {
+        let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+        let geo = sec.frame_properties_full();
+
+        let steel = crate::material::presets::STEEL_S355;
+        let t_steel = sec.frame_properties_with_material(&steel).unwrap();
+        assert!((t_steel.ea - steel.youngs_modulus * t_steel.area).abs() < 1e-6);
+        assert!((t_steel.ei_xx - steel.youngs_modulus * geo.ixx).abs() < 1e-9);
+        // G = E / 2(1+nu)
+        let g_expected = steel.youngs_modulus / (2.0 * (1.0 + steel.poissons_ratio));
+        assert!((t_steel.gj - g_expected * geo.j).abs() < 1e-3);
+
+        // Aluminium: E roughly 1/3 of steel -> EI scales proportionally.
+        let alu = crate::material::Material::new(69e9, 0.33, 2700.0, "alu");
+        let t_alu = sec.frame_properties_with_material(&alu).unwrap();
+        let ratio = t_alu.ei_xx / t_steel.ei_xx;
+        assert!((ratio - alu.youngs_modulus / steel.youngs_modulus).abs() < 1e-9);
+        // Mass uses density
+        assert!((t_alu.mass_per_length - 2700.0 * t_alu.area).abs() < 1e-9);
+    }}
+
 }

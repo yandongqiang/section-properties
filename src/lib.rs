@@ -48,7 +48,7 @@ pub use crate::plastic::{
     PlasticProperties, PlasticSection, SectionClass, SectionClassification, StressDistribution,
     TorsionAnalysis, WarpingProperties, aisc360, classify_section, effective, en1993,
 };
-pub use crate::section::{FrameProperties, Section};
+pub use crate::section::{FrameProperties, MaterialError, Section, TransformedFrameProperties};
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{
     GeometricProperties, GyrationProperties, PrincipalProperties, SectionProperties,
