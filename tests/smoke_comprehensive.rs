@@ -311,3 +311,45 @@ fn smoke_solver_backends_agree() {
         assert!((reference[i] - x_pcg[i]).abs() < 1e-6, "PCG i={}", i);
     }
 }
+
+#[test]
+fn smoke_split_section() {
+    use section_properties::Geometry;
+    let rect = RectangularSection::new(0.2, 0.1).build();
+    let g = Geometry::from_section(&rect);
+    // Horizontal line through the middle.
+    let (below, above) = g.split_section(Point::new(0.0, 0.05), Point::new(1.0, 0.05));
+    let a_b = below.map(|x| x.area()).unwrap_or(0.0);
+    let a_a = above.map(|x| x.area()).unwrap_or(0.0);
+    assert!((a_b - 0.01).abs() < 1e-9, "below={}", a_b);
+    assert!((a_a - 0.01).abs() < 1e-9, "above={}", a_a);
+
+    // Line entirely outside: one side keeps everything, the other is empty.
+    let (s1, s2) = g.split_section(Point::new(0.0, 5.0), Point::new(1.0, 5.0));
+    let v1 = s1.map(|x| x.area()).unwrap_or(0.0);
+    let v2 = s2.map(|x| x.area()).unwrap_or(0.0);
+    assert!(
+        (v1 - 0.02).abs() < 1e-9 && v2 == 0.0 || (v2 - 0.02).abs() < 1e-9 && v1 == 0.0,
+        "outside line should leave one full side"
+    );
+}
+
+#[test]
+fn smoke_fibre_section() {
+    use section_properties::post::{to_fibre_section, total_area};
+    use section_properties::MeshParams;
+    let sec = ISection::from_designation("IPE300").unwrap().build();
+    let fibres = to_fibre_section(&sec, MeshParams { target_size: 0.03, ..Default::default() });
+    let total = total_area(&fibres);
+    assert!(rel(total, 5.38e-3) < 0.01, "fibre area {}", total);
+}
+
+#[test]
+fn smoke_mass_property() {
+    // Python get_mass = area * density
+    let sec = RectangularSection::new(0.2, 0.1).build();
+    let props = SectionProperties::from_section(&sec);
+    let density = 7850.0;
+    let mass_per_m = props.area * density;
+    assert!((mass_per_m - 157.0).abs() < 0.1);
+}

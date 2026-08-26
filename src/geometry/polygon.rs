@@ -317,6 +317,88 @@ impl Polygon {
             .map(|v| (v.x - centroid.x).abs())
             .fold(0.0, f64::max)
     }
+    /// Clip the polygon against the half-plane `nx*x + ny*y <= c`
+    /// (`below = true`) or `>= c` (`below = false`), using
+    /// Sutherland-Hodgman clipping. Returns `None` when nothing remains.
+    pub fn clip_halfspace(&self, n_x: f64, n_y: f64, c: f64, below: bool) -> Option<Polygon> {
+        let verts = &self.vertices;
+        if verts.is_empty() {
+            return None;
+        }
+
+        let side = |p: &Point| -> f64 { n_x * p.x + n_y * p.y - c };
+
+        let mut out: Vec<Point> = Vec::new();
+        let s = verts.len();
+        let mut prev = verts[s - 1];
+        let mut prev_inside = if below {
+            side(&prev) <= 0.0
+        } else {
+            side(&prev) >= 0.0
+        };
+
+        for cur in verts.iter() {
+            let cur_inside = if below {
+                side(cur) <= 0.0
+            } else {
+                side(cur) >= 0.0
+            };
+            if prev_inside != cur_inside {
+                // Intersection with the cutting line.
+                let dp = side(&prev);
+                let dc = side(cur);
+                let t = dp / (dp - dc);
+                out.push(Point::new(
+                    prev.x + t * (cur.x - prev.x),
+                    prev.y + t * (cur.y - prev.y),
+                ));
+            }
+            if cur_inside {
+                out.push(*cur);
+            }
+            prev = *cur;
+            prev_inside = cur_inside;
+        }
+
+        if out.len() < 3 {
+            return None;
+        }
+
+        // Drop degenerate slivers safely.
+        let area: f64 = out
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let q = &out[(i + 1) % out.len()];
+                p.x * q.y - q.x * p.y
+            })
+            .sum::<f64>()
+            / 2.0;
+        if area.abs() < 1e-14 {
+            return None;
+        }
+
+        Some(Polygon::new(out))
+    }
+
+    /// Split the polygon into the two halves lying either side of the line
+    /// through points `a` and `b`.
+    ///
+    /// Returns `(below, above)`; either side may be `None` when the line does
+    /// not cut the polygon. Mirrors Python `bisect_section` helpers used by
+    /// `Section.split_section`.
+    pub fn split_by_line(&self, a: Point, b: Point) -> (Option<Polygon>, Option<Polygon>) {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let len = (dx * dx + dy * dy).sqrt().max(1e-15);
+        let n_x = dy / len;
+        let n_y = -dx / len;
+        let c = n_x * a.x + n_y * a.y;
+        (
+            self.clip_halfspace(n_x, n_y, c, true),
+            self.clip_halfspace(n_x, n_y, c, false),
+        )
+    }
 }
 
 /// Helper function to check if a point is on a line segment.

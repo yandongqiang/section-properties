@@ -6,6 +6,7 @@ pub mod geometry;
 pub mod io;
 pub mod material;
 pub mod mesh;
+pub mod post;
 pub mod plastic;
 pub mod section;
 pub mod section_library;

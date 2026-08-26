@@ -177,6 +177,38 @@ impl Geometry {
         Some(Self { outer, holes, transforms: Vec::new() })
     }
 
+    /// Split the geometry into two halves either side of the line through
+    /// points `a` and `b`.
+    ///
+    /// Mirrors `Geometry.split_section(point_a, point_b)`. Returns
+    /// `(below, above)`; each side is `None` when empty.
+    pub fn split_section(
+        &self,
+        a: Point,
+        b: Point,
+    ) -> (Option<Geometry>, Option<Geometry>) {
+        let g = self.apply_transforms();
+        let (below_outer, above_outer) = g.outer.split_by_line(a, b);
+
+        // Clip each hole and attach the matching half to its side.
+        let mut below_holes = Vec::new();
+        let mut above_holes = Vec::new();
+        for h in &g.holes {
+            let (hb, ha) = h.split_by_line(a, b);
+            if let Some(hb) = hb {
+                below_holes.push(hb);
+            }
+            if let Some(ha) = ha {
+                above_holes.push(ha);
+            }
+        }
+
+        let below = below_outer
+            .map(|o| Geometry { outer: o, holes: below_holes, transforms: Vec::new() });
+        let above = above_outer
+            .map(|o| Geometry { outer: o, holes: above_holes, transforms: Vec::new() });
+        (below, above)
+    }
     /// Boolean union with `other`.
     ///
     /// Mirrors `Geometry | other` (shapely `union`). Operates on the outer

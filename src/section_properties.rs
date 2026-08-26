@@ -475,6 +475,12 @@ impl SectionProperties {
         s
     }
 
+    /// Mass per unit length: area * density [kg/m].
+    ///
+    /// Mirrors Python `Section.get_mass()`.
+    pub fn mass(&self, density: f64) -> f64 {
+        self.area * density
+    }
     /// Print the properties table to stdout.
     ///
     /// Mirrors Python `Section.print_results()`.
