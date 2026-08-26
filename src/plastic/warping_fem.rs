@@ -5,7 +5,7 @@
 //! functions ψ, φ, then computes J, Iw, shear centre, shear areas and monosymmetry
 //! constants via Gaussian quadrature.
 
-use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, solve_lagrange_sparse_tol, tri3_to_tri6};
+use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6};
 use crate::geometry::Point;
 use crate::mesh::{MeshParams, mesh_section};
 use crate::section::Section;
@@ -36,9 +36,9 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
-    let min_edge = min_edge_length(section);
+    let _min_edge = min_edge_length(section);
     let _ = props;
-    let target_size = (max_dim / 8.0).min(min_edge * 1.5).max(1e-4);
+    let target_size = (max_dim / 8.0).max(1e-4);
 
     // Bridged triangulation keeps hole boundaries as exact mesh edges.
     let base_mesh = mesh_section(
@@ -86,7 +86,26 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
     }
 
-    let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
+    // Direct solver: factor once, solve omega/psi/phi (each with the
+    // Lagrange constraint) via fast skyline back-substitution.
+    let k_reg = {
+        let mut m = k_global.compressed();
+        let mut diag_avg = 0.0;
+        for i in 0..n {
+            diag_avg += m.matvec_diag(i);
+        }
+        let eps = diag_avg.max(1e-300) / n as f64 * 1e-9;
+        for i in 0..n {
+            m.add(i, i, eps);
+        }
+        m.compressed()
+    };
+    let direct = match crate::fea::SkylineLdlt::factor(&k_reg) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    };
+
+    let omega = solve_with_fallback(&direct, &k_reg, &c_global, &f_torsion);
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -107,8 +126,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
     }
 
-    let psi = solve_lagrange_sparse(&k_global, &c_global, &f_psi);
-    let phi = solve_lagrange_sparse(&k_global, &c_global, &f_phi);
+    let psi = solve_with_fallback(&direct, &k_reg, &c_global, &f_psi);
+    let phi = solve_with_fallback(&direct, &k_reg, &c_global, &f_phi);
 
     let delta_s = 2.0 * (1.0 + nu) * (ixx * iyy - ixy * ixy);
 
@@ -222,9 +241,9 @@ pub fn compute_fem_warping_properties(
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
-    let min_edge = min_edge_length(section);
+    let _min_edge = min_edge_length(section);
     let _ = props;
-    let target_size = (max_dim / 8.0).min(min_edge * 1.5).max(1e-4);
+    let target_size = (max_dim / 8.0).max(1e-4);
     
 
     let mesh = mesh_section(
@@ -288,7 +307,25 @@ pub fn compute_fem_warping_properties(
         }
     }
 
-let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
+    // Direct solver: factor once, solve omega/psi/phi.
+    let k_reg = {
+        let mut m = k_global.compressed();
+        let mut diag_avg = 0.0;
+        for i in 0..n {
+            diag_avg += m.matvec_diag(i);
+        }
+        let eps = diag_avg.max(1e-300) / n as f64 * 1e-9;
+        for i in 0..n {
+            m.add(i, i, eps);
+        }
+        m.compressed()
+    };
+    let direct = match crate::fea::SkylineLdlt::factor(&k_reg) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    };
+
+    let omega = solve_with_fallback(&direct, &k_reg, &c_global, &f_torsion);
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -297,7 +334,6 @@ let omega = solve_lagrange_sparse(&k_global, &c_global, &f_torsion);
         .sum();
     let j = ixx + iyy - omega_dot_f;
 
-    let _t_s2 = std::time::Instant::now();
 let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
 
@@ -310,8 +346,8 @@ let mut f_psi = vec![0.0; n];
         }
     }
 
-    let psi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_psi, 1e-7);
-    let phi = solve_lagrange_sparse_tol(&k_global, &c_global, &f_phi, 1e-7);
+    let psi = solve_with_fallback(&direct, &k_reg, &c_global, &f_psi);
+    let phi = solve_with_fallback(&direct, &k_reg, &c_global, &f_phi);
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
@@ -470,3 +506,37 @@ let mut f_psi = vec![0.0; n];
 
 
 
+
+/// Solve the Lagrangian system preferring the direct skyline solver, with an
+/// automatic fallback to CG when the factorised solution fails a relative
+/// residual check (ill-conditioned meshes, e.g. with sliver elements).
+fn solve_with_fallback(
+    direct: &Option<crate::fea::SkylineLdlt>,
+    k_reg: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+) -> Vec<f64> {
+    if let Some(s) = direct {
+        let w1 = s.solve(f);
+        let w2 = s.solve(c);
+        let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+        let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+        if ct_w1.abs() > 1e-15 {
+            let lambda = ct_w2 / ct_w1;
+            let u: Vec<f64> =
+                w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
+            // Relative residual of K u - f + lambda c = 0.
+            let prod = k_reg.matvec(&u);
+            let mut worst = 0.0f64;
+            let mut f_norm = 0.0f64;
+            for i in 0..prod.len() {
+                worst = worst.max((prod[i] - f[i] + lambda * c[i]).abs());
+                f_norm = f_norm.max(f[i].abs());
+            }
+            if worst <= 1e-6 * f_norm.max(1e-300) {
+                return u;
+            }
+        }
+    }
+    solve_lagrange_sparse(k_reg, c, f)
+}

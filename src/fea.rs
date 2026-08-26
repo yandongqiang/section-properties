@@ -714,9 +714,12 @@ pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Vec<T
 #[derive(Debug, Clone)]
 pub struct SparseMatrix {
     pub n: usize,
-    rows: Vec<usize>,
-    cols: Vec<usize>,
-    vals: Vec<f64>,
+    /// Assembled row indices (may contain duplicates).
+    pub rows: Vec<usize>,
+    /// Assembled column indices (may contain duplicates).
+    pub cols: Vec<usize>,
+    /// Assembled values (may contain duplicates).
+    pub vals: Vec<f64>,
 }
 
 impl SparseMatrix {
@@ -760,7 +763,7 @@ impl SparseMatrix {
         (row_ptr, cols, vals)
     }
 
-    /// Matrix-vector product into a caller-provided buffer (no alloc).'
+    /// Matrix-vector product into a caller-provided buffer (no alloc).
     pub fn matvec_into(&self, x: &[f64], y: &mut [f64]) {
         for v in y.iter_mut() {
             *v = 0.0;
@@ -1007,6 +1010,345 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Reverse Cuthill-McKee ordering for bandwidth reduction.
+///
+/// Returns `perm` where `perm[new_index] = old_index`.
+fn rcm_order(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
+    let mut visited = vec![false; n];
+    let mut perm: Vec<usize> = Vec::with_capacity(n);
+
+    if n == 0 {
+        return perm;
+    }
+
+    let mut bfs_farthest = |from: usize| -> usize {
+        for v in visited.iter_mut() {
+            *v = false;
+        }
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from);
+        visited[from] = true;
+        let mut last = from;
+        while let Some(u) = queue.pop_front() {
+            for &w in &adj[u] {
+                if !visited[w] {
+                    visited[w] = true;
+                    queue.push_back(w);
+                    last = w;
+                }
+            }
+        }
+        last
+    };
+
+    let mut start = 0;
+    while start < n && adj[start].is_empty() {
+        start += 1;
+    }
+    if start >= n {
+        return (0..n).collect();
+    }
+
+    let peripheral = {
+        let far = bfs_farthest(start);
+        bfs_farthest(far)
+    };
+
+    for v in visited.iter_mut() {
+        *v = false;
+    }
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(peripheral);
+    visited[peripheral] = true;
+    while let Some(u) = queue.pop_front() {
+        perm.push(u);
+        let mut nbrs: Vec<usize> =
+            adj[u].iter().filter(|&&w| !visited[w]).copied().collect();
+        nbrs.sort_by_key(|&w| adj[w].len());
+        for w in nbrs {
+            visited[w] = true;
+            queue.push_back(w);
+        }
+    }
+    for i in 0..n {
+        if !visited[i] {
+            perm.push(i);
+        }
+    }
+
+    perm.reverse();
+    perm
+}
+
+/// Skyline (profile) LDL^T direct solver for sparse SPD matrices.
+///
+/// Factor once with [`SkylineLdlt::factor`], solve any number of right-hand
+/// sides with [`SkylineLdlt::solve`]. RCM ordering keeps the profile small,
+/// which makes 2D FE meshes (moderate bandwidth) very fast.
+pub struct SkylineLdlt {
+    n: usize,
+    diag: Vec<f64>,
+    /// First (permuted) column index stored in each row.
+    first: Vec<usize>,
+    /// Row-major skyline values for columns [first[i], i).
+    lower: Vec<f64>,
+    /// Offset of row i's segment within `lower`.
+    row_start: Vec<usize>,
+    /// RCM permutation: perm[new_index] = original_index.
+    perm: Vec<usize>,
+}
+
+impl SkylineLdlt {
+    pub fn factor(matrix: &SparseMatrix) -> Result<Self, crate::mesh::fem::FemError> {
+        use std::collections::HashMap;
+
+        let n = matrix.n;
+
+        // Compress duplicate triplets.
+        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
+        for k in 0..matrix.rows.len() {
+            *map
+                .entry((matrix.rows[k], matrix.cols[k]))
+                .or_insert(0.0) += matrix.vals[k];
+        }
+
+        // Adjacency for RCM.
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(r, c) in map.keys() {
+            if r != c {
+                adj[r].push(c);
+            }
+        }
+        for a in adj.iter_mut() {
+            a.sort_unstable();
+            a.dedup();
+        }
+        let perm = rcm_order(n, &adj);
+
+        let mut old_to_new = vec![0usize; n];
+        for (new_idx, &old_idx) in perm.iter().enumerate() {
+            old_to_new[old_idx] = new_idx;
+        }
+
+        // Skyline profile of the permuted lower triangle.
+        let mut first = vec![n; n];
+        for &(r, c) in map.keys() {
+            let i = old_to_new[r];
+            let j = old_to_new[c];
+            let (hi, lo) = if i > j { (i, j) } else { (j, i) };
+            if hi != lo && lo < first[hi] {
+                first[hi] = lo;
+            }
+        }
+        for i in 0..n {
+            if first[i] > i {
+                first[i] = i;
+            }
+        }
+
+        let mut row_start = vec![0usize; n + 1];
+        for i in 0..n {
+            row_start[i + 1] = row_start[i] + (i - first[i]);
+        }
+        let mut lower = vec![0.0; row_start[n]];
+        let mut diag = vec![0.0; n];
+
+        // Scatter original values into the skyline (lower triangle).
+        for (&(r, c), &v) in map.iter() {
+            let i = old_to_new[r];
+            let j = old_to_new[c];
+            if i > j {
+                lower[row_start[i] + (j - first[i])] = v;
+            } else if j > i {
+                lower[row_start[j] + (i - first[j])] = v;
+            } else {
+                diag[i] = v;
+            }
+        }
+
+        // In-place Crout LDL^T factorisation.
+        for i in 0..n {
+            let rs_i = row_start[i];
+            for k in first[i]..i {
+                let rs_k = row_start[k];
+                let j0 = first[i].max(first[k]);
+                let mut s = lower[rs_i + (k - first[i])];
+                for j in j0..k {
+                    s -= lower[rs_i + (j - first[i])] * lower[rs_k + (j - first[k])] * diag[j];
+                }
+                if diag[k].abs() < 1e-300 {
+                    return Err(crate::mesh::fem::FemError::SingularMatrix);
+                }
+                lower[rs_i + (k - first[i])] = s / diag[k];
+            }
+            let mut d = diag[i];
+            for k in first[i]..i {
+                let l_ik = lower[rs_i + (k - first[i])];
+                d -= l_ik * l_ik * diag[k];
+            }
+            if !(d > 0.0) || !d.is_finite() {
+                return Err(crate::mesh::fem::FemError::SingularMatrix);
+            }
+            diag[i] = d;
+        }
+
+        Ok(Self { n, diag, first, lower, row_start, perm })
+    }
+
+    /// Solve A x = b.
+    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+        let n = self.n;
+        debug_assert_eq!(b.len(), n);
+
+        // Permute the right-hand side into the RCM ordering.
+        let mut x: Vec<f64> = self.perm.iter().map(|&old| b[old]).collect();
+        for i in 0..n {
+            let rs = self.row_start[i];
+            let mut s = x[i];
+            for k in self.first[i]..i {
+                s -= self.lower[rs + (k - self.first[i])] * x[k];
+            }
+            x[i] = s;
+        }
+        // Diagonal scaling.
+        for i in 0..n {
+            x[i] /= self.diag[i];
+        }
+        // Backward substitution: L^T x = y via scattered updates.
+        for i in (0..n).rev() {
+            let rs = self.row_start[i];
+            let xi = x[i];
+            if xi != 0.0 {
+                for k in self.first[i]..i {
+                    x[k] -= self.lower[rs + (k - self.first[i])] * xi;
+                }
+            }
+        }
+        // Inverse permutation back to the original ordering.
+        let mut out = vec![0.0; n];
+        for (new_idx, &old_idx) in self.perm.iter().enumerate() {
+            out[old_idx] = x[new_idx];
+        }
+        out
+    }
+
+    /// Solve with a Lagrange multiplier constraint vector, mirroring
+    /// [`solve_lagrange_sparse`]: u = w1 - lambda * w2 with
+    /// lambda = (c.w2)/(c.w1).
+    pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Vec<f64> {
+        let w1 = self.solve(f);
+        let w2 = self.solve(c);
+        let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+        let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+        if ct_w1.abs() < 1e-15 {
+            return w1;
+        }
+        let lambda = ct_w2 / ct_w1;
+        w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
+    }
+}
+#[cfg(test)]
+mod skyline_tests {
+    use super::*;
+
+    #[test]
+    fn skyline_debug_4x4() {
+        let mut a = SparseMatrix::new(4);
+        let entries = [
+            (0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (3, 3, 7.0),
+            (0, 1, 1.0), (1, 0, 1.0),
+            (1, 2, 2.0), (2, 1, 2.0),
+            (2, 3, 1.0), (3, 2, 1.0),
+        ];
+        for &(r, c, v) in &entries { a.add(r, c, v); }
+        let s = SkylineLdlt::factor(&a).unwrap();
+        eprintln!("perm-like diag={:?} first={:?} lower={:?}", s.diag, s.first, s.lower);
+        let x = s.solve(&[1.0,2.0,3.0,4.0]);
+        eprintln!("x={:?} expected~[0.1934,0.2264,0.3374,0.5232]", x);
+    }
+
+    #[test]
+    fn skyline_matches_direct_dense_solve() {
+        // SPD matrix: A = [[4,1,0,0],[1,5,2,0],[0,2,6,1],[0,0,1,7]]
+        let mut a = SparseMatrix::new(4);
+        let entries = [
+            (0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (3, 3, 7.0),
+            (0, 1, 1.0), (1, 0, 1.0),
+            (1, 2, 2.0), (2, 1, 2.0),
+            (2, 3, 1.0), (3, 2, 1.0),
+        ];
+        for &(r, c, v) in &entries {
+            a.add(r, c, v);
+        }
+        let solver = SkylineLdlt::factor(&a).unwrap();
+
+        // Solve two right-hand sides and verify A x = b.
+        for b in [vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]] {
+            let x = solver.solve(&b);
+            // residual check
+            for row in 0..4 {
+                let mut sum = 0.0;
+                for &(r, c, v) in &entries {
+                    if r == row {
+                        sum += v * x[c];
+                    }
+                }
+                assert!((sum - b[row]).abs() < 1e-10, "row {} got {} (x={:?})", row, sum - b[row], x);
+            }
+        }
+
+        // Compare against CG
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+        let x_cg = cg_solve(&a.compressed(), &b, 2000, 1e-12);
+        let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b);
+        for i in 0..4 {
+            assert!((x_cg[i] - x_dir[i]).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn skyline_lagrange_matches_sparse() {
+        // Small FE-like Laplacian path with constraint vector.
+        let n = 20;
+        let mut k = SparseMatrix::new(n);
+        for i in 0..n {
+            k.add(i, i, 2.0);
+            if i + 1 < n {
+                k.add(i, i + 1, -1.0);
+                k.add(i + 1, i, -1.0);
+            }
+        }
+        let c: Vec<f64> = (0..n).map(|i| 1.0).collect();
+        let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 0.05).collect();
+
+        // High-precision CG reference
+        let k_reg = {
+            let mut m = k.compressed();
+            for i in 0..n {
+                m.add(i, i, 1e-10);
+            }
+            m.compressed()
+        };
+        let w1 = cg_solve(&k_reg, &f, 200000, 1e-13);
+        let w2 = cg_solve(&k_reg, &c, 200000, 1e-13);
+        let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+        let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+        let lambda = ct_w2 / ct_w1;
+        let u_ref: Vec<f64> =
+            w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
+
+        let u_dir = SkylineLdlt::factor(&k).unwrap().solve_lagrange(&c, &f);
+        for i in 0..n {
+            assert!(
+                (u_ref[i] - u_dir[i]).abs() < 1e-7,
+                "i={} ref={:.12} dir={:.12}",
+                i,
+                u_ref[i],
+                u_dir[i]
+            );
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

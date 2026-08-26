@@ -1017,11 +1017,11 @@ mod tests {
         // Verify it's detected as thin-walled
         assert!(section.is_thin_walled(), "section should be thin-walled");
 
-        // Shear center should be outside the web (negative x)
-        // FEM with coarse mesh may give near-zero value for very thin-walled sections
+        // Shear centre must lie behind the web (negative x) within one
+        // flange width.
         assert!(
-            props.shear_center.x < 1e-6,
-            "channel shear center x should be negative or near-zero, got {}",
+            props.shear_center.x < 1e-6 && props.shear_center.x.abs() < b,
+            "channel shear center x should be behind the web, got {}",
             props.shear_center.x
         );
 

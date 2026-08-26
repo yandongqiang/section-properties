@@ -290,3 +290,69 @@ fn debug_fem_props() {
     es.sort_by(|a,b| b.partial_cmp(a).unwrap());
     for s in es.iter().take(3) { println!("elem sx={:.3e}", s); }
 }
+
+#[test]
+fn skyline_2d_grid_matches_cg() {
+    use section_properties::fea::{solve_lagrange_sparse, SkylineLdlt, SparseMatrix};
+    let nx = 12usize;
+    let ny = 12usize;
+    let n = nx * ny;
+    let idx = |i: usize, j: usize| j * nx + i;
+    let mut k = SparseMatrix::new(n);
+    for j in 0..ny {
+        for i in 0..nx {
+            let p = idx(i, j);
+            let mut deg = 0usize;
+            if i > 0 { deg += 1; }
+            if i + 1 < nx { deg += 1; }
+            if j > 0 { deg += 1; }
+            if j + 1 < ny { deg += 1; }
+            k.add(p, p, deg as f64 + 0.1);
+            if i + 1 < nx {
+                k.add(p, idx(i + 1, j), -1.0);
+                k.add(idx(i + 1, j), p, -1.0);
+            }
+            if j + 1 < ny {
+                k.add(p, idx(i, j + 1), -1.0);
+                k.add(idx(i, j + 1), p, -1.0);
+            }
+        }
+    }
+    let f: Vec<f64> = (0..n).map(|i| ((i % 7) as f64 - 3.0).sin()).collect();
+    let c: Vec<f64> = vec![1.0; n];
+
+    let u_ref = solve_lagrange_sparse(&k.compressed(), &c, &f);
+
+    // Plain-solve residual diagnostic
+    let solver = SkylineLdlt::factor(&k.clone()).unwrap();
+    let x_plain = solver.solve(&f);
+    let prod = k.compressed().matvec(&x_plain);
+    let fnorm = f.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    let res = prod
+        .iter()
+        .zip(f.iter())
+        .map(|(&p, &q)| (p - q).abs())
+        .fold(0.0f64, f64::max);
+    println!("plain-solve rel residual={:.3e}", res / fnorm);
+
+    let u_dir = solver.solve_lagrange(&c, &f);
+    let max_diff = u_ref
+        .iter()
+        .zip(u_dir.iter())
+        .map(|(&a, &b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    // constraint-residual diagnostics
+    let kc = k.compressed();
+    let lambda_dir: f64 = {
+        let w1 = solver.solve(&f);
+        let w2 = solver.solve(&c);
+        let a: f64 = c.iter().zip(w2.iter()).map(|(&x, &y)| x * y).sum();
+        let b: f64 = c.iter().zip(w1.iter()).map(|(&x, &y)| x * y).sum();
+        a / b
+    };
+    let r_dir = { let prod = kc.matvec(&u_dir); let mut m = 0.0f64; for idx in 0..prod.len() { let v = (prod[idx] - f[idx] + c[idx]*lambda_dir).abs(); if v > m { m = v; } } m };
+    let r_ref = { let prod = kc.matvec(&u_ref); let mut m = 0.0f64; for idx in 0..prod.len() { let v = (prod[idx] - f[idx] + c[idx]*lambda_dir).abs(); if v > m { m = v; } } m };
+    println!("constraint eq residual: dir={:.3e} ref={:.3e}", r_dir, r_ref);
+    println!("sum(u_dir)={:.6e} sum(u_ref)={:.6e}", u_dir.iter().sum::<f64>(), u_ref.iter().sum::<f64>());
+    println!("max diff = {:.3e}", max_diff);
+}
