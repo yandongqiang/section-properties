@@ -133,8 +133,8 @@ impl InteractionDiagram {
         // that gives the correct compression area and moment capacity
 
         // Simplified: generate points by varying PNA angle
-        for i in 0..36 {
-            let theta = i as f64 * std::f64::consts::PI / 18.0; // 0 to 350 degrees
+        for i in 0..360 {
+            let theta = i as f64 * std::f64::consts::PI / 180.0; // 0 to 359 degrees
 
             // PNA line: n_x * x + n_y * y = c
             let n_x = theta.cos();
@@ -301,6 +301,10 @@ impl InteractionDiagram {
     }
 
     /// Compute moments from PNA definition.
+    ///
+    /// Exact: clips the section (with signed hole handling) against the two
+    /// half-planes defined by the PNA and integrates first moments from the
+    /// clipped polygon centroids. Replaces the former 200x200 grid sampling.
     fn moments_from_pna(
         &self,
         _plastic: &PlasticSection,
@@ -309,35 +313,32 @@ impl InteractionDiagram {
         c: f64,
         fy: f64,
     ) -> (f64, f64) {
-        let n = 200;
-        let (min_x, max_x, min_y, max_y) = self.section.bounds();
-
-        let dx = (max_x - min_x) / n as f64;
-        let dy = (max_y - min_y) / n as f64;
-
         let props = crate::section_properties::SectionProperties::from_section(&self.section);
         let cx = props.centroid.x;
         let cy = props.centroid.y;
 
+        // First moment of a polygon about the centroidal axes:
+        // M = A * (centroid - centroid_ref), accumulated with signed areas
+        // so holes subtract automatically.
+        let moment = |poly: &Polygon| -> (f64, f64) {
+            let a = poly.signed_area();
+            let cent = poly.centroid();
+            (a * (cent.y - cy), a * (cent.x - cx))
+        };
+
         let mut mx = 0.0;
         let mut my = 0.0;
 
-        for i in 0..n {
-            for j in 0..n {
-                let x = min_x + (i as f64 + 0.5) * dx;
-                let y = min_y + (j as f64 + 0.5) * dy;
-                let point = Point::new(x, y);
-
-                if self.section.contains_point(point) {
-                    let proj = n_x * x + n_y * y;
-
-                    // Stress: +fy in compression, -fy in tension
-                    let stress = if proj <= c { fy } else { -fy };
-
-                    // Moments about centroid
-                    mx += stress * (y - cy) * dx * dy;
-                    my += stress * (x - cx) * dx * dy;
-                }
+        for poly in std::iter::once(&self.section.outer).chain(self.section.holes.iter()) {
+            if let Some(below) = poly.clip_halfspace(n_x, n_y, c, true) {
+                let (mx_b, my_b) = moment(&below);
+                my += fy * my_b;
+                mx += fy * mx_b;
+            }
+            if let Some(above) = poly.clip_halfspace(n_x, n_y, c, false) {
+                let (mx_a, my_a) = moment(&above);
+                my -= fy * my_a;
+                mx -= fy * mx_a;
             }
         }
 
@@ -396,23 +397,24 @@ impl InteractionDiagram {
         let mut min_scale = f64::INFINITY;
         for pt in &self.surface_points {
             let mut scale = 0.0f64;
-            let mut any = false;
+            let mut covers = true;
             for (load_c, cap_c) in [
                 (ln, pt.n),
                 (lmx, pt.mx),
                 (lmy, pt.my),
             ] {
-                if cap_c > 0.0 {
-                    any = true;
-                    scale = scale.max(load_c / (cap_c / gamma_m0));
-                } else if load_c > 0.0 {
-                    // Demand in a direction this point has no capacity for:
-                    // this point cannot cover the load.
-                    any = false;
+                // Compare magnitudes: the surface orientation (sign) depends
+                // on the PNA sweep angle and is irrelevant for capacity.
+                let cap_abs = cap_c.abs() / gamma_m0;
+                if cap_abs > 0.0 {
+                    scale = scale.max(load_c.abs() / cap_abs);
+                } else if load_c.abs() > 0.0 {
+                    // Demand in a direction this point has no capacity for.
+                    covers = false;
                     break;
                 }
             }
-            if any && scale < min_scale {
+            if covers && scale < min_scale {
                 min_scale = scale;
             }
         }

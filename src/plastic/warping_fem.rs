@@ -539,7 +539,78 @@ fn solve_with_fallback(
             }
         }
     }
+    // CG fallback: plain Jacobi-CG meets the strict accuracy requirements of
+    // the warping solution; IC(0)-PCG remains available via fea::solvers for
+    // less sensitive systems.
     solve_lagrange_sparse(k_reg, c, f)
+}
+
+/// IC(0)-PCG solves of K w1 = f and K w2 = c, combined with the Lagrange
+/// multiplier correction (lambda = c.w2 / c.w1).
+fn iccg_lagrange_solve(
+    precond: &crate::fea::solvers::Ic0Factor,
+    k_reg: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+) -> Vec<f64> {
+    let n = f.len();
+    let (row_ptr, cols, vals) = k_reg.compressed().to_csr();
+    let matvec = |p: &[f64], out: &mut [f64]| {
+        for row in 0..n {
+            let mut s = 0.0;
+            for kk in row_ptr[row]..row_ptr[row + 1] {
+                s += vals[kk] * p[cols[kk]];
+            }
+            out[row] = s;
+        }
+    };
+
+    let solve_one = |b: &[f64]| -> Vec<f64> {
+        let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let mut x = vec![0.0f64; n];
+        if b_norm == 0.0 {
+            return x;
+        }
+        let mut r = b.to_vec();
+        let mut z = precond.solve(&r);
+        let mut p = z.clone();
+        let mut rz: f64 = r.iter().zip(z.iter()).map(|(&a, &b)| a * b).sum();
+        let mut ap = vec![0.0f64; n];
+        for _ in 0..((n * 4).clamp(1000, 60000)) {
+            matvec(&p, &mut ap);
+            let pap: f64 = p.iter().zip(ap.iter()).map(|(&a, &b)| a * b).sum();
+            if pap.abs() <= 0.0 {
+                break;
+            }
+            let alpha = rz / pap;
+            for i in 0..n {
+                x[i] += alpha * p[i];
+                r[i] -= alpha * ap[i];
+            }
+            let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if rn < 1e-7 * b_norm {
+                break;
+            }
+            z = precond.solve(&r);
+            let rz_new: f64 = r.iter().zip(z.iter()).map(|(&a, &b)| a * b).sum();
+            if rz == 0.0 {
+                break;
+            }
+            let beta = rz_new / rz;
+            for i in 0..n {
+                p[i] = z[i] + beta * p[i];
+            }
+            rz = rz_new;
+        }
+        x
+    };
+
+    let w1 = solve_one(f);
+    let w2 = solve_one(c);
+    let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+    let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+    let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
+    w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
 }
 
 /// Render the warping function ω as a filled-contour SVG for the section.

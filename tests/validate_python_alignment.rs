@@ -356,3 +356,37 @@ fn skyline_2d_grid_matches_cg() {
     println!("sum(u_dir)={:.6e} sum(u_ref)={:.6e}", u_dir.iter().sum::<f64>(), u_ref.iter().sum::<f64>());
     println!("max diff = {:.3e}", max_diff);
 }
+
+#[test]
+#[test]
+fn debug_surface_values() {
+    let rect = RectangularSection::new(0.1, 0.2).build();
+    let diagram = section_properties::plastic::InteractionDiagram::new(rect, STEEL_S355);
+    println!("m_x_rd={:.4e} npts={}", diagram.m_x_rd, diagram.surface_points.len());
+    let mxmax = diagram.surface_points.iter().map(|p| p.mx.abs()).fold(0.0f64, f64::max);
+    let mymax = diagram.surface_points.iter().map(|p| p.my.abs()).fold(0.0f64, f64::max);
+    println!("max|mx|={:.4e} max|my|={:.4e}", mxmax, mymax);
+    // n=0 slice extremes
+    for (i,p) in diagram.surface_points.iter().enumerate() {
+        if p.n.abs() < 1e-12 && p.mx.abs() > 3.0e5 {
+            println!("big-mx pt[{}] mx={:+.4e}", i, p.mx);
+        }
+    }
+}
+#[test]
+fn debug_clip_halves() {
+    use section_properties::{Polygon, Point};
+    let poly = Polygon::new(vec![
+        Point::new(-0.05,-0.1), Point::new(0.05,-0.1),
+        Point::new(0.05,0.1), Point::new(-0.05,0.1),
+    ]);
+    // horizontal line y=0 -> nx=0, ny=-1, c=0
+    let below = poly.clip_halfspace(0.0, -1.0, 0.0, true);
+    let above = poly.clip_halfspace(0.0, -1.0, 0.0, false);
+    println!("below area={:?} above area={:?}",
+        below.map(|p| p.area()), above.map(|p| p.area()));
+    // vertical line x=0 -> nx=1, ny=0
+    let l = poly.clip_halfspace(1.0, 0.0, 0.0, true);
+    let r = poly.clip_halfspace(1.0, 0.0, 0.0, false);
+    println!("left={:?} right={:?}", l.map(|p|p.area()), r.map(|p|p.area()));
+}
