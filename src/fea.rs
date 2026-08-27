@@ -1486,16 +1486,13 @@ impl SkylineLdlt {
 
     /// Solve with a Lagrange multiplier constraint vector, mirroring
     /// [`solve_lagrange_sparse`]: u = w1 - lambda * w2 with
-    /// lambda = (c.w2)/(c.w1).
+    /// lambda = (c.w1)/(c.w2).
     pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Vec<f64> {
         let w1 = self.solve(f);
         let w2 = self.solve(c);
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        if ct_w1.abs() < 1e-15 {
-            return w1;
-        }
-        let lambda = ct_w2 / ct_w1;
+        let lambda = if ct_w2.abs() > 1e-15 { ct_w1 / ct_w2 } else { 0.0 };
         w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
     }
 }
@@ -1787,6 +1784,29 @@ mod tests {
         // => lambda = -u1, -u1 - u1 = 1 => u1 = -0.5, u0 = 0.5, lambda = 0.5
         assert!((u[0] - 0.5).abs() < 1e-10, "u0 = {}", u[0]);
         assert!((u[1] + 0.5).abs() < 1e-10, "u1 = {}", u[1]);
+        // Direct constraint check: c^T u = 0 (independent of lambda formula)
+        let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
+        assert!(ct_u.abs() < 1e-10, "constraint residual c^T u = {}", ct_u);
+    }
+
+    #[test]
+    fn skyline_lagrange_constraint_residual() {
+        // Verify c^T u ≈ 0 for SkylineLdlt::solve_lagrange (catches lambda formula bugs)
+        let n = 10;
+        let mut k = SparseMatrix::new(n);
+        for i in 0..n {
+            k.add(i, i, 2.0);
+            if i + 1 < n {
+                k.add(i, i + 1, -1.0);
+                k.add(i + 1, i, -1.0);
+            }
+        }
+        let c: Vec<f64> = vec![1.0; n];
+        let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 0.05).collect();
+
+        let u = SkylineLdlt::factor(&k.compressed()).unwrap().solve_lagrange(&c, &f);
+        let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
+        assert!(ct_u.abs() < 1e-10, "SkylineLdlt constraint residual c^T u = {}", ct_u);
     }
 
     #[test]
