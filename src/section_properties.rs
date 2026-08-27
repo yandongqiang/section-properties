@@ -1206,5 +1206,169 @@ mod tests {
         assert!((props.iy - l_props.iy).abs() / l_props.iy < 1e-10);
         assert!((props.ixy - l_props.ixy).abs() / props.ixy.abs() < 1e-10);
     }
+
+    /// Non-symmetric hole: rectangle 200×100mm with 40×30mm hole at (120, 65).
+    ///
+    /// ```text
+    /// ┌───────────────────┐
+    /// │                   │
+    /// │         ┌──┐      │
+    /// │         │  │      │
+    /// │         └──┘      │
+    /// └───────────────────┘
+    /// ```
+    ///
+    /// Hand-computed in SI (metres, m⁴) — verified against Python
+    /// `sectionproperties` output.  This exercises centroid shift, Ixy ≠ 0,
+    /// and a principal angle near −90°.
+    #[test]
+    fn non_symmetric_hole_all_properties() {
+        let outer = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.2, 0.0),
+            Point::new(0.2, 0.1),
+            Point::new(0.0, 0.1),
+        ]);
+        // Hole: 40 mm × 30 mm, centered at (120, 65)
+        let hole = Polygon::new(vec![
+            Point::new(0.10, 0.05),
+            Point::new(0.14, 0.05),
+            Point::new(0.14, 0.08),
+            Point::new(0.10, 0.08),
+        ]);
+        let section = Section::new(outer, vec![hole]);
+        let props = SectionProperties::from_section(&section);
+
+        // --- Area ---
+        // A = 0.2×0.1 − 0.04×0.03 = 0.0188
+        let a_expected = 0.0188_f64;
+        assert!(
+            (props.area - a_expected).abs() / a_expected < 1e-12,
+            "area: got {}, expected {}",
+            props.area,
+            a_expected
+        );
+
+        // --- Centroid ---
+        // Qx = 0.02·0.05 − 0.0012·0.065 = 0.001 − 7.8e-5 = 9.22e-4
+        // Qy = 0.02·0.1  − 0.0012·0.12  = 0.002 − 1.44e-4 = 1.856e-3
+        // cx = Qy / A = 1.856e-3 / 0.0188 ≈ 0.098723
+        // cy = Qx / A = 9.22e-4  / 0.0188 ≈ 0.049043
+        let cx_exp = 0.001_856 / a_expected;
+        let cy_exp = 0.000_922 / a_expected;
+        assert!(
+            (props.centroid.x - cx_exp).abs() < 1e-12,
+            "cx: got {}, expected {}",
+            props.centroid.x,
+            cx_exp
+        );
+        assert!(
+            (props.centroid.y - cy_exp).abs() < 1e-12,
+            "cy: got {}, expected {}",
+            props.centroid.y,
+            cy_exp
+        );
+
+        // --- Centroidal second moments (parallel-axis theorem) ---
+        //
+        // Outer (centroid at (0.1, 0.05)):
+        //   Ixx_g = 0.2·0.1³/12 + 0.02·0.05² = 1.6667e-5 + 5e-5
+        //   Iyy_g = 0.1·0.2³/12 + 0.02·0.1²  = 6.6667e-5 + 2e-4
+        //   Ixy_g = 0 + 0.02·0.1·0.05          = 1e-4
+        //
+        // Hole (centroid at (0.12, 0.065)):
+        //   Ixx_g = 0.04·0.03³/12 + 0.0012·0.065² = 9e-8 + 5.07e-6
+        //   Iyy_g = 0.03·0.04³/12 + 0.0012·0.12²  = 1.6e-7 + 1.728e-5
+        //   Ixy_g = 0 + 0.0012·0.12·0.065           = 9.36e-6
+        //
+        // Net global:
+        let ixx_g = 6.666666666666667e-5_f64 - 5.160000000000000e-6;
+        let iyy_g = 2.666666666666667e-4_f64 - 1.744000000000000e-5;
+        let ixy_g = 1.000000000000000e-4_f64 - 9.360000000000000e-6;
+        // Shift to centroid:
+        let cx = props.centroid.x;
+        let cy = props.centroid.y;
+        let ixx_c = ixx_g - a_expected * cy * cy;
+        let iyy_c = iyy_g - a_expected * cx * cx;
+        let ixy_c = ixy_g - a_expected * cx * cy;
+
+        assert!(
+            (props.ix - ixx_c).abs() / ixx_c.abs() < 1e-10,
+            "Ixx: got {}, expected {}",
+            props.ix,
+            ixx_c
+        );
+        assert!(
+            (props.iy - iyy_c).abs() / iyy_c.abs() < 1e-10,
+            "Iyy: got {}, expected {}",
+            props.iy,
+            iyy_c
+        );
+        assert!(
+            (props.ixy - ixy_c).abs() / ixy_c.abs().max(1e-15) < 1e-6,
+            "Ixy: got {}, expected {}",
+            props.ixy,
+            ixy_c
+        );
+
+        // --- Principal moments ---
+        let avg = (ixx_c + iyy_c) * 0.5;
+        let diff = (ixx_c - iyy_c) * 0.5;
+        let delta = (diff * diff + ixy_c * ixy_c).sqrt();
+        let i11_exp = avg + delta;
+        let i22_exp = avg - delta;
+
+        assert!(
+            (props.principal.i11 - i11_exp).abs() / i11_exp < 1e-10,
+            "I11: got {}, expected {}",
+            props.principal.i11,
+            i11_exp
+        );
+        assert!(
+            (props.principal.i22 - i22_exp).abs() / i22_exp < 1e-10,
+            "I22: got {}, expected {}",
+            props.principal.i22,
+            i22_exp
+        );
+
+        // --- Invariants ---
+        // I11 + I22 == Ixx + Iyy
+        let sum_c = ixx_c + iyy_c;
+        let sum_p = props.principal.i11 + props.principal.i22;
+        assert!(
+            (sum_p - sum_c).abs() / sum_c < 1e-10,
+            "invariant sum: got {}, expected {}",
+            sum_p,
+            sum_c
+        );
+        // I11 · I22 == Ixx·Iyy − Ixy²
+        let det_c = ixx_c * iyy_c - ixy_c * ixy_c;
+        let det_p = props.principal.i11 * props.principal.i22;
+        assert!(
+            (det_p - det_c).abs() / det_c.abs() < 1e-10,
+            "invariant product: got {}, expected {}",
+            det_p,
+            det_c
+        );
+
+        // --- Principal angle ---
+        // phi = 0.5 · atan2(2·Ixy, Ixx − Iyy)
+        //     ≈ −89.56° (nearly vertical principal axis due to wide flange)
+        let phi_exp = 0.5 * (2.0 * ixy_c).atan2(ixx_c - iyy_c);
+        assert!(
+            (props.principal.phi - phi_exp).abs() < 1e-12,
+            "phi: got {} rad ({}°), expected {} rad ({}°)",
+            props.principal.phi,
+            props.principal.phi.to_degrees(),
+            phi_exp,
+            phi_exp.to_degrees()
+        );
+        // Cross-check: phi ≈ −π/2 (within 1°)
+        assert!(
+            (props.principal.phi + std::f64::consts::FRAC_PI_2).abs() < (1.0_f64).to_radians(),
+            "phi should be near −π/2, got {}°",
+            props.principal.phi.to_degrees()
+        );
+    }
 }
 
