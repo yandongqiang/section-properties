@@ -1172,21 +1172,27 @@ impl DirectLagrangeSolver {
         k: &SparseMatrix,
         c: &[f64],
     ) -> Result<Self, crate::mesh::fem::FemError> {
-        // Regularise K slightly for numerical safety (same spirit as CG path).
-        let mut m = k.compressed();
-        let mut diag_avg = 0.0;
-        for i in 0..m.n {
-            diag_avg += m.matvec_diag(i);
-        }
-        let eps = diag_avg.max(1e-300) / m.n as f64 * 1e-9;
-        for i in 0..m.n {
-            m.add(i, i, eps);
-        }
-        let m = m.compressed();
-
         let instance = match kernel {
             LagrangeKernel::Skyline => {
-                LagrangeKernelInstance::Skyline(SkylineLdlt::factor(&m)?)
+                let m = k.compressed();
+                let m = match SkylineLdlt::factor(&m) {
+                    Ok(ldlt) => ldlt,
+                    Err(crate::mesh::fem::FemError::SingularMatrix) => {
+                        let mut m_reg = k.compressed();
+                        let mut diag_avg = 0.0;
+                        for i in 0..m_reg.n {
+                            diag_avg += m_reg.matvec_diag(i);
+                        }
+                        let eps = diag_avg.max(1e-300) / m_reg.n as f64 * 1e-9;
+                        for i in 0..m_reg.n {
+                            m_reg.add(i, i, eps);
+                        }
+                        let m_reg = m_reg.compressed();
+                        SkylineLdlt::factor(&m_reg)?
+                    }
+                    Err(e) => return Err(e),
+                };
+                LagrangeKernelInstance::Skyline(m)
             }
             #[cfg(feature = "pardiso")]
             LagrangeKernel::Pardiso => LagrangeKernelInstance::Pardiso(std::sync::Mutex::new(
