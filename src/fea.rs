@@ -988,23 +988,35 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     };
     let _n = k.n;
 
-    // Regularize K to make it positive definite: K_reg = K + ε*I.
-    // Handles the constant null space of the Laplacian. Use a shift scaled
-    // by the average stiffness so tiny elements are not distorted.
-    let mut k_reg = k.compressed();
+    // Try solving without regularization first (matching Skyline behavior).
+    // Warping Laplacian has a constant null space; CG will detect non-SPD
+    // and we fall back to regularized K.
+    let k_reg = k.compressed();
     let n = k.n;
-    let mut diag_sum = 0.0;
-    for i in 0..n {
-        diag_sum += k_reg.matvec_diag(i);
-    }
-    let eps = diag_sum.max(1e-300) / n as f64 * 1e-9;
-    for i in 0..n {
-        k_reg.add(i, i, eps);
-    }
-    let k_reg = k_reg.compressed();
 
-    let w1 = cg_solve(&k_reg, f, max_iter, tol).x;
-    let w2 = cg_solve(&k_reg, c, max_iter, tol).x;
+    let w1 = cg_solve(&k_reg, f, max_iter, tol);
+    let w2 = cg_solve(&k_reg, c, max_iter, tol);
+
+    // If CG didn't converge (breakdown or non-SPD), fall back to regularization.
+    let (w1, w2) = if w1.converged && w2.converged {
+        (w1.x, w2.x)
+    } else {
+        // Regularize K: K_reg = K + ε*I
+        let mut k_reg = k.compressed();
+        let mut diag_sum = 0.0;
+        for i in 0..n {
+            diag_sum += k_reg.matvec_diag(i);
+        }
+        let eps = diag_sum.max(1e-300) / n as f64 * 1e-9;
+        for i in 0..n {
+            k_reg.add(i, i, eps);
+        }
+        let k_reg = k_reg.compressed();
+
+        let w1 = cg_solve(&k_reg, f, max_iter, tol).x;
+        let w2 = cg_solve(&k_reg, c, max_iter, tol).x;
+        (w1, w2)
+    };
 
     let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(a, b)| a * b).sum();
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
