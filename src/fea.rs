@@ -969,8 +969,8 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
 /// Solve the Lagrangian system [K  c; c^T 0] [u; lambda] = [f; 0].
 ///
 /// `k` is n×n stiffness matrix, `c` is n constraint vector, `f` is n load vector.
-/// Returns the solution vector u (length n).
-pub fn solve_lagrange(k: &[Vec<f64>], c: &[f64], f: &[f64]) -> Vec<f64> {
+/// Returns the solution vector u (length n), or `Err` if singular.
+pub fn solve_lagrange(k: &[Vec<f64>], c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     let n = k.len();
     // Augmented system (n+1)×(n+1)
     let mut a = vec![vec![0.0; n + 1]; n + 1];
@@ -987,12 +987,13 @@ pub fn solve_lagrange(k: &[Vec<f64>], c: &[f64], f: &[f64]) -> Vec<f64> {
     }
 
     // Solve using Gaussian elimination with partial pivoting
-    solve_dense(&mut a, &mut rhs);
-    rhs[..n].to_vec()
+    solve_dense(&mut a, &mut rhs)?;
+    Ok(rhs[..n].to_vec())
 }
 
 /// Solve a dense linear system A*x = b in place (Gaussian elimination with partial pivoting).
-pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
+/// Returns `Err(FemError::SingularMatrix)` if the matrix is singular.
+pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh::fem::FemError> {
     let n = a.len();
     for k in 0..n {
         // Partial pivoting
@@ -1010,7 +1011,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
         }
         let pivot = a[k][k];
         if pivot.abs() < 1e-15 {
-            continue;
+            return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         for i in (k + 1)..n {
             let factor = a[i][k] / pivot;
@@ -1024,8 +1025,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
     for k in (0..n).rev() {
         let pivot = a[k][k];
         if pivot.abs() < 1e-15 {
-            b[k] = 0.0;
-            continue;
+            return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         let mut sum = 0.0;
         for j in (k + 1)..n {
@@ -1033,6 +1033,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) {
         }
         b[k] = (b[k] - sum) / pivot;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,9 +1765,8 @@ mod tests {
     fn solve_dense_simple() {
         let mut a = vec![vec![2.0, 1.0], vec![1.0, 3.0]];
         let mut b = vec![5.0, 10.0];
-        solve_dense(&mut a, &mut b);
-        // Solution: x = (5-3y)/2, (5-3y)/2 + 3y = 10 => 5/2 + 3y/2 = 10 => y = 5, x = -5
-        // Wait: 2x + y = 5, x + 3y = 10 => x = 10-3y, 2(10-3y)+y = 5 => 20-5y = 5 => y = 3, x = 1
+        solve_dense(&mut a, &mut b).unwrap();
+        // Solution: 2x + y = 5, x + 3y = 10 => x = 10-3y, 2(10-3y)+y = 5 => 20-5y = 5 => y = 3, x = 1
         assert!((b[0] - 1.0).abs() < 1e-10, "x = {}", b[0]);
         assert!((b[1] - 3.0).abs() < 1e-10, "y = {}", b[1]);
     }
@@ -1778,7 +1778,7 @@ mod tests {
         let k = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let c = vec![1.0, 1.0];
         let f = vec![1.0, 0.0];
-        let u = solve_lagrange(&k, &c, &f);
+        let u = solve_lagrange(&k, &c, &f).unwrap();
         // u0 + lambda = 1, u1 + lambda = 0, u0 + u1 = 0
         // => u0 = -u1, -u1 + lambda = 1, u1 + lambda = 0
         // => lambda = -u1, -u1 - u1 = 1 => u1 = -0.5, u0 = 0.5, lambda = 0.5
