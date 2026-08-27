@@ -795,13 +795,30 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
     false
 }
 
-/// Strict edge-crossing test: two segments A1→A2 and B1→B2 cross (share
-/// interior points) if and only if the endpoints of each segment straddle
-/// the line through the other.  Touching at a single endpoint is **not**
-/// considered a cross (shared-vertex configurations are allowed).
-fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+/// Segment-segment relation for robust topology checks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SegmentRelation {
+    /// No intersection (including disjoint, touching at endpoints only)
+    Disjoint,
+    /// Proper interior intersection (crossing)
+    ProperCross,
+    /// Collinear and overlapping with positive-length intersection
+    CollinearOverlap,
+}
+
+/// Determine the topological relation between two segments A1→A2 and B1→B2.
+/// Uses orientation tests with epsilon for numerical robustness.
+fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelation {
+    const EPS: f64 = 1e-12;
+
     fn orient(p: Point, q: Point, r: Point) -> f64 {
         (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+    }
+
+    fn on_segment(p: Point, q: Point, r: Point) -> bool {
+        // q lies on segment pr (assuming collinear)
+        q.x >= p.x.min(r.x) - EPS && q.x <= p.x.max(r.x) + EPS &&
+        q.y >= p.y.min(r.y) - EPS && q.y <= p.y.max(r.y) + EPS
     }
 
     let o1 = orient(a1, a2, b1);
@@ -809,10 +826,57 @@ fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
     let o3 = orient(b1, b2, a1);
     let o4 = orient(b1, b2, a2);
 
-    // General case: the endpoints of each segment straddle the line of the other.
-    if (o1 > 0.0) != (o2 > 0.0) && (o3 > 0.0) != (o4 > 0.0) {
-        return true;
+    // General case: proper crossing (endpoints straddle each other's line)
+    let o1_pos = o1 > EPS;
+    let o1_neg = o1 < -EPS;
+    let o2_pos = o2 > EPS;
+    let o2_neg = o2 < -EPS;
+    let o3_pos = o3 > EPS;
+    let o3_neg = o3 < -EPS;
+    let o4_pos = o4 > EPS;
+    let o4_neg = o4 < -EPS;
+
+    if (o1_pos != o2_pos || o1_neg != o2_neg) &&
+       (o3_pos != o4_pos || o3_neg != o4_neg) {
+        return SegmentRelation::ProperCross;
     }
 
-    false
+    // Special cases: check for collinear overlap
+    // All orientations are near zero -> segments are collinear
+    if o1.abs() <= EPS && o2.abs() <= EPS && o3.abs() <= EPS && o4.abs() <= EPS {
+        // Check if projections on x or y overlap
+        let a_min_x = a1.x.min(a2.x);
+        let a_max_x = a1.x.max(a2.x);
+        let b_min_x = b1.x.min(b2.x);
+        let b_max_x = b1.x.max(b2.x);
+        let a_min_y = a1.y.min(a2.y);
+        let a_max_y = a1.y.max(a2.y);
+        let b_min_y = b1.y.min(b2.y);
+        let b_max_y = b1.y.max(b2.y);
+
+        let overlap_x = a_max_x >= b_min_x - EPS && b_max_x >= a_min_x - EPS;
+        let overlap_y = a_max_y >= b_min_y - EPS && b_max_y >= a_min_y - EPS;
+
+        if overlap_x && overlap_y {
+            return SegmentRelation::CollinearOverlap;
+        }
+        return SegmentRelation::Disjoint;
+    }
+
+    // Check for endpoint touching (not considered crossing for our purposes)
+    // b1 on a, b2 on a, a1 on b, a2 on b
+    if o1.abs() <= EPS && on_segment(a1, b1, a2) { return SegmentRelation::Disjoint; }
+    if o2.abs() <= EPS && on_segment(a1, b2, a2) { return SegmentRelation::Disjoint; }
+    if o3.abs() <= EPS && on_segment(b1, a1, b2) { return SegmentRelation::Disjoint; }
+    if o4.abs() <= EPS && on_segment(b1, a2, b2) { return SegmentRelation::Disjoint; }
+
+    SegmentRelation::Disjoint
+}
+
+/// Strict edge-crossing test: two segments A1→A2 and B1→B2 cross (share
+/// interior points) if and only if the endpoints of each segment straddle
+/// the line through the other. Touching at a single endpoint is **not**
+/// considered a cross (shared-vertex configurations are allowed).
+fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross)
 }
