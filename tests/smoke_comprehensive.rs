@@ -426,11 +426,11 @@ fn smoke_compound_validate_and_dissolve() {
         other => panic!("expected overlap error, got {:?}", other.map(|_| ())),
     }
 
-    // Naive area double-counts; dissolved does not.
-    // overlap = [−0.25,0.25]×[−0.5,0.5] = 0.5 → naive = 2 − 0.5·2? naive sums
+// Naive area double-counts; dissolved does not.
+    // overlap = [−0.25,0.25]×[−0.5,0.5] = 0.5 → naive sums
     // both areas fully (2.0); true union = 1.5.
     assert!((overlapping.area() - 2.0).abs() < 1e-9);
-    let dissolved = CompoundGeometry::dissolved(vec![sq(-0.25, 0.0), sq(0.25, 0.0)]);
+    let dissolved = CompoundGeometry::dissolved_outer_only(vec![sq(-0.25, 0.0), sq(0.25, 0.0)]);
     assert!(
         (dissolved.area() - 1.5).abs() < 5e-2,
         "dissolved area {}",

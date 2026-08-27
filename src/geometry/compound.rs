@@ -357,8 +357,8 @@ impl Geometry {
 /// under this assumption.
 ///
 /// Use [`CompoundGeometry::validate`] to check the invariant, and
-/// [`CompoundGeometry::dissolved`] to merge overlapping inputs into a valid
-/// compound.
+    /// [`CompoundGeometry::dissolved_outer_only`] to merge overlapping inputs into a valid
+    /// compound.
 #[derive(Debug, Clone)]
 pub struct CompoundGeometry {
     /// The individual regions that make up the compound section.
@@ -409,7 +409,7 @@ impl CompoundGeometry {
     /// The caller guarantees that region materials are **disjoint**.
     /// Overlapping inputs silently double-count area/inertia in property
     /// computations. Use [`CompoundGeometry::validate`] to check, or
-    /// [`CompoundGeometry::dissolved`] to merge overlapping inputs.
+    /// [`CompoundGeometry::dissolved_outer_only`] to merge overlapping inputs.
     pub fn new(geometries: Vec<Geometry>) -> Self {
         Self { geometries }
     }
@@ -423,10 +423,21 @@ impl CompoundGeometry {
     }
 
     /// Merge overlapping inputs into a valid (material-disjoint) compound by
-    /// dissolving overlaps with the boolean union. Holes are dropped during
-    /// dissolution (the merged outline is exact; re-derive holes afterwards
-    /// if required).
+    /// dissolving overlaps with the boolean union. **Holes are dropped during
+    /// dissolution** (the merged outline is exact; re-derive holes afterwards
+    /// if required). This is a union of outer boundaries only.
+    ///
+    /// Prefer [`Self::dissolved_outer_only`] for explicit naming.
+    #[deprecated(since = "0.1.0", note = "Use dissolved_outer_only() for explicit naming; holes are dropped")]
     pub fn dissolved(geometries: Vec<Geometry>) -> Self {
+        Self::dissolved_outer_only(geometries)
+    }
+
+    /// Merge overlapping inputs into a valid (material-disjoint) compound by
+    /// dissolving overlaps with the boolean union. **Holes are dropped** –
+    /// only outer boundaries are united. This is a union of outer boundaries
+    /// only; holes must be re-derived afterwards if required.
+    pub fn dissolved_outer_only(geometries: Vec<Geometry>) -> Self {
         use super::boolean::{polygon_boolean, BoolOp};
 
         let mut acc: Vec<Polygon> =
