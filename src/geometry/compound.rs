@@ -469,8 +469,8 @@ impl CompoundGeometry {
     /// Check the material-disjoint invariant.
     ///
     /// * every hole must lie fully inside its own outer boundary,
-    /// * no two regions may claim the same material point (verified with a
-    ///   deterministic Monte-Carlo sweep over the combined bounding box).
+    /// * no two regions may claim the same material point (verified with
+    ///   deterministic edge–edge and containment checks).
     pub fn validate(&self) -> Result<(), CompoundError> {
         // Hole containment within its own outer boundary.
         for (ri, g) in self.geometries.iter().enumerate() {
@@ -483,7 +483,15 @@ impl CompoundGeometry {
             }
         }
 
-        // Cross-region material overlap via deterministic sampling.
+        // Cross-region material overlap via deterministic checks.
+        //
+        // For each pair of regions, we verify the "material-disjoint"
+        // invariant by checking:
+        //  1. Edge–edge intersections between outer boundaries.
+        //  2. Vertex containment: any vertex of region A inside region B's
+        //     material (outer minus holes) or vice versa.
+        //  3. Full containment: one outer fully inside the other, with the
+        //     intersection not fully absorbed by holes.
         let n = self.geometries.len();
         if n < 2 {
             return Ok(());
@@ -491,53 +499,13 @@ impl CompoundGeometry {
 
         let applied: Vec<Geometry> =
             self.geometries.iter().map(|g| g.apply_transforms()).collect();
-        let mut lo_x = f64::INFINITY;
-        let mut hi_x = f64::NEG_INFINITY;
-        let mut lo_y = f64::INFINITY;
-        let mut hi_y = f64::NEG_INFINITY;
-        for g in &applied {
-            let pts: Vec<Point> = std::iter::once(g.outer.vertices.as_slice())
-                .chain(g.holes.iter().map(|h| h.vertices.as_slice()))
-                .flatten()
-                .copied()
-                .collect();
-            for p in &pts {
-                lo_x = lo_x.min(p.x);
-                hi_x = hi_x.max(p.x);
-                lo_y = lo_y.min(p.y);
-                hi_y = hi_y.max(p.y);
-            }
-        }
-        if !lo_x.is_finite() || hi_x <= lo_x && hi_y <= lo_y && false {
-            return Ok(());
-        }
 
-        let mut rng: u64 = 0x9E3779B97F4A7C15;
-        let mut next_unit = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            ((rng >> 11) as f64) / (1u64 << 53) as f64
-        };
-
-        let samples = 512usize;
-        for _ in 0..samples {
-            let p = Point::new(
-                lo_x + next_unit() * (hi_x - lo_x),
-                lo_y + next_unit() * (hi_y - lo_y),
-            );
-            let mut claimed_by: Option<usize> = None;
-            for (i, g) in applied.iter().enumerate() {
-                if g.outer.contains_point(p)
-                    && !g.holes.iter().any(|h| h.contains_point(p))
-                {
-                    if let Some(prev) = claimed_by {
-                        return Err(CompoundError::OverlappingRegions {
-                            a: prev,
-                            b: i,
-                        });
-                    }
-                    claimed_by = Some(i);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let gi = &applied[i];
+                let gj = &applied[j];
+                if regions_overlap_deterministic(gi, gj) {
+                    return Err(CompoundError::OverlappingRegions { a: i, b: j });
                 }
             }
         }
@@ -725,4 +693,102 @@ impl From<crate::section::Section> for CompoundGeometry {
     fn from(section: crate::section::Section) -> Self {
         Self::new(vec![Geometry::new(section.outer, section.holes)])
     }
+}
+
+/// Deterministic check whether two regions share any material area.
+///
+/// A region's material is its outer boundary minus its holes.
+/// Two regions overlap if and only if there exists a point that lies in
+/// both materials.  This is checked by:
+///
+/// 1. **Edge–edge intersection** – if any outer-boundary edge of `a`
+///    crosses any outer-boundary edge of `b`, the interiors overlap.
+/// 2. **Vertex containment** – if a vertex of one outer lies inside the
+///    other region's material (outer minus holes), there is overlap.
+/// 3. **Full containment** – if all vertices of one outer lie inside the
+///    other outer, the intersection polygon is non-empty *and* not
+///    entirely absorbed by the union of all holes.
+fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
+    let a_outer = &a.outer;
+    let b_outer = &b.outer;
+
+    // 1. Edge–edge intersection between the two outer boundaries.
+    for i in 0..a_outer.vertices.len() {
+        let a1 = a_outer.vertices[i];
+        let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
+        for j in 0..b_outer.vertices.len() {
+            let b1 = b_outer.vertices[j];
+            let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
+            if segments_cross(a1, a2, b1, b2) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Vertex containment: any vertex of `a` inside `b`'s material?
+    for v in &a_outer.vertices {
+        if b_outer.contains_point(*v) && !b.holes.iter().any(|h| h.contains_point(*v)) {
+            return true;
+        }
+    }
+    // Any vertex of `b` inside `a`'s material?
+    for v in &b_outer.vertices {
+        if a_outer.contains_point(*v) && !a.holes.iter().any(|h| h.contains_point(*v)) {
+            return true;
+        }
+    }
+
+    // 3. Full containment: one outer fully contains the other, but no
+    //    vertex lies on the wrong side.  In this case the two outers
+    //    overlap as regions, but we must verify the overlap is not
+    //    entirely absorbed by holes.
+    let a_in_b = a_outer.vertices.iter().all(|v| b_outer.contains_point(*v));
+    let b_in_a = b_outer.vertices.iter().all(|v| a_outer.contains_point(*v));
+
+    if a_in_b || b_in_a {
+        // Compute the boolean intersection of the two outer polygons.
+        let inter = super::boolean::polygon_boolean(a_outer, b_outer, super::boolean::BoolOp::Intersection);
+        if inter.is_empty() {
+            return false;
+        }
+        // Subtract every hole from both regions.  If anything survives, the
+        // regions overlap in material.
+        let mut remaining = inter;
+        for hole in a.holes.iter().chain(b.holes.iter()) {
+            let mut next = Vec::new();
+            for p in &remaining {
+                let diff = super::boolean::polygon_boolean(p, hole, super::boolean::BoolOp::Difference);
+                next.extend(diff);
+            }
+            remaining = next;
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        return !remaining.is_empty();
+    }
+
+    false
+}
+
+/// Strict edge-crossing test: two segments A1→A2 and B1→B2 cross (share
+/// interior points) if and only if the endpoints of each segment straddle
+/// the line through the other.  Touching at a single endpoint is **not**
+/// considered a cross (shared-vertex configurations are allowed).
+fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    fn orient(p: Point, q: Point, r: Point) -> f64 {
+        (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+    }
+
+    let o1 = orient(a1, a2, b1);
+    let o2 = orient(a1, a2, b2);
+    let o3 = orient(b1, b2, a1);
+    let o4 = orient(b1, b2, a2);
+
+    // General case: the endpoints of each segment straddle the line of the other.
+    if (o1 > 0.0) != (o2 > 0.0) && (o3 > 0.0) != (o4 > 0.0) {
+        return true;
+    }
+
+    false
 }
