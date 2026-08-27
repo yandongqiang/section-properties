@@ -172,8 +172,12 @@ impl Polygon {
                         let ang2 = (m2.y - cy).atan2(m2.x - cx);
                         // CCW arc from ang1 to ang2.
                         let diff = if ang2 > ang1 { ang2 - ang1 } else { ang2 - ang1 + 2.0 * std::f64::consts::PI };
-                        // Segment angle ~ 15 deg or 10 segments max.
-                        let segs = ((diff / (std::f64::consts::PI / 12.0)).ceil() as usize).min(16).max(3);
+                        // Use chord error to determine segment count: e = r * (1 - cos(dθ/2))
+                        // For small dθ: 1 - cos(dθ/2) ≈ dθ²/8, so dθ ≈ sqrt(8*e/r)
+                        // Use max_chord_error = 1e-6 (adjustable for precision needs).
+                        const MAX_CHORD_ERROR: f64 = 1e-6;
+                        let dtheta_max = (8.0 * MAX_CHORD_ERROR / abs_d).sqrt().min(std::f64::consts::PI / 6.0); // cap at 30°
+                        let segs = ((diff / dtheta_max).ceil() as usize).max(3);
                         out.push(m1);
                         for s in 1..segs {
                             let a = ang1 + diff * (s as f64) / (segs as f64);
