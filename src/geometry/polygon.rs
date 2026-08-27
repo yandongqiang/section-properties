@@ -563,9 +563,11 @@ fn cleanup_offset_ring(verts: Vec<Point>, outward: bool) -> Vec<Point> {
     }
 
     // 2. Detect and remove self-intersections by finding simple polygon loops.
-    // For engineering sections, a full general polygon clipping (Vatti) is overkill.
-    // We use a simpler approach: find all self-intersections, break at them,
-    // and keep only the largest simple loop (by area) that matches orientation.
+    // TODO: Current implementation is a pragmatic fallback, not topologically correct.
+    // split_into_loops() is a stub; "largest loop" heuristic fails for complex
+    // concave sections (cold-formed C/Z/Σ) where true offset has multiple valid regions.
+    // Proper fix: implement Vatti/Greiner-Hormann clipping or integrate Clipper/GEOS
+    // for true polygon buffer / ring reconstruction.
     if let Some(clean) = remove_self_intersections(&dedup, outward) {
         return clean;
     }
@@ -680,8 +682,14 @@ fn segment_intersection(a1: Point, a2: Point, b1: Point, b2: Point) -> Option<(f
 }
 
 /// Split polygon into simple loops at intersections.
-/// Simplified stub: returns the original as single loop for now.
-/// The area-based selection in remove_self_intersections already handles this.
+/// TODO: Currently a stub - does not actually split at intersections.
+/// Proper implementation needs to:
+/// 1. Insert intersection vertices into edge sequences
+/// 2. Build graph of edge segments between intersections
+/// 3. Extract all simple cycles (loops) via graph traversal
+/// 4. Filter by winding number / orientation for true offset semantics
+/// This is equivalent to polygon clipping (Vatti algorithm) or
+/// using a robust library (Clipper2, GEOS).
 fn split_into_loops(verts: &[Point], _intersections: &[Intersection]) -> Vec<Vec<Point>> {
     vec![verts.to_vec()]
 }
