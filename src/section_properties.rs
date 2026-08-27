@@ -75,24 +75,82 @@ impl Default for GeometricProperties {
 
 /// Principal-axis properties: moments of inertia, angle, and section moduli
 /// about the principal 11-22 axes.
+///
+/// # Convention (matches standard Mohr's circle, diverges from Python)
+///
+/// This library uses the **standard structural-engineering convention** for
+/// principal axes, consistent with Timoshenko, Pilkey, and most FEA codes:
+///
+/// ```text
+///                    y (centroidal)
+///                    |
+///                    |     ╱ axis 11 (i11, major)
+///                    |    ╱
+///                    | φ ╱    φ = angle from x to axis 11 (CCW positive)
+///                    |  ╱
+///                    | ╱
+///                    |╱─────────── x (centroidal)
+///                   ╱|
+///                  ╱ |
+///     axis 22 ───╱  |    axis 22 is perpendicular to axis 11
+///    (i22, minor)    |
+/// ```
+///
+/// | Symbol | Meaning | Formula |
+/// |--------|---------|---------|
+/// | `phi` | Angle from centroidal x-axis to axis 11, CCW positive | `½ atan2(2·I_xy, I_xx − I_yy)` |
+/// | `i11` | Major principal moment (largest) | `(I_xx+I_yy)/2 + Δ` |
+/// | `i22` | Minor principal moment (smallest) | `(I_xx+I_yy)/2 − Δ` |
+/// | `z11` | Section modulus about axis 11 | `i11 / max(|y₂|)` |
+/// | `z22` | Section modulus about axis 22 | `i22 / max(|x₁|)` |
+///
+/// **Coordinate transformation** (global → principal):
+/// ```text
+/// x₁ = (x − x_c) cos φ + (y − y_c) sin φ    // along axis 11
+/// y₂ = −(x − x_c) sin φ + (y − y_c) cos φ   // along axis 22
+/// ```
+///
+/// **Section moduli** use the *perpendicular* distance from each axis:
+/// - `z11 = i11 / |y₂|_max` (y₂ is perpendicular to axis 11)
+/// - `z22 = i22 / |x₁|_max` (x₁ is perpendicular to axis 22)
+///
+/// ## Divergence from Python `sectionproperties`
+///
+/// Python computes `phi_py = atan2(I_xx − i11, I_xy)`, which equals
+/// `−φ` (our phi).  Python's coordinate transform then projects onto
+/// `(cos(−φ), sin(−φ))`, placing its "x11" axis along the *minor*
+/// principal direction when `I_xx > I_yy` and `I_xy > 0`.  Despite this,
+/// Python's `z11 = i11 / |y22_max|` still produces correct section
+/// moduli because the perpendicular distance from the opposite axis is
+/// the same after taking absolute values — but the **sign of phi** and
+/// the **direction of x11/y22** differ.
+///
+/// To convert between conventions: `phi_python = −phi_rust`.
 #[derive(Debug, Clone, Copy)]
 pub struct PrincipalProperties {
-    /// Major principal second moment of area (centroidal).
+    /// Major principal second moment of area (centroidal). Always `≥ i22`.
     pub i11: f64,
 
-    /// Minor principal second moment of area (centroidal).
+    /// Minor principal second moment of area (centroidal). Always `≤ i11`.
     pub i22: f64,
 
-    /// Principal axis angle in radians, measured CCW from the x-axis.
+    /// Angle from the centroidal x-axis to axis 11 (major), measured
+    /// **counter-clockwise positive** in radians.  Range: `[−π, π]`.
+    ///
+    /// Computed as `½ atan2(2·I_xy, I_xx − I_yy)` (standard Mohr's circle).
     pub phi: f64,
 
-    /// Section modulus about 11-axis for positive extreme fibre.
+    /// Section modulus about axis 11 for positive extreme fibre.
+    /// `z11_plus = i11 / |y₂_max|` where `y₂_max > 0`.
     pub z11_plus: f64,
-    /// Section modulus about 11-axis for negative extreme fibre.
+    /// Section modulus about axis 11 for negative extreme fibre.
+    /// `z11_minus = i11 / |y₂_min|` where `y₂_min < 0`.
     pub z11_minus: f64,
-    /// Section modulus about 22-axis for positive extreme fibre.
+    /// Section modulus about axis 22 for positive extreme fibre.
+    /// `z22_plus = i22 / |x₁_max|` where `x₁_max > 0`.
     pub z22_plus: f64,
-    /// Section modulus about 22-axis for negative extreme fibre.
+    /// Section modulus about axis 22 for negative extreme fibre.
+    /// `z22_minus = i22 / |x₁_min|` where `x₁_min < 0`.
     pub z22_minus: f64,
 }
 
@@ -260,7 +318,20 @@ impl SectionProperties {
             0.0
         };
 
-        // Principal axis section moduli
+        // Principal axis properties (standard Mohr's circle convention).
+        //
+        // φ = ½ atan2(2·I_xy, I_xx − I_yy)
+        //
+        // This gives the angle from the centroidal x-axis to axis 11
+        // (major principal axis), measured CCW positive.
+        //
+        // Coordinate transformation (global → principal):
+        //   x₁ = dx·cos(φ) + dy·sin(φ)   // along axis 11
+        //   y₂ = −dx·sin(φ) + dy·cos(φ)  // along axis 22 (⊥ to axis 11)
+        //
+        // Section moduli use perpendicular distances:
+        //   z11 = i11 / |y₂|_max   (y₂ is distance from axis 11)
+        //   z22 = i22 / |x₁|_max   (x₁ is distance from axis 22)
         let principal = {
             let avg = (ix_c + iy_c) * 0.5;
             let diff = (ix_c - iy_c) * 0.5;
@@ -274,6 +345,13 @@ impl SectionProperties {
         let cos_phi = phi.cos();
         let sin_phi = phi.sin();
 
+        // Project extreme boundary points onto principal axes.
+        //
+        // dir_11 = (cos φ, sin φ)  — unit vector along axis 11 (major)
+        // dir_22 = (−sin φ, cos φ) — unit vector along axis 22 (minor, ⊥ to 11)
+        //
+        // x₁ = dot(P − centroid, dir_11)  — signed distance along axis 11
+        // y₂ = dot(P − centroid, dir_22)  — signed distance along axis 22
         let dir_11 = Point::new(cos_phi, sin_phi);
         let dir_22 = Point::new(-sin_phi, cos_phi);
         let (x1_min, x1_max) = all_boundary
@@ -289,6 +367,12 @@ impl SectionProperties {
                 (mn.min(lo), mx.max(hi))
             });
 
+        // Section moduli: z = I / c
+        //
+        // For axis 11: c₁ = max|y₂| (perpendicular distance from axis 11)
+        // For axis 22: c₂ = max|x₁| (perpendicular distance from axis 22)
+        //
+        // z11 = i11 / c₁, z22 = i22 / c₂
         let z11_plus = if y2_max.abs() > 1e-15 {
             i11 / y2_max.abs()
         } else {
@@ -372,7 +456,11 @@ impl SectionProperties {
         Self::from_compound(&CompoundGeometry::from(section.clone()))
     }
 
-    /// Principal moments of inertia and principal angle (radians, CCW from x-axis).
+    /// Returns `(i11, i22, phi)`.
+    ///
+    /// - `i11`: major (largest) principal second moment of area.
+    /// - `i22`: minor (smallest) principal second moment of area.
+    /// - `phi`: angle from centroidal x-axis to axis 11, CCW positive, radians.
     pub fn principal_moments(&self) -> (f64, f64, f64) {
         (self.principal.i11, self.principal.i22, self.principal.phi)
     }
@@ -444,9 +532,12 @@ impl SectionProperties {
         row(&mut s, "Ixx (about cx)", self.ix);
         row(&mut s, "Iyy (about cy)", self.iy);
         row(&mut s, "Ixy", self.ixy);
-        row(&mut s, "I11 (principal)", self.principal.i11);
-        row(&mut s, "I22 (principal)", self.principal.i22);
-        row(&mut s, "Phi (angle)", self.principal.phi.to_degrees());
+        s.push('\n');
+        s.push_str("Principal Axes:\n");
+        row(&mut s, "I11 (major)", self.principal.i11);
+        row(&mut s, "I22 (minor)", self.principal.i22);
+        let phi_deg = self.principal.phi.to_degrees();
+        row(&mut s, "Phi (x→11, CCW°)", phi_deg);
         s.push('\n');
 
         s.push_str("Section Moduli:\n");

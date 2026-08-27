@@ -239,18 +239,32 @@ pub fn extrapolate_to_nodes(w: &[f64; 6]) -> [f64; 6] {
 // Coordinate transformations
 // ---------------------------------------------------------------------------
 
-/// Convert global coordinates to principal coordinates.
+/// Convert global (centroidal) coordinates to principal coordinates.
 ///
-/// `phi` is the principal axis angle in **radians** (unlike Python which uses degrees).
+/// `phi` is the principal axis angle in **radians** — the angle from the
+/// centroidal x-axis to axis 11 (major principal), CCW positive.
+///
+/// ```text
+/// x₁₁ = (x − x_c)·cos(φ) + (y − y_c)·sin(φ)    // along axis 11
+/// y₂₂ = −(x − x_c)·sin(φ) + (y − y_c)·cos(φ)   // along axis 22
+/// ```
+///
+/// Note: this convention matches the standard Mohr's circle and differs
+/// from Python's `sectionproperties` by a sign in `phi`.
 pub fn principal_coordinate(phi: f64, x: f64, y: f64) -> (f64, f64) {
     let cos_phi = phi.cos();
     let sin_phi = phi.sin();
     (x * cos_phi + y * sin_phi, y * cos_phi - x * sin_phi)
 }
 
-/// Convert principal coordinates to global coordinates.
+/// Convert principal coordinates back to global (centroidal) coordinates.
 ///
 /// `phi` is the principal axis angle in **radians**.
+///
+/// ```text
+/// x = x₁₁·cos(φ) − y₂₂·sin(φ)
+/// y = x₁₁·sin(φ) + y₂₂·cos(φ)
+/// ```
 pub fn global_coordinate(phi: f64, x11: f64, y22: f64) -> (f64, f64) {
     let cos_phi = phi.cos();
     let sin_phi = phi.sin();
