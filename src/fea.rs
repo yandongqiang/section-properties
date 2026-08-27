@@ -1211,7 +1211,7 @@ impl DirectLagrangeSolver {
                 let w2 = ldlt.solve(&self.c);
                 let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
                 let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-                let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
+                let lambda = if ct_w2.abs() > 1e-15 { ct_w1 / ct_w2 } else { 0.0 };
                 let u = w1
                     .iter()
                     .zip(w2.iter())
