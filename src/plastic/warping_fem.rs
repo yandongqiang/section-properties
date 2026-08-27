@@ -238,7 +238,7 @@ pub fn compute_fem_warping_properties(
     let iyy = props.iy;
     let ixy = props.ixy;
     let ea = props.area;
-    let nu = 0.3;
+    let nu = 0.0;
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
