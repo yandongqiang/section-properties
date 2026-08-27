@@ -734,6 +734,8 @@ pub struct SparseMatrix {
     pub cols: Vec<usize>,
     /// Assembled values (may contain duplicates).
     pub vals: Vec<f64>,
+    /// Cached diagonal entries (sum of duplicates). Populated by `compressed()`.
+    diag: Option<Vec<f64>>,
 }
 
 impl SparseMatrix {
@@ -743,6 +745,7 @@ impl SparseMatrix {
             rows: Vec::new(),
             cols: Vec::new(),
             vals: Vec::new(),
+            diag: None,
         }
     }
 
@@ -798,6 +801,9 @@ impl SparseMatrix {
 
     /// Diagonal entry of row `i` (summing duplicates).
     pub fn matvec_diag(&self, i: usize) -> f64 {
+        if let Some(ref d) = self.diag {
+            return d[i];
+        }
         let mut d = 0.0;
         for k in 0..self.rows.len() {
             if self.rows[k] == i && self.cols[k] == i {
@@ -808,7 +814,8 @@ impl SparseMatrix {
     }
 
     /// Sum duplicate triplets into a compressed copy (faster matvec).
-    pub fn compressed(&self) -> SparseMatrix {        use std::collections::HashMap;
+    pub fn compressed(&self) -> SparseMatrix {
+        use std::collections::HashMap;
         let mut map: HashMap<(usize, usize), f64> = HashMap::with_capacity(self.rows.len());
         for k in 0..self.rows.len() {
             *map.entry((self.rows[k], self.cols[k])).or_insert(0.0) += self.vals[k];
@@ -821,6 +828,14 @@ impl SparseMatrix {
                 m.vals.push(v);
             }
         }
+        // Build diagonal cache.
+        let mut diag = vec![0.0; self.n];
+        for i in 0..m.rows.len() {
+            if m.rows[i] == m.cols[i] {
+                diag[m.rows[i]] += m.vals[i];
+            }
+        }
+        m.diag = Some(diag);
         m
     }
 }
