@@ -476,9 +476,22 @@ impl CompoundGeometry {
         for (ri, g) in self.geometries.iter().enumerate() {
             let g = g.apply_transforms();
             for (hi, hole) in g.holes.iter().enumerate() {
-                let inside = hole.vertices.iter().all(|v| g.outer.contains_point(*v));
-                if !inside {
+                // 1. All hole vertices must be inside outer.
+                let vertices_inside = hole.vertices.iter().all(|v| g.outer.contains_point(*v));
+                if !vertices_inside {
                     return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
+                }
+                // 2. No hole edge may cross outer boundary edge.
+                for i in 0..hole.vertices.len() {
+                    let h1 = hole.vertices[i];
+                    let h2 = hole.vertices[(i + 1) % hole.vertices.len()];
+                    for j in 0..g.outer.vertices.len() {
+                        let o1 = g.outer.vertices[j];
+                        let o2 = g.outer.vertices[(j + 1) % g.outer.vertices.len()];
+                        if segments_cross(h1, h2, o1, o2) {
+                            return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
+                        }
+                    }
                 }
             }
         }
