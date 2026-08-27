@@ -1,4 +1,5 @@
 use super::{Point, Polygon};
+use crate::section::Section;
 
 /// Axis selector for mirroring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,40 +213,48 @@ impl Geometry {
     /// Boolean union with `other`.
     ///
     /// Mirrors `Geometry | other` (shapely `union`). Operates on the outer
-    /// boundaries; returns the largest resulting region, or `None` if empty.
+    /// Boolean union with `other`.
     pub fn union(&self, other: &Self) -> Option<Self> {
-        self.boolean(other, super::boolean::BoolOp::Union)
+        self.boolean_with_holes(other, super::boolean::BoolOp::Union)
     }
 
     /// Boolean intersection with `other`.
     ///
     /// Mirrors `Geometry & other` (shapely `intersection`).
     pub fn intersection(&self, other: &Self) -> Option<Self> {
-        self.boolean(other, super::boolean::BoolOp::Intersection)
+        self.boolean_with_holes(other, super::boolean::BoolOp::Intersection)
     }
 
     /// Boolean difference: this geometry minus `other`.
     ///
     /// Mirrors `Geometry - other` (shapely `difference`).
     pub fn subtract(&self, other: &Self) -> Option<Self> {
-        self.boolean(other, super::boolean::BoolOp::Difference)
+        self.boolean_with_holes(other, super::boolean::BoolOp::Difference)
     }
 
-    fn boolean(&self, other: &Self, op: super::boolean::BoolOp) -> Option<Self> {
-        let a = Geometry::from_section(&crate::section::Section::new(
-            self.apply_transforms().outer,
-            Vec::new(),
-        ));
-        let b = Geometry::from_section(&crate::section::Section::new(
-            other.apply_transforms().outer,
-            Vec::new(),
-        ));
+    fn boolean_with_holes(&self, other: &Self, op: super::boolean::BoolOp) -> Option<Self> {
+        let a = Section::new(self.apply_transforms().outer, self.apply_transforms().holes);
+        let b = Section::new(other.apply_transforms().outer, other.apply_transforms().holes);
 
-        let results = super::boolean::polygon_boolean(&a.outer, &b.outer, op);
+        let results = match op {
+            super::boolean::BoolOp::Union => {
+                super::boolean::polygon_boolean(&a.outer, &b.outer, op)
+                    .into_iter()
+                    .map(|outer| Section::new(outer, Vec::new()))
+                    .collect()
+            }
+            super::boolean::BoolOp::Intersection => {
+                super::boolean::section_intersection(&a, &b)
+            }
+            super::boolean::BoolOp::Difference => {
+                super::boolean::section_difference(&a, &b)
+            }
+        };
+
         let best = results
             .into_iter()
             .max_by(|x, y| x.area().partial_cmp(&y.area()).unwrap())?;
-        Some(Geometry::new(best, Vec::new()))
+        Some(Geometry::new(best.outer, best.holes))
     }
 
     /// Return a copy of this geometry with the transforms applied to all vertices.

@@ -559,6 +559,49 @@ fn polygon_boolean_impl(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     results
 }
 
+/// Boolean intersection between two full sections (outer boundary + holes).
+///
+/// Mirrors shapely `geometry & other` as used by Python `sectionproperties`.
+///
+/// Returns one [`Section`] per disjoint result region.
+pub fn section_intersection(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
+    use crate::section::Section;
+
+    let raw = compute_raw_intersections(&a.outer.vertices, &b.outer.vertices);
+    let a_in_b = a.outer.vertices.iter().all(|v| b.outer.contains_point(*v));
+    let b_in_a = b.outer.vertices.iter().all(|v| a.outer.contains_point(*v));
+
+    // Handle containment cases
+    if raw.is_empty() {
+        if a_in_b {
+            return vec![Section::new(a.outer.clone(), a.holes.clone())];
+        }
+        if b_in_a {
+            return vec![Section::new(b.outer.clone(), b.holes.clone())];
+        }
+        return Vec::new(); // Disjoint
+    }
+
+    // Generic case: boundary-level intersection, reattach interior holes from both sections.
+    let pieces = polygon_boolean(&a.outer, &b.outer, BoolOp::Intersection);
+    pieces
+        .into_iter()
+        .map(|p| {
+            let holes: Vec<crate::geometry::Polygon> = a
+                .holes
+                .iter()
+                .chain(b.holes.iter())
+                .filter(|h| {
+                    // Keep holes fully inside this piece
+                    h.vertices.iter().all(|v| p.contains_point(*v))
+                })
+                .cloned()
+                .collect();
+            Section::new(p, holes)
+        })
+        .collect()
+}
+
 /// Boolean difference between two full sections (outer boundary + holes).
 ///
 /// Mirrors shapely `geometry - other` as used by Python `sectionproperties`.
