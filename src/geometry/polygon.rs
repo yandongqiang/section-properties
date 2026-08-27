@@ -136,10 +136,10 @@ impl Polygon {
 
                 match join_style {
                     JoinStyle::Miter => {
-                        // Mitre length = |distance| / sin(turn/2).
+                        // Mitre length = |distance| / cos(turn/2).
                         // If > mitre_limit * |distance|, fall back to bevel.
                         let half = turn * 0.5;
-                        let mitre_len = abs_d / half.sin().max(1e-12);
+                        let mitre_len = abs_d / half.cos().max(1e-12);
                         if mitre_len > mitre_limit * abs_d {
                             // Bevel: emit m1 then m2.
                             out.push(m1);
