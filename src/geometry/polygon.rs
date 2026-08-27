@@ -495,6 +495,21 @@ impl Polygon {
     }
 }
 
+impl super::boundary::BoundaryExtrema for Polygon {
+    fn extreme_distances(&self, center: Point, direction: Point) -> (f64, f64) {
+        self.vertices
+            .iter()
+            .map(|v| {
+                let dx = v.x - center.x;
+                let dy = v.y - center.y;
+                dx * direction.x + dy * direction.y
+            })
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), d| {
+                (mn.min(d), mx.max(d))
+            })
+    }
+}
+
 /// Compute signed area of a raw vertex list (assumed closed).
 fn signed_area_raw(verts: &[Point]) -> f64 {
     let mut sum = 0.0;
@@ -803,5 +818,49 @@ mod tests {
         assert!((ix - 3.0).abs() < 1e-10);
         assert!((iy - 5.333333333333333).abs() < 1e-10);
         assert!((ixy + 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn boundary_extrema_rectangle() {
+        use super::super::boundary::BoundaryExtrema;
+
+        // 10×5 rectangle at origin.
+        let rect = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ]);
+        let center = Point::new(5.0, 2.5);
+
+        let (y_min, y_max) = rect.extreme_y(center);
+        assert!((y_min + 2.5).abs() < 1e-12);
+        assert!((y_max - 2.5).abs() < 1e-12);
+
+        let (x_min, x_max) = rect.extreme_x(center);
+        assert!((x_min + 5.0).abs() < 1e-12);
+        assert!((x_max - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn boundary_extrema_rotated_direction() {
+        use super::super::boundary::BoundaryExtrema;
+
+        // Unit square at origin.
+        let sq = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]);
+        let center = Point::new(0.5, 0.5);
+
+        // 45-degree direction: (cos45, sin45).
+        let dir = Point::new(std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2);
+        let (lo, hi) = sq.extreme_distances(center, dir);
+        // Extreme points are (0,0) and (1,1); distances from center are ±√2/2.
+        let expected = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((lo + expected).abs() < 1e-12);
+        assert!((hi - expected).abs() < 1e-12);
     }
 }

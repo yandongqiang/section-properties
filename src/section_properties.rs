@@ -1,4 +1,4 @@
-use crate::geometry::{CompoundGeometry, Geometry, Point};
+use crate::geometry::{BoundaryExtrema, CompoundGeometry, Geometry, Point};
 use crate::section::Section;
 use std::ops::Deref;
 
@@ -218,19 +218,21 @@ impl SectionProperties {
         // Maximum fiber distances measure from the centroid to the extreme
         // boundary of the section (used for elastic section modulus).
         // Track positive and negative extremes separately (Python convention).
-        let (y_min, y_max) = polygons
+        let all_boundary: Vec<&dyn BoundaryExtrema> = polygons
             .iter()
-            .flat_map(|p| p.vertices.iter())
-            .map(|v| v.y - centroid.y)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), d| {
-                (mn.min(d), mx.max(d))
+            .map(|p| p as &dyn BoundaryExtrema)
+            .collect();
+        let (y_min, y_max) = all_boundary
+            .iter()
+            .map(|b| b.extreme_y(centroid))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (lo, hi)| {
+                (mn.min(lo), mx.max(hi))
             });
-        let (x_min, x_max) = polygons
+        let (x_min, x_max) = all_boundary
             .iter()
-            .flat_map(|p| p.vertices.iter())
-            .map(|v| v.x - centroid.x)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), d| {
-                (mn.min(d), mx.max(d))
+            .map(|b| b.extreme_x(centroid))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (lo, hi)| {
+                (mn.min(lo), mx.max(hi))
             });
 
         let max_fiber_y = y_max.abs().max(y_min.abs());
@@ -272,27 +274,20 @@ impl SectionProperties {
         let cos_phi = phi.cos();
         let sin_phi = phi.sin();
 
-        let (x1_min, x1_max, y2_min, y2_max) = polygons
+        let dir_11 = Point::new(cos_phi, sin_phi);
+        let dir_22 = Point::new(-sin_phi, cos_phi);
+        let (x1_min, x1_max) = all_boundary
             .iter()
-            .flat_map(|p| p.vertices.iter())
-            .map(|v| {
-                let dx = v.x - centroid.x;
-                let dy = v.y - centroid.y;
-                let x1 = dx * cos_phi + dy * sin_phi;
-                let y2 = -dx * sin_phi + dy * cos_phi;
-                (x1, y2)
-            })
-            .fold(
-                (
-                    f64::INFINITY,
-                    f64::NEG_INFINITY,
-                    f64::INFINITY,
-                    f64::NEG_INFINITY,
-                ),
-                |(x1n, x1x, y2n, y2x), (x1, y2)| {
-                    (x1n.min(x1), x1x.max(x1), y2n.min(y2), y2x.max(y2))
-                },
-            );
+            .map(|b| b.extreme_distances(centroid, dir_11))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (lo, hi)| {
+                (mn.min(lo), mx.max(hi))
+            });
+        let (y2_min, y2_max) = all_boundary
+            .iter()
+            .map(|b| b.extreme_distances(centroid, dir_22))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (lo, hi)| {
+                (mn.min(lo), mx.max(hi))
+            });
 
         let z11_plus = if y2_max.abs() > 1e-15 {
             i11 / y2_max.abs()
