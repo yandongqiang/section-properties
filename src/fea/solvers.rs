@@ -54,7 +54,7 @@ impl SparseSolver {
     ) -> Vec<f64> {
         match kind {
             SolverKind::Iccg => iccg_solve(matrix, b, max_iter, tol),
-            _ => super::cg_solve(matrix, b, max_iter, tol),
+            _ => super::cg_solve(matrix, b, max_iter, tol).x,
         }
     }
 }
@@ -349,7 +349,7 @@ impl Ic0Factor {
 pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f64> {
     let ic = match Ic0Factor::factor(a) {
         Ok(f) => f,
-        Err(_) => return super::cg_solve(a, b, max_iter, tol),
+        Err(_) => return super::cg_solve(a, b, max_iter, tol).x,
     };
 
     let n = b.len();

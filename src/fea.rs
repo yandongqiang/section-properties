@@ -841,7 +841,9 @@ impl SparseMatrix {
 }
 
 /// Conjugate gradient solver with diagonal preconditioning.
-pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f64> {
+///
+/// Returns a `CgResult` containing the solution and convergence information.
+pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgResult {
     let n = b.len();
 
     // Diagonal preconditioner: M = diag(A), M_inv = 1/diag(A).
@@ -867,7 +869,12 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
     // iterate to a meaningful solution.
     let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
     if b_norm == 0.0 || !b_norm.is_finite() {
-        return x;
+        return CgResult {
+            x,
+            iterations: 0,
+            residual: 0.0,
+            converged: true,
+        };
     }
 
     let mut z: Vec<f64> = r.iter().zip(m_inv.iter()).map(|(a, b)| a * b).collect();
@@ -875,36 +882,88 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f
     let mut rz_old: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
     let mut ap_buf = vec![0.0; n];
 
-    for _ in 0..max_iter {
+    let mut iterations = 0;
+    let mut converged = false;
+    let mut residual = 0.0;
+
+    for iter in 0..max_iter {
         a.matvec_into(&p, &mut ap_buf);
         let ap: &[f64] = &ap_buf;
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(a, b)| a * b).sum();
-        if p_ap.abs() <= 0.0 {
-            break;
+
+        // Check for breakdown: p^T A p <= 0 indicates A is not SPD
+        if p_ap <= 0.0 || !p_ap.is_finite() {
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                converged: false,
+            };
         }
+
         let alpha = rz_old / p_ap;
+        if !alpha.is_finite() {
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                converged: false,
+            };
+        }
+
         for i in 0..n {
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
         }
+
         let rs_new: f64 = r.iter().map(|v| v * v).sum();
-        if rs_new.sqrt() < tol * b_norm {
+        residual = rs_new.sqrt();
+        if residual < tol * b_norm {
+            converged = true;
+            iterations = iter + 1;
             break;
         }
-        if rz_old == 0.0 {
+
+        if rz_old == 0.0 || !rz_old.is_finite() {
             break;
         }
         for i in 0..n {
             z[i] = r[i] * m_inv[i];
         }
         let rz_new: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
+        if !rz_new.is_finite() {
+            break;
+        }
         let beta = rz_new / rz_old;
+        if !beta.is_finite() {
+            break;
+        }
         for i in 0..n {
             p[i] = z[i] + beta * p[i];
         }
         rz_old = rz_new;
+        iterations = iter + 1;
     }
-    x
+
+    CgResult {
+        x,
+        iterations,
+        residual,
+        converged,
+    }
+}
+
+/// Result of the Conjugate Gradient solver.
+#[derive(Debug, Clone)]
+pub struct CgResult {
+    /// Approximate solution vector.
+    pub x: Vec<f64>,
+    /// Number of iterations performed.
+    pub iterations: usize,
+    /// Final residual norm ||b - A*x||.
+    pub residual: f64,
+    /// Whether the solver converged to the requested tolerance.
+    pub converged: bool,
 }
 
 /// Solve the Lagrangian system using sparse CG + Schur complement.
@@ -944,8 +1003,8 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     }
     let k_reg = k_reg.compressed();
 
-    let w1 = cg_solve(&k_reg, f, max_iter, tol);
-    let w2 = cg_solve(&k_reg, c, max_iter, tol);
+    let w1 = cg_solve(&k_reg, f, max_iter, tol).x;
+    let w2 = cg_solve(&k_reg, c, max_iter, tol).x;
 
     let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(a, b)| a * b).sum();
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
@@ -1610,7 +1669,7 @@ mod skyline_tests {
 
         // Compare against CG
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let x_cg = cg_solve(&a.compressed(), &b, 2000, 1e-12);
+        let x_cg = cg_solve(&a.compressed(), &b, 2000, 1e-12).x;
         let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b);
         for i in 0..4 {
             assert!((x_cg[i] - x_dir[i]).abs() < 1e-8);
@@ -1640,8 +1699,8 @@ mod skyline_tests {
             }
             m.compressed()
         };
-        let w1 = cg_solve(&k_reg, &f, 200000, 1e-13);
-        let w2 = cg_solve(&k_reg, &c, 200000, 1e-13);
+        let w1 = cg_solve(&k_reg, &f, 200000, 1e-13).x;
+        let w2 = cg_solve(&k_reg, &c, 200000, 1e-13).x;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
         let lambda = ct_w2 / ct_w1;
@@ -1807,6 +1866,36 @@ mod tests {
         let u = SkylineLdlt::factor(&k.compressed()).unwrap().solve_lagrange(&c, &f);
         let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
         assert!(ct_u.abs() < 1e-10, "SkylineLdlt constraint residual c^T u = {}", ct_u);
+    }
+
+    #[test]
+    fn cg_solve_breakdown_detection() {
+        // Non-SPD matrix with negative diagonal: A = [[-1, 0], [0, 1]]
+        // This will have p^T A p <= 0 on the first iteration
+        let mut a = SparseMatrix::new(2);
+        a.add(0, 0, -1.0);
+        a.add(1, 1, 1.0);
+        let b = vec![1.0, 1.0];
+        let result = cg_solve(&a, &b, 100, 1e-12);
+        // Should detect non-SPD (p^T A p <= 0) and not converge
+        assert!(!result.converged, "CG should not converge on non-SPD matrix");
+        // iterations may be 0 if breakdown happens on first check
+    }
+
+    #[test]
+    fn cg_solve_finite_checks() {
+        // SPD matrix: A = [[2, 1], [1, 2]]
+        let mut a = SparseMatrix::new(2);
+        a.add(0, 0, 2.0);
+        a.add(0, 1, 1.0);
+        a.add(1, 0, 1.0);
+        a.add(1, 1, 2.0);
+        let b = vec![1.0, 2.0];
+        let result = cg_solve(&a, &b, 100, 1e-12);
+        assert!(result.converged, "CG should converge on SPD matrix: {}", result.residual);
+        // Check all output values are finite
+        assert!(result.x.iter().all(|v| v.is_finite()), "Solution has non-finite values");
+        assert!(result.residual.is_finite(), "Residual is non-finite");
     }
 
     #[test]

@@ -301,9 +301,9 @@ fn smoke_solver_backends_agree() {
     let x_lu = lu.solve(&f);
     // ICCG iterative
     let x_iccg = solvers::iccg_solve(&k.compressed(), &f, 10000, 1e-12);
-    // PCG iterative
+// PCG iterative
     let x_pcg =
-        section_properties::fea::cg_solve(&k.compressed(), &f, 10000, 1e-12);
+        section_properties::fea::cg_solve(&k.compressed(), &f, 10000, 1e-12).x;
 
     for i in 0..n {
         assert!((reference[i] - x_lu[i]).abs() < 1e-7, "LU i={}", i);
