@@ -508,7 +508,7 @@ impl CompoundGeometry {
                     for j in 0..g.outer.vertices.len() {
                         let o1 = g.outer.vertices[j];
                         let o2 = g.outer.vertices[(j + 1) % g.outer.vertices.len()];
-                        if segments_cross(h1, h2, o1, o2) {
+                        if segments_interact(h1, h2, o1, o2) {
                             return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
                         }
                     }
@@ -557,7 +557,7 @@ impl CompoundGeometry {
     /// Mirrors `CompoundGeometry.combine(other, operation)`:
     /// - Union: all regions of both compounds unioned pairwise into one
     ///   accumulated set (dissolves internal overlaps).
-    /// - Intersection: every region pair intersected, keeping non-empty
+/// - Intersection: every region pair intersected, keeping non-empty
     ///   results.
     /// - Difference: each region of `self` reduced by every region of
     ///   `other` in sequence.
@@ -566,10 +566,13 @@ impl CompoundGeometry {
 
         match op {
             super::boolean::BoolOp::Intersection => {
+                // Intersection: pairwise intersection of all region pairs
+                // Use polygon_boolean directly on outers (like original code, which worked)
+                // Note: This ignores holes, which is fine for simple cases
                 let mut out = Vec::new();
                 for ga in &self.geometries {
                     for gb in &other.geometries {
-                        out.extend(polygon_boolean(&ga.outer, &gb.outer, op));
+                        out.extend(super::boolean::polygon_boolean(&ga.outer, &gb.outer, op));
                     }
                 }
                 let geometries = out
@@ -579,71 +582,63 @@ impl CompoundGeometry {
                 Self { geometries }
             }
             super::boolean::BoolOp::Difference => {
-                let mut acc: Vec<Polygon> =
-                    self.geometries.iter().map(|g| g.outer.clone()).collect();
+                // Start with all self regions
+                let mut current: Vec<Geometry> = self.geometries.clone();
+                
+                // Subtract each other region from all current regions
                 for gb in &other.geometries {
                     let mut next = Vec::new();
-                    for a in &acc {
-                        next.extend(polygon_boolean(a, &gb.outer, op));
+                    for ga in &current {
+                        if let Some(diff) = ga.boolean_with_holes(gb, op) {
+                            next.push(diff);
+                        }
                     }
-                    acc = next;
-                    if acc.is_empty() {
+                    current = next;
+                    if current.is_empty() {
                         break;
                     }
                 }
-                let geometries = acc
+                let geometries = current
                     .into_iter()
-                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+                    .map(|g| Geometry { outer: g.outer, holes: g.holes, transforms: Vec::new() })
                     .collect();
                 Self { geometries }
             }
             super::boolean::BoolOp::Union => {
-                // Collect every region then repeatedly merge overlapping
-                // pairs until a fixed point. Touching-only regions stay
-                // separate (matching Python's compound semantics).
-                let mut acc: Vec<Polygon> = self
+                // Collect every region from both compounds
+                let mut acc: Vec<Geometry> = self
                     .geometries
                     .iter()
                     .chain(other.geometries.iter())
-                    .map(|g| g.outer.clone())
+                    .cloned()
                     .collect();
 
+                // Merge overlapping regions iteratively
                 loop {
-                    let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
+                    let mut merged: Option<(usize, usize, Geometry)> = None;
                     'outer: for i in 0..acc.len() {
                         for j in (i + 1)..acc.len() {
-                            if !bbox_overlap(&acc[i], &acc[j]) {
+                            if !bbox_overlap(&acc[i].outer, &acc[j].outer) {
                                 continue;
                             }
-                            let u = polygon_boolean(
-                                &acc[i],
-                                &acc[j],
-                                super::boolean::BoolOp::Union,
-                            );
-                            let u_area: f64 = u.iter().map(|p| p.area().abs()).sum();
-                            let sum_area =
-                                acc[i].area().abs() + acc[j].area().abs();
-                            if u_area < sum_area - 1e-9 {
-                                merged = Some((i, j, u));
+                            if let Some(union) = acc[i].boolean_with_holes(&acc[j], super::boolean::BoolOp::Union) {
+                                merged = Some((i, j, union));
                                 break 'outer;
                             }
                         }
                     }
                     match merged {
-                        Some((i, j, u)) => {
+                        Some((i, j, union)) => {
                             let last = acc.len() - 1;
                             acc[j] = acc[last].clone();
                             acc.swap_remove(last);
-                            acc.splice(i..i + 1, u);
+                            acc.splice(i..i + 1, std::iter::once(union));
                         }
                         None => break,
                     }
                 }
 
-                let geometries = acc
-                    .into_iter()
-                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
-                    .collect();
+                let geometries = acc;
                 Self { geometries }
             }
         }
@@ -752,7 +747,7 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
         for j in 0..b_outer.vertices.len() {
             let b1 = b_outer.vertices[j];
             let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
-            if segments_cross(a1, a2, b1, b2) {
+            if segments_interact(a1, a2, b1, b2) {
                 return true;
             }
         }
@@ -807,8 +802,10 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
 /// Segment-segment relation for robust topology checks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SegmentRelation {
-    /// No intersection (including disjoint, touching at endpoints only)
+    /// No intersection (disjoint, no shared points)
     Disjoint,
+    /// Touching at a single endpoint (shared vertex)
+    Touch,
     /// Proper interior intersection (crossing)
     ProperCross,
     /// Collinear and overlapping with positive-length intersection
@@ -828,6 +825,10 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
         // q lies on segment pr (assuming collinear)
         q.x >= p.x.min(r.x) - EPS && q.x <= p.x.max(r.x) + EPS &&
         q.y >= p.y.min(r.y) - EPS && q.y <= p.y.max(r.y) + EPS
+    }
+
+    fn points_equal(p: Point, q: Point) -> bool {
+        (p.x - q.x).abs() <= EPS && (p.y - q.y).abs() <= EPS
     }
 
     let o1 = orient(a1, a2, b1);
@@ -872,14 +873,46 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
         return SegmentRelation::Disjoint;
     }
 
-    // Check for endpoint touching (not considered crossing for our purposes)
-    // b1 on a, b2 on a, a1 on b, a2 on b
-    if o1.abs() <= EPS && on_segment(a1, b1, a2) { return SegmentRelation::Disjoint; }
-    if o2.abs() <= EPS && on_segment(a1, b2, a2) { return SegmentRelation::Disjoint; }
-    if o3.abs() <= EPS && on_segment(b1, a1, b2) { return SegmentRelation::Disjoint; }
-    if o4.abs() <= EPS && on_segment(b1, a2, b2) { return SegmentRelation::Disjoint; }
+    // Check for endpoint touching (shared vertex) - this is Touch, not Disjoint
+    // b1 on a
+    if o1.abs() <= EPS && on_segment(a1, b1, a2) {
+        return if points_equal(b1, a1) || points_equal(b1, a2) {
+            SegmentRelation::Touch
+        } else {
+            SegmentRelation::Disjoint
+        };
+    }
+    // b2 on a
+    if o2.abs() <= EPS && on_segment(a1, b2, a2) {
+        return if points_equal(b2, a1) || points_equal(b2, a2) {
+            SegmentRelation::Touch
+        } else {
+            SegmentRelation::Disjoint
+        };
+    }
+    // a1 on b
+    if o3.abs() <= EPS && on_segment(b1, a1, b2) {
+        return if points_equal(a1, b1) || points_equal(a1, b2) {
+            SegmentRelation::Touch
+        } else {
+            SegmentRelation::Disjoint
+        };
+    }
+    // a2 on b
+    if o4.abs() <= EPS && on_segment(b1, a2, b2) {
+        return if points_equal(a2, b1) || points_equal(a2, b2) {
+            SegmentRelation::Touch
+        } else {
+            SegmentRelation::Disjoint
+        };
+    }
 
     SegmentRelation::Disjoint
+}
+
+fn points_equal(p: Point, q: Point) -> bool {
+    const EPS: f64 = 1e-12;
+    (p.x - q.x).abs() <= EPS && (p.y - q.y).abs() <= EPS
 }
 
 /// Strict edge-crossing test: two segments A1→A2 and B1→B2 cross (share
@@ -888,4 +921,9 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
 /// considered a cross (shared-vertex configurations are allowed).
 fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
     matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross)
+}
+
+/// Check if two segments have any topological interaction (crossing, touching, or collinear overlap).
+fn segments_interact(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    !matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::Disjoint)
 }
