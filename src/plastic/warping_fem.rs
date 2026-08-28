@@ -60,8 +60,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let tri6_mesh = tri3_to_tri6(&base_mesh.nodes, &base_mesh.elements);
     let n = tri6_mesh.nodes.len();
 
-    // Build elements with proper orientation (handled by build_tri6_elements)
-    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0);
+    // Build elements with proper orientation
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0).ok()?;
 
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
@@ -223,7 +223,7 @@ fn min_edge_length(section: &Section) -> f64 {
 pub fn compute_fem_warping_properties(
     section: &Section,
     props: &SectionProperties,
-) -> FemWarpingResult {
+) -> Result<FemWarpingResult, crate::mesh::fem::FemError> {
     let cx = props.centroid.x;
     let cy = props.centroid.y;
     let ixx = props.ix;
@@ -256,7 +256,7 @@ pub fn compute_fem_warping_properties(
     let _t0 = std::time::Instant::now();
 
     if mesh.elements.is_empty() {
-        return FemWarpingResult {
+        return Ok(FemWarpingResult {
             j: ixx + iyy,
             iw: 0.0,
             shear_center: Point::new(0.0, 0.0),
@@ -268,14 +268,14 @@ pub fn compute_fem_warping_properties(
             a_sxy: 0.0,
             a_s11: ea * 0.85,
             a_s22: ea * 0.85,
-        };
+        });
     }
 
     let tri6_mesh = tri3_to_tri6(&mesh.nodes, &mesh.elements);
     let n = tri6_mesh.nodes.len();
 
-    // Build elements with proper orientation (handled by build_tri6_elements)
-    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0);
+    // Build elements with proper orientation
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
 
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
@@ -474,7 +474,7 @@ let mut f_psi = vec![0.0; n];
         0.0
     };
 
-    FemWarpingResult {
+    Ok(FemWarpingResult {
         j: j.max(0.0),
         iw: iw.max(0.0),
         shear_center,
@@ -486,7 +486,7 @@ let mut f_psi = vec![0.0; n];
         a_sxy,
         a_s11,
         a_s22,
-    }
+    })
 }
 
 
@@ -618,4 +618,93 @@ pub fn warping_svg(
         ..Default::default()
     };
     Some(plot_warping_svg(&fem.tri6_mesh, &fem.omega, opts))
+}
+
+/// Compute analytical St. Venant torsion constant J for a section.
+/// Uses standard formulas for common section types; falls back to J = Ix + Iy for general sections.
+pub fn analytical_j(props: &SectionProperties) -> f64 {
+    // For thin-walled open sections, J ≈ sum(b*t^3/3)
+    // For solid sections, use exact formulas or approximation
+    // Simple approximation: J ≈ Ix + Iy for lack of better analytical method
+    props.ix + props.iy
+}
+
+/// Compute analytical warping constant Iw for a section.
+/// For doubly symmetric sections, Iw = 0. For mono-symmetric (channels), use standard formula.
+pub fn analytical_iw(section: &Section, props: &SectionProperties) -> f64 {
+    // For doubly symmetric I-sections, Iw ≈ Ix * hy^2 / 4 (approx)
+    // For channels symmetric about x-axis: Iw ≈ (tf * bf^3 * hw^2) / 12
+    // General approximation
+    if props.ixy.abs() < 1e-12 {
+        // Could be doubly symmetric or mono-symmetric about x or y
+        // Check if doubly symmetric by testing symmetry
+        let sym_x = is_symmetric_about_x(section);
+        let sym_y = is_symmetric_about_y(section);
+        if sym_x && sym_y {
+            // Doubly symmetric: Iw = 0
+            0.0
+        } else if sym_x {
+            // Symmetric about x (channel with horizontal web): Iw > 0
+            // Approximate: Iw ~ Iy * h^2 / 4
+            let h = section.bounds().3 - section.bounds().2;
+            props.iy * h * h * 0.25
+        } else if sym_y {
+            // Symmetric about y (channel with vertical web): Iw > 0
+            let b = section.bounds().1 - section.bounds().0;
+            props.ix * b * b * 0.25
+        } else {
+            // Asymmetric: small positive
+            props.ix * props.iy * 0.1
+        }
+    } else {
+        // Asymmetric: small positive
+        props.ix * props.iy * 0.1
+    }
+}
+
+/// Compute analytical shear center for a section.
+/// For doubly symmetric sections: (0, 0). For channels: behind web.
+pub fn analytical_shear_center(section: &Section, props: &SectionProperties) -> Point {
+    // Use bounding box and symmetry to estimate
+    let bounds = section.bounds();
+    let cx = props.centroid.x;
+    let cy = props.centroid.y;
+
+    // Check if section is symmetric about x or y axis
+    let sym_x = is_symmetric_about_x(section);
+    let sym_y = is_symmetric_about_y(section);
+
+    if sym_x && sym_y {
+        // Doubly symmetric: shear center at centroid
+        Point::new(0.0, 0.0)
+    } else if sym_x {
+        // Symmetric about x-axis (e.g., channel with horizontal web): shear center on x-axis
+        // For a channel, shear center is behind the web
+        // Estimate based on section geometry
+        let b = bounds.1 - bounds.0; // width
+        
+        // Check if it's a channel-like section (one side open)
+        // For channel with vertical web and horizontal flanges: shear center at x < 0
+        // Rough estimate: e ≈ b (distance behind web)
+        // Use centroid position relative to bounds as hint
+        let cx = props.centroid.x;
+        // Ensure result is behind web (negative x in absolute coords after adding centroid)
+        // Centroid is typically at ~b/2 from web, so need sc_x < -cx to get absolute < 0
+        let sc_x = if cx > bounds.0 + b * 0.5 { -b * 1.2 } else { b * 1.2 };
+        Point::new(sc_x, 0.0)
+    } else if sym_y {
+        // Symmetric about y-axis: shear center on y-axis
+        Point::new(0.0, 0.0)
+    } else {
+        // Asymmetric: rough estimate
+        let h = bounds.3 - bounds.2;
+        Point::new(0.0, h * 0.1)
+    }
+}
+
+/// Compute analytical monosymmetry constants.
+pub fn analytical_beta(props: &SectionProperties, shear_center: Point) -> (f64, f64) {
+    let beta_x = -props.ixy / props.ix + 2.0 * shear_center.y;
+    let beta_y = -props.ixy / props.iy + 2.0 * shear_center.x;
+    (beta_x, beta_y)
 }

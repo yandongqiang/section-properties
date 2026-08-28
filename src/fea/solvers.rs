@@ -1,6 +1,6 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
-use super::{SkylineLdlt, SparseMatrix};
+use super::{SkylineLdlt, SparseMatrix, PIVOT_TOL};
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +167,7 @@ impl SparseLu {
                 .first()
                 .map(|(_, v)| v.abs())
                 .unwrap_or(0.0);
-            let tol_pivot = 1e-12 * row_scale[i].max(1e-300);
+            let tol_pivot = PIVOT_TOL * row_scale[i].max(1e-300);
             if u_rows[i].is_empty() || u_rows[i][0].0 != i || pivot_val <= tol_pivot {
                 // Static pivoting fallback: perturb the diagonal so the
                 // factorisation completes (SuperLU-style diagonal shift).
@@ -614,7 +614,7 @@ pub mod pardiso {
             let w2 = ldlt.solve(c);
             let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
             let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-            let lambda = if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 };
+            let lambda = if ct_w1.abs() > NEAR_ZERO_TOL { ct_w2 / ct_w1 } else { 0.0 };
             let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
             if max_u > 0.0 { lambda.abs() / max_u } else { f64::INFINITY }
         }

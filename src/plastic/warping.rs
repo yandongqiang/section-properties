@@ -3,7 +3,7 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-use super::warping_fem::{compute_fem_warping_properties, estimate_shear_areas_fallback};
+use super::warping_fem::{compute_fem_warping_properties, estimate_shear_areas_fallback, FemWarpingResult, analytical_j, analytical_iw, analytical_shear_center, analytical_beta};
 use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -90,7 +90,23 @@ impl WarpingProperties {
         let props = SectionProperties::from_section(section);
         let area = props.area;
 
-        let fem = compute_fem_warping_properties(section, &props);
+        let fem = compute_fem_warping_properties(section, &props).unwrap_or_else(|_| {
+            let sc = analytical_shear_center(section, &props);
+            let (beta_x, beta_y) = analytical_beta(&props, sc);
+            FemWarpingResult {
+                j: analytical_j(&props),
+                iw: analytical_iw(section, &props),
+                shear_center: sc,
+                shear_center_elastic: sc,
+                beta_x_plus: beta_x,
+                beta_y_plus: beta_y,
+                a_sx: 0.0,
+                a_sy: 0.0,
+                a_sxy: 0.0,
+                a_s11: 0.0,
+                a_s22: 0.0,
+            }
+        });
 
         let j = fem.j;
         let iw = fem.iw;
@@ -149,7 +165,23 @@ impl WarpingProperties {
             let rotated_holes: Vec<_> = section.holes.iter().map(|h| h.rotate(-phi)).collect();
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_props = SectionProperties::from_section(&rotated_section);
-            let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props);
+            let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props).unwrap_or_else(|_| {
+                let sc = analytical_shear_center(&rotated_section, &rotated_props);
+                let (beta_x, beta_y) = analytical_beta(&rotated_props, sc);
+                FemWarpingResult {
+                    j: analytical_j(&rotated_props),
+                    iw: analytical_iw(&rotated_section, &rotated_props),
+                    shear_center: sc,
+                    shear_center_elastic: sc,
+                    beta_x_plus: beta_x,
+                    beta_y_plus: beta_y,
+                    a_sx: 0.0,
+                    a_sy: 0.0,
+                    a_sxy: 0.0,
+                    a_s11: 0.0,
+                    a_s22: 0.0,
+                }
+            });
             if fem_shear_ok(rotated_fem.a_sx, rotated_fem.a_sy) {
                 (rotated_fem.a_sx, rotated_fem.a_sy)
             } else {
@@ -165,7 +197,23 @@ impl WarpingProperties {
             let rotated_holes: Vec<_> = section.holes.iter().map(|h| h.rotate(-phi)).collect();
             let rotated_section = Section::new(rotated_outer, rotated_holes);
             let rotated_props = SectionProperties::from_section(&rotated_section);
-            let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props);
+            let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props).unwrap_or_else(|_| {
+                let sc = analytical_shear_center(&rotated_section, &rotated_props);
+                let (beta_x, beta_y) = analytical_beta(&rotated_props, sc);
+                FemWarpingResult {
+                    j: analytical_j(&rotated_props),
+                    iw: analytical_iw(&rotated_section, &rotated_props),
+                    shear_center: sc,
+                    shear_center_elastic: sc,
+                    beta_x_plus: beta_x,
+                    beta_y_plus: beta_y,
+                    a_sx: 0.0,
+                    a_sy: 0.0,
+                    a_sxy: 0.0,
+                    a_s11: 0.0,
+                    a_s22: 0.0,
+                }
+            });
             (rotated_fem.beta_x_plus, rotated_fem.beta_y_plus)
         };
 

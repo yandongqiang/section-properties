@@ -8,6 +8,25 @@ use crate::geometry::Point;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// FEM Tolerances
+// ---------------------------------------------------------------------------
+
+/// Tolerance for geometric comparisons (e.g., point coincidence, edge lengths).
+pub const GEOMETRY_TOL: f64 = 1e-12;
+
+/// Tolerance for Jacobian determinant checks (degenerate element detection).
+pub const JACOBIAN_TOL: f64 = 1e-20;
+
+/// Tolerance for iterative solver convergence (CG, ICCG, etc.).
+pub const SOLVER_TOL: f64 = 1e-12;
+
+/// Tolerance for pivot checks in direct solvers (LDL^T, Cholesky).
+pub const PIVOT_TOL: f64 = 1e-15;
+
+/// Tolerance for near-zero checks in warping/stress calculations.
+pub const NEAR_ZERO_TOL: f64 = 1e-15;
+
+// ---------------------------------------------------------------------------
 // Gaussian quadrature for Tri6
 // ---------------------------------------------------------------------------
 
@@ -112,7 +131,7 @@ pub fn shape_function(coords: &[[f64; 6]; 2], gp: (f64, f64, f64)) -> ShapeFunct
 
     // Check for degenerate element (zero or negative Jacobian)
     // Use a very small threshold for truly degenerate elements
-    if jacobian.abs() <= 1e-20 {
+    if jacobian.abs() <= JACOBIAN_TOL {
         return ShapeFunctionResult {
             n,
             b: [[0.0; 6]; 2],
@@ -339,7 +358,7 @@ impl Tri6 {
         }
         // Check orientation at centroid (xi=eta=zeta=1/3)
         let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
-        if sf.j.abs() <= 1e-20 {
+        if sf.j.abs() <= JACOBIAN_TOL {
             return Err(crate::mesh::fem::FemError::DegenerateElement);
         }
         if sf.j < 0.0 {
@@ -608,19 +627,19 @@ impl Tri6 {
             let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
 
             // Bending stresses
-            if denom.abs() > 1e-15 {
+            if denom.abs() > NEAR_ZERO_TOL {
                 sig_zz_mxx_gp[i] = em * (-ixy * mxx / denom * sf.x + iyy * mxx / denom * sf.y);
                 sig_zz_myy_gp[i] = em * (-ixx * myy / denom * sf.x + ixy * myy / denom * sf.y);
             }
-            if i11.abs() > 1e-15 {
+            if i11.abs() > NEAR_ZERO_TOL {
                 sig_zz_m11_gp[i] = em * m11 / i11 * ny_22;
             }
-            if i22.abs() > 1e-15 {
+            if i22.abs() > NEAR_ZERO_TOL {
                 sig_zz_m22_gp[i] = em * -m22 / i22 * nx_11;
             }
 
             // Torsional shear stress
-            if mzz.abs() > 1e-12 && j.abs() > 1e-12 {
+            if mzz.abs() > GEOMETRY_TOL && j.abs() > GEOMETRY_TOL {
                 let mut b_omega = [0.0; 2];
                 for k in 0..6 {
                     b_omega[0] += sf.b[0][k] * omega[k];
@@ -631,7 +650,7 @@ impl Tri6 {
             }
 
             // Shear stress from Vx
-            if vx.abs() > 1e-12 && delta_s.abs() > 1e-12 {
+            if vx.abs() > GEOMETRY_TOL && delta_s.abs() > GEOMETRY_TOL {
                 let mut b_psi = [0.0; 2];
                 for k in 0..6 {
                     b_psi[0] += sf.b[0][k] * psi_shear[k];
@@ -642,7 +661,7 @@ impl Tri6 {
             }
 
             // Shear stress from Vy
-            if vy.abs() > 1e-12 && delta_s.abs() > 1e-12 {
+            if vy.abs() > GEOMETRY_TOL && delta_s.abs() > GEOMETRY_TOL {
                 let mut b_phi = [0.0; 2];
                 for k in 0..6 {
                     b_phi[0] += sf.b[0][k] * phi_shear[k];
@@ -734,16 +753,18 @@ pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6M
 /// Returns `Err(FemError::DegenerateElement)` if any element has
 /// zero or negative Jacobian determinant at any Gauss point.
 pub fn validate_tri6_mesh(mesh: &Tri6Mesh) -> Result<(), crate::mesh::fem::FemError> {
-    for (i, &elem) in mesh.elements.iter().enumerate() {
+    let gps = gauss_points(6);
+    for &elem in mesh.elements.iter() {
         let mut coords = [[0.0; 6]; 2];
         for k in 0..6 {
             coords[0][k] = mesh.nodes[elem[k]].x;
             coords[1][k] = mesh.nodes[elem[k]].y;
         }
-        // Check Jacobian at element centroid (xi=eta=zeta=1/3)
-        let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
-        if sf.j.abs() <= 1e-20 {
-            return Err(crate::mesh::fem::FemError::DegenerateElement);
+        for &(_, eta, xi, zeta) in &gps {
+            let sf = shape_function(&coords, (eta, xi, zeta));
+            if sf.j <= JACOBIAN_TOL {
+                return Err(crate::mesh::fem::FemError::DegenerateElement);
+            }
         }
     }
     Ok(())
@@ -769,40 +790,40 @@ fn get_or_create_midpoint(
 }
 
 /// Build a list of Tri6 elements from a Tri6Mesh for a given material.
-/// For degenerate elements, creates elements with zero B matrix (jacobian = 0).
+/// Returns `Err(FemError::DegenerateElement)` if any element has
+/// zero or negative Jacobian determinant at any Gauss point.
 /// Coordinates are kept in section-centroid frame for stress calculation compatibility.
-pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Vec<Tri6> {
-    mesh.elements
-        .iter()
-        .enumerate()
-        .map(|(i, &elem)| {
-            let points: [Point; 6] = [
-                mesh.nodes[elem[0]],
-                mesh.nodes[elem[1]],
-                mesh.nodes[elem[2]],
-                mesh.nodes[elem[3]],
-                mesh.nodes[elem[4]],
-                mesh.nodes[elem[5]],
-            ];
-            // Check for degenerate element
-            let sf = shape_function(&[
-                [points[0].x, points[1].x, points[2].x, points[3].x, points[4].x, points[5].x],
-                [points[0].y, points[1].y, points[2].y, points[3].y, points[4].y, points[5].y],
-            ], (1.0/3.0, 1.0/3.0, 1.0/3.0));
-            // For degenerate elements (j ~ 0), create element with zero B matrix
-            if sf.j.abs() <= 1e-15 {
-                return Tri6 {
-                    el_id: i,
-                    coords: [[0.0; 6]; 2],
-                    node_ids: elem,
-                    elastic_modulus: em,
-                    shear_modulus: gm,
-                    density: rho,
-                };
+pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Result<Vec<Tri6>, crate::mesh::fem::FemError> {
+    let gps = gauss_points(6);
+    let mut elements = Vec::with_capacity(mesh.elements.len());
+    for (i, &elem) in mesh.elements.iter().enumerate() {
+        let points: [Point; 6] = [
+            mesh.nodes[elem[0]],
+            mesh.nodes[elem[1]],
+            mesh.nodes[elem[2]],
+            mesh.nodes[elem[3]],
+            mesh.nodes[elem[4]],
+            mesh.nodes[elem[5]],
+        ];
+        let coords = [
+            [points[0].x, points[1].x, points[2].x, points[3].x, points[4].x, points[5].x],
+            [points[0].y, points[1].y, points[2].y, points[3].y, points[4].y, points[5].y],
+        ];
+        // Check for degenerate element at all Gauss points
+        let mut degenerate = false;
+        for &(_, eta, xi, zeta) in &gps {
+            let sf = shape_function(&coords, (eta, xi, zeta));
+            if sf.j <= JACOBIAN_TOL {
+                degenerate = true;
+                break;
             }
-            Tri6::from_points(i, points, elem, em, gm, rho).unwrap()
-        })
-        .collect()
+        }
+        if degenerate {
+            return Err(crate::mesh::fem::FemError::DegenerateElement);
+        }
+        elements.push(Tri6::from_points(i, points, elem, em, gm, rho)?);
+    }
+    Ok(elements)
 }
 
 // ---------------------------------------------------------------------------
@@ -961,7 +982,7 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
     }
     let mut m_inv = vec![1.0; n];
     for i in 0..n {
-        if diag[i].abs() > 1e-15 {
+        if diag[i].abs() > NEAR_ZERO_TOL {
             m_inv[i] = 1.0 / diag[i];
         }
     }
@@ -1126,7 +1147,7 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(a, b)| a * b).sum();
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
 
-    if ct_w2.abs() < 1e-15 {
+    if ct_w2.abs() < NEAR_ZERO_TOL {
         return w1;
     }
     let lambda = ct_w1 / ct_w2;
@@ -1186,7 +1207,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
             b.swap(k, max_row);
         }
         let pivot = a[k][k];
-        if pivot.abs() < 1e-15 {
+        if pivot.abs() < PIVOT_TOL {
             return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         for i in (k + 1)..n {
@@ -1200,7 +1221,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
     // Back substitution
     for k in (0..n).rev() {
         let pivot = a[k][k];
-        if pivot.abs() < 1e-15 {
+        if pivot.abs() < PIVOT_TOL {
             return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         let mut sum = 0.0;
@@ -1409,7 +1430,7 @@ impl DirectLagrangeSolver {
                 let w2 = ldlt.solve(&self.c);
                 let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
                 let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-                let lambda = if ct_w2.abs() > 1e-15 { ct_w1 / ct_w2 } else { 0.0 };
+                let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
                 let u = w1
                     .iter()
                     .zip(w2.iter())
@@ -1669,7 +1690,7 @@ impl SkylineLdlt {
         let w2 = self.solve(c);
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = if ct_w2.abs() > 1e-15 { ct_w1 / ct_w2 } else { 0.0 };
+        let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
         w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
     }
 }
@@ -1786,7 +1807,7 @@ mod skyline_tests {
 
         // Compare against CG
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let x_cg = cg_solve(&a.compressed(), &b, 2000, 1e-12).x;
+        let x_cg = cg_solve(&a.compressed(), &b, 2000, SOLVER_TOL).x;
         let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b);
         for i in 0..4 {
             assert!((x_cg[i] - x_dir[i]).abs() < 1e-8);
@@ -1993,7 +2014,7 @@ mod tests {
         a.add(0, 0, -1.0);
         a.add(1, 1, 1.0);
         let b = vec![1.0, 1.0];
-        let result = cg_solve(&a, &b, 100, 1e-12);
+        let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         // Should detect non-SPD (p^T A p <= 0) and not converge
         assert!(!result.converged, "CG should not converge on non-SPD matrix");
         // iterations may be 0 if breakdown happens on first check
@@ -2008,7 +2029,7 @@ mod tests {
         a.add(1, 0, 1.0);
         a.add(1, 1, 2.0);
         let b = vec![1.0, 2.0];
-        let result = cg_solve(&a, &b, 100, 1e-12);
+        let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         assert!(result.converged, "CG should converge on SPD matrix: {}", result.residual);
         // Check all output values are finite
         assert!(result.x.iter().all(|v| v.is_finite()), "Solution has non-finite values");
@@ -2047,9 +2068,13 @@ mod tests {
             crate::mesh::fem::FemError::DegenerateElement
         );
 
-        // build_tri6_elements should still succeed but produce elements with zero B matrix
-        let elements = build_tri6_elements(&mesh, 200e9, 80e9, 7850.0);
-        assert!(!elements.is_empty());
+        // build_tri6_elements should return DegenerateElement error
+        let result = build_tri6_elements(&mesh, 200e9, 80e9, 7850.0);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            crate::mesh::fem::FemError::DegenerateElement
+        );
     }
 
     #[test]
