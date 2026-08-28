@@ -238,10 +238,7 @@ impl Geometry {
 
         let results = match op {
             super::boolean::BoolOp::Union => {
-                super::boolean::polygon_boolean(&a.outer, &b.outer, op)
-                    .into_iter()
-                    .map(|outer| Section::new(outer, Vec::new()))
-                    .collect()
+                super::boolean::section_union(&a, &b)
             }
             super::boolean::BoolOp::Intersection => {
                 super::boolean::section_intersection(&a, &b)
