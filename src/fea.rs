@@ -1947,4 +1947,35 @@ mod tests {
             assert!((v - 1.0).abs() < 1e-10, "v = {v}");
         }
     }
+
+    #[test]
+    fn tri6_degenerate_element_detection() {
+        // Create a degenerate triangle (collinear points)
+        let nodes = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0),  // collinear!
+            Point::new(0.5, 0.0),  // mid01
+            Point::new(1.5, 0.0),  // mid12
+            Point::new(1.0, 0.0),  // mid20
+        ];
+        let elements = vec![[0, 1, 2, 3, 4, 5]];
+        let mesh = Tri6Mesh { nodes, elements };
+
+        // validate_tri6_mesh should return DegenerateElement error
+        let result = validate_tri6_mesh(&mesh);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            crate::mesh::fem::FemError::DegenerateElement
+        );
+
+        // build_tri6_elements should also return error
+        let result = build_tri6_elements(&mesh, 200e9, 80e9, 7850.0);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            crate::mesh::fem::FemError::DegenerateElement
+        );
+    }
 }
