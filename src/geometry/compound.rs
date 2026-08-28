@@ -399,8 +399,20 @@ impl std::fmt::Display for CompoundError {
 
 impl std::error::Error for CompoundError {}
 
-/// Quick bounding-box overlap test for two polygons.
-fn bbox_overlap(a: &Polygon, b: &Polygon) -> bool {
+/// Bounding-box relation between two polygons for quick rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BBoxRelation {
+    /// No overlap, not even touching
+    Disjoint,
+    /// Touching at boundary but no area overlap
+    Touch,
+    /// Positive area overlap
+    Overlap,
+}
+
+/// Quick bounding-box relation test for two polygons.
+/// Returns Disjoint if separated, Touch if only boundaries touch, Overlap if interiors overlap.
+fn bbox_relation(a: &Polygon, b: &Polygon) -> BBoxRelation {
     let bbox = |pts: &[Point]| {
         pts.iter().fold(
             (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
@@ -409,8 +421,24 @@ fn bbox_overlap(a: &Polygon, b: &Polygon) -> bool {
     };
     let (al, ar, ab, at) = bbox(&a.vertices);
     let (bl, br, bb, bt) = bbox(&b.vertices);
-    al <= br && bl <= ar && ab <= bt && bb <= at
+
+    // Check for disjoint (no overlap, not even touching)
+    if ar < bl || br < al || at < bb || bt < ab {
+        return BBoxRelation::Disjoint;
+    }
+
+    // Check for touch (boundaries touch but interiors don't overlap)
+    // This means at least one dimension has equality at the boundary
+    let x_touch = ar == bl || br == al;
+    let y_touch = at == bb || bt == ab;
+    if x_touch || y_touch {
+        return BBoxRelation::Touch;
+    }
+
+    // Otherwise there is positive area overlap
+    BBoxRelation::Overlap
 }
+
 impl CompoundGeometry {
     /// Create a compound geometry from its constituent regions.
     ///
@@ -456,7 +484,7 @@ impl CompoundGeometry {
             let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
             'outer: for i in 0..acc.len() {
                 for j in (i + 1)..acc.len() {
-                    if !bbox_overlap(&acc[i], &acc[j]) {
+                    if matches!(bbox_relation(&acc[i], &acc[j]), BBoxRelation::Disjoint) {
                         continue;
                     }
                     let u = polygon_boolean(&acc[i], &acc[j], BoolOp::Union);
@@ -618,7 +646,7 @@ impl CompoundGeometry {
                     let mut merged: Option<(usize, usize, Geometry)> = None;
                     'outer: for i in 0..acc.len() {
                         for j in (i + 1)..acc.len() {
-                            if !bbox_overlap(&acc[i].outer, &acc[j].outer) {
+                            if matches!(bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
                                 continue;
                             }
                             if let Some(union) = acc[i].boolean_with_holes(&acc[j], super::boolean::BoolOp::Union) {
