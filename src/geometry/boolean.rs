@@ -917,6 +917,46 @@ mod tests {
     }
 
     #[test]
+    fn section_intersection_clips_holes_to_piece() {
+        use crate::section::Section;
+        // A = 4x4 with a 2x2 hole ([1,3]^2). B = 1.5x4 strip along the left
+        // edge with its own 0.5x2 hole. The intersection piece is only
+        // [0,1.5]x[0,4], so neither full hole fits: each must be clipped to
+        // hole ∩ piece.
+        let hole_a = square(1.0, 1.0, 2.0); // [1,3]^2
+        let a = Section::new(square(0.0, 0.0, 4.0), vec![hole_a]);
+        let b_outer = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.5, 0.0),
+            Point::new(1.5, 4.0),
+            Point::new(0.0, 4.0),
+        ]);
+        let hole_b = Polygon::new(vec![
+            Point::new(0.5, 1.0),
+            Point::new(1.0, 1.0),
+            Point::new(1.0, 3.0),
+            Point::new(0.5, 3.0),
+        ]); // [0.5,1.0]x[1.0,3.0], area 1
+        let b = Section::new(b_outer, vec![hole_b]);
+
+        let result = section_intersection(&a, &b);
+        assert_eq!(result.len(), 1);
+        let sec = &result[0];
+        // Piece = [0,1.5]x[0,4], area 6.
+        assert!((sec.outer.area() - 6.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        // A's hole clipped to [1,1.5]x[1,3] (0.5x2) and B's hole [0.5,1.0]x[1,3]
+        // (already inside the piece). Total void = 1 + 1 = 2.
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        assert!((hole_area - 2.0).abs() < 1e-4, "clipped holes total area {}", hole_area);
+        for h in &sec.holes {
+            assert!(h.vertices.iter().all(|v| sec.outer.contains_point(*v)),
+                "hole must not extend outside the piece");
+        }
+        // Net material = 6 - 2 = 4.
+        assert!((sec.area() - 4.0).abs() < 1e-4, "section area {}", sec.area());
+    }
+
+    #[test]
     fn section_intersection_clips_hole_to_piece() {
         use crate::section::Section;
         // A = 10x10 with an 8x8 hole ([1,9]^2). B = 2x10 strip along the left
