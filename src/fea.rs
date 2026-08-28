@@ -319,6 +319,10 @@ pub struct Tri6 {
 
 impl Tri6 {
     /// Create a Tri6 element from 6 points and node ids.
+    ///
+    /// Validates that the element has positive orientation (CCW winding).
+    /// Returns `Err(FemError::InvalidElementOrientation)` if the element
+    /// is degenerate or has negative Jacobian (CW winding).
     pub fn from_points(
         el_id: usize,
         points: [Point; 6],
@@ -326,20 +330,28 @@ impl Tri6 {
         em: f64,
         gm: f64,
         rho: f64,
-    ) -> Self {
+    ) -> Result<Self, crate::mesh::fem::FemError> {
         let mut coords = [[0.0; 6]; 2];
         for i in 0..6 {
             coords[0][i] = points[i].x;
             coords[1][i] = points[i].y;
         }
-        Self {
+        // Check orientation at centroid (xi=eta=zeta=1/3)
+        let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
+        if sf.j.abs() <= 1e-15 {
+            return Err(crate::mesh::fem::FemError::DegenerateElement);
+        }
+        if sf.j < 0.0 {
+            return Err(crate::mesh::fem::FemError::InvalidElementOrientation);
+        }
+        Ok(Self {
             el_id,
             coords,
             node_ids,
             elastic_modulus: em,
             shear_modulus: gm,
             density: rho,
-        }
+        })
     }
 
     /// Calculate geometric properties: (area, qx, qy, ixx, iyy, ixy).
@@ -745,7 +757,7 @@ pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Resul
             }
             Tri6::from_points(i, points, elem, em, gm, rho)
         })
-        .collect())
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,7 +1776,7 @@ mod tests {
     use super::*;
 
     fn rect_tri6() -> Tri6 {
-        // Unit triangle with mid-nodes
+        // Unit triangle with mid-nodes (CCW orientation)
         let points = [
             Point::new(0.0, 0.0),
             Point::new(1.0, 0.0),
@@ -1773,7 +1785,7 @@ mod tests {
             Point::new(0.5, 0.5),
             Point::new(0.0, 0.5),
         ];
-        Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0)
+        Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap()
     }
 
     #[test]
@@ -1976,6 +1988,37 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             crate::mesh::fem::FemError::DegenerateElement
+        );
+    }
+
+    #[test]
+    fn tri6_orientation_check() {
+        // Valid CCW triangle should work
+        let points_ccw = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(0.5, 0.0),
+            Point::new(0.5, 0.5),
+            Point::new(0.0, 0.5),
+        ];
+        let result = Tri6::from_points(0, points_ccw, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0);
+        assert!(result.is_ok(), "CCW triangle should be valid");
+
+        // CW triangle should fail
+        let points_cw = [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 0.5),
+            Point::new(0.5, 0.5),
+            Point::new(0.5, 0.0),
+        ];
+        let result = Tri6::from_points(0, points_cw, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0);
+        assert!(result.is_err(), "CW triangle should fail");
+        assert_eq!(
+            result.unwrap_err(),
+            crate::mesh::fem::FemError::InvalidElementOrientation
         );
     }
 }

@@ -834,6 +834,7 @@ pub enum FemError {
     MaterialNotFound,
     ConvergenceFailed,
     DegenerateElement,
+    InvalidElementOrientation,
 }
 
 impl std::fmt::Display for FemError {
@@ -844,6 +845,7 @@ impl std::fmt::Display for FemError {
             FemError::MaterialNotFound => write!(f, "Material not found"),
             FemError::ConvergenceFailed => write!(f, "Solver did not converge"),
             FemError::DegenerateElement => write!(f, "Degenerate element (zero or negative Jacobian)"),
+            FemError::InvalidElementOrientation => write!(f, "Invalid element orientation (negative Jacobian, CW winding)"),
         }
     }
 }

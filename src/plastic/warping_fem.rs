@@ -67,7 +67,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
             let p = tri6_mesh.nodes[elem[k]];
             points[k] = Point::new(p.x - cx, p.y - cy);
         }
-        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0));
+        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0).unwrap());
     }
 
     let mut k_global = SparseMatrix::new(n);
@@ -289,7 +289,7 @@ pub fn compute_fem_warping_properties(
             let p = tri6_mesh.nodes[elem[k]];
             points[k] = Point::new(p.x - cx, p.y - cy);
         }
-        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0));
+        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0).unwrap());
     }
 
     let mut k_global = SparseMatrix::new(n);
