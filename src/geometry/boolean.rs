@@ -488,6 +488,17 @@ fn polygon_boolean_impl(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
         }
     }
 
+    boolean_generic(a, b, op)
+}
+
+/// Greiner–Hormann boolean on two **simple polygons** that always runs the
+/// generic crossing algorithm, without the nesting/disjoint fast paths.
+///
+/// The fast paths in [`polygon_boolean_impl`] defer holes to the Section
+/// level (e.g. `A \ B` with B nested inside A returns `[A]`); this variant is
+/// used when the result must be expressed as explicit polygons (building
+/// material regions and punching holes).
+fn boolean_generic(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     // For difference, reverse B so intersection semantics apply
     // (A - B == A intersect reversed-B).
     let b_eff: Vec<Point> = if op == BoolOp::Difference {
@@ -559,96 +570,158 @@ fn polygon_boolean_impl(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     results
 }
 
+/// Compute the material of `s` that lies inside `p`, expressed as a list of
+/// polygons `p ∩ material(s)`.
+///
+/// Because `material(s) = outer \ holes`, this is `p ∩ outer` with each hole
+/// cut out. Each operation used here (`intersection` and `difference`) acts on
+/// simple polygons and, crucially, never needs to represent a polygon-with-a-
+/// nested-hole, so the results are always plain regions.
+fn material_inside(p: &Polygon, s: &crate::section::Section) -> Vec<Polygon> {
+    // p ∩ outer
+    let mut acc = polygon_boolean(p, &s.outer, BoolOp::Intersection);
+    // subtract every hole (in CCW orientation, as the boolean expects)
+    for h in &s.holes {
+        let h_ccw = ccw(h);
+        let mut next = Vec::new();
+        for r in acc.iter() {
+            next.extend(polygon_boolean(r, &h_ccw, BoolOp::Difference));
+        }
+        acc = next;
+        if acc.is_empty() {
+            break;
+        }
+    }
+    acc.into_iter().filter(|r| r.area().abs() > 1e-15).collect()
+}
+
+/// Return a counter-clockwise (positive-area) copy of a polygon. Holes are
+/// stored clockwise by [`Section`](crate::section::Section), but the boolean
+/// routines operate on CCW outer polygons.
+fn ccw(p: &Polygon) -> Polygon {
+    if p.signed_area() >= 0.0 {
+        p.clone()
+    } else {
+        Polygon::new(p.vertices.iter().rev().copied().collect())
+    }
+}
+
+/// The part of `hole` that is **not** covered by the material of the section
+/// represented by `(outer, holes)`; i.e. `hole \ material`. These regions are
+/// the "void" left by a hole of one section that is not filled by the other
+/// section's material.
+fn hole_minus_material(
+    hole: &Polygon,
+    outer: &Polygon,
+    holes: &[Polygon],
+) -> Vec<Polygon> {
+    // hole \ material = (hole \ outer) ∪ (hole ∩ each hole)
+    let hole = ccw(hole);
+    let mut res = Vec::new();
+    res.extend(polygon_boolean(&hole, outer, BoolOp::Difference));
+    for oh in holes {
+        res.extend(polygon_boolean(&hole, &ccw(oh), BoolOp::Intersection));
+    }
+    res
+}
+
+/// Compute the holes that survive inside the outer-boundary piece `p` when
+/// `a` and `b` are combined by `op`. The voids are regions inside `p` where
+/// the result has no material, expressed as plain simple polygons.
+///
+/// - **Union**: material exists where *either* section has material, so a hole
+///   of one section remains a hole only where the other section does not fill
+///   it (`hole \ material(other)`).
+/// - **Intersection**: material exists where *both* sections have material, so
+///   every hole of either section that lies inside the piece is a void.
+/// - **Difference**: material is `material(A) \ material(B)`, so the voids are
+///   A's holes (inside the piece) plus any of B's material inside the piece.
+fn holes_for_piece(
+    p: &Polygon,
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+    op: BoolOp,
+) -> Vec<Polygon> {
+    let mut void_regions: Vec<Polygon> = Vec::new();
+
+    match op {
+        BoolOp::Union => {
+            // A's holes that B does not fill, plus B's holes that A does not fill.
+            for h in a.holes.iter() {
+                void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+            }
+            for h in b.holes.iter() {
+                void_regions.extend(hole_minus_material(h, &a.outer, &a.holes));
+            }
+        }
+        BoolOp::Intersection => {
+            // Every hole of either section inside the piece is a void.
+            void_regions.extend(a.holes.iter().cloned());
+            void_regions.extend(b.holes.iter().cloned());
+        }
+        BoolOp::Difference => {
+            // A's holes plus B's material, both restricted to the piece.
+            void_regions.extend(material_inside(p, b));
+            void_regions.extend(a.holes.iter().cloned());
+        }
+    }
+
+    // Keep only regions inside `p` that carry meaningful area. Any tiny region
+    // that touches `p`'s boundary is an exterior sliver, not a hole, so it is
+    // dropped.
+    let scale = bbox_diag(&p.vertices);
+    let area_tol = 1e-9 * p.area().abs().max(1e-12) + 1e-12 * scale * scale;
+    void_regions
+        .into_iter()
+        .filter(|r| {
+            r.area().abs() > area_tol
+                && r.vertices.iter().all(|v| p.contains_point(*v))
+        })
+        .collect()
+}
+
+/// Core boolean on two full sections (outer boundary + holes) that unifies
+/// hole handling across all three operations.
+///
+/// The outer boundaries are combined with [`polygon_boolean`], then each
+/// resulting region has its surviving holes re-attached with
+/// [`holes_for_piece`].
+///
+/// Returns one [`Section`] per disjoint result region.
+fn section_boolean(
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+    op: BoolOp,
+) -> Vec<crate::section::Section> {
+    use crate::section::Section;
+
+    let pieces = polygon_boolean(&a.outer, &b.outer, op);
+    pieces
+        .into_iter()
+        .map(|p| {
+            let holes = holes_for_piece(&p, a, b, op);
+            Section::new(p, holes)
+        })
+        .filter(|s| s.area() > 0.0)
+        .collect()
+}
+
 /// Boolean intersection between two full sections (outer boundary + holes).
 ///
 /// Mirrors shapely `geometry & other` as used by Python `sectionproperties`.
 ///
 /// Returns one [`Section`] per disjoint result region.
 pub fn section_intersection(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
-    use crate::section::Section;
-
-    let raw = compute_raw_intersections(&a.outer.vertices, &b.outer.vertices);
-    let a_in_b = a.outer.vertices.iter().all(|v| b.outer.contains_point(*v));
-    let b_in_a = b.outer.vertices.iter().all(|v| a.outer.contains_point(*v));
-
-    // Handle containment cases
-    if raw.is_empty() {
-        if a_in_b {
-            return vec![Section::new(a.outer.clone(), a.holes.clone())];
-        }
-        if b_in_a {
-            return vec![Section::new(b.outer.clone(), b.holes.clone())];
-        }
-        return Vec::new(); // Disjoint
-    }
-
-    // Generic case: boundary-level intersection, reattach interior holes from both sections.
-    let pieces = polygon_boolean(&a.outer, &b.outer, BoolOp::Intersection);
-    pieces
-        .into_iter()
-        .map(|p| {
-            let holes: Vec<crate::geometry::Polygon> = a
-                .holes
-                .iter()
-                .chain(b.holes.iter())
-                .filter(|h| {
-                    // Keep holes fully inside this piece
-                    h.vertices.iter().all(|v| p.contains_point(*v))
-                })
-                .cloned()
-                .collect();
-            Section::new(p, holes)
-        })
-        .collect()
+    section_boolean(a, b, BoolOp::Intersection)
 }
 
 /// Boolean difference between two full sections (outer boundary + holes).
 ///
 /// Mirrors shapely `geometry - other` as used by Python `sectionproperties`.
 ///
-/// - When `b` lies entirely inside `a` (and does not touch its boundaries)
-///   the result is `a` with `b`'s outline added as a hole.
-/// - Otherwise the boundary-level Greiner-Hormann difference is used; each
-///   resulting region keeps whichever of `a`'s holes fall inside it.
-///
 /// Returns one [`Section`] per disjoint result region.
 pub fn section_difference(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
-    use crate::section::Section;
-
-    let raw = compute_raw_intersections(&a.outer.vertices, &b.outer.vertices);
-    let b_in_a = b.outer.vertices.iter().all(|v| a.outer.contains_point(*v));
-    let touches_holes = a.holes.iter().any(|h| {
-        h.vertices.iter().any(|v| b.outer.contains_point(*v))
-            || b.outer.vertices.iter().any(|v| h.contains_point(*v))
-            || !compute_raw_intersections(&h.vertices, &b.outer.vertices).is_empty()
-    });
-
-    if raw.is_empty() && b_in_a && !touches_holes {
-        // Pure hole case.
-        let mut holes = a.holes.clone();
-        holes.push(b.outer.clone());
-        return vec![Section::new(a.outer.clone(), holes)];
-    }
-
-    // Generic case: boundary-level difference, reattach interior holes.
-    let pieces = polygon_boolean(&a.outer, &b.outer, BoolOp::Difference);
-    pieces
-        .into_iter()
-        .map(|p| {
-            let holes: Vec<crate::geometry::Polygon> = a
-                .holes
-                .iter()
-                .filter(|h| {
-                    // Keep holes fully inside this piece and untouched by b.
-                    h.vertices.iter().all(|v| p.contains_point(*v))
-                        && compute_raw_intersections(&h.vertices, &b.outer.vertices).is_empty()
-                        && !h.vertices.iter().any(|v| b.outer.contains_point(*v))
-                })
-                .cloned()
-                .collect();
-            Section::new(p, holes)
-        })
-        .collect()
+    section_boolean(a, b, BoolOp::Difference)
 }
 
 /// Boolean union between two full sections (outer boundary + holes).
@@ -657,39 +730,7 @@ pub fn section_difference(a: &crate::section::Section, b: &crate::section::Secti
 ///
 /// Returns one [`Section`] per disjoint result region.
 pub fn section_union(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
-    use crate::section::Section;
-
-    let a_in_b = a.outer.vertices.iter().all(|v| b.outer.contains_point(*v));
-    let b_in_a = b.outer.vertices.iter().all(|v| a.outer.contains_point(*v));
-
-    // Handle containment cases: if one is completely inside the other,
-    // the union is just the outer one (with its holes).
-    if a_in_b {
-        return vec![Section::new(b.outer.clone(), b.holes.clone())];
-    }
-    if b_in_a {
-        return vec![Section::new(a.outer.clone(), a.holes.clone())];
-    }
-
-    // Generic case: boundary-level union via Greiner-Hormann, which correctly
-    // handles overlapping, edge-sharing, and disjoint cases.
-    let pieces = polygon_boolean(&a.outer, &b.outer, BoolOp::Union);
-    pieces
-        .into_iter()
-        .map(|p| {
-            let holes: Vec<crate::geometry::Polygon> = a
-                .holes
-                .iter()
-                .chain(b.holes.iter())
-                .filter(|h| {
-                    // Keep holes fully inside this piece
-                    h.vertices.iter().all(|v| p.contains_point(*v))
-                })
-                .cloned()
-                .collect();
-            Section::new(p, holes)
-        })
-        .collect()
+    section_boolean(a, b, BoolOp::Union)
 }
 
 #[cfg(test)]
@@ -813,6 +854,79 @@ mod tests {
         assert_eq!(polygon_boolean(&a, &a.clone(), BoolOp::Intersection)[0].area() , 4.0);
         assert_eq!(polygon_boolean(&a, &a.clone(), BoolOp::Union)[0].area(), 4.0);
         assert!(polygon_boolean(&a, &a.clone(), BoolOp::Difference).is_empty());
+    }
+
+    #[test]
+    fn section_union_preserves_holes() {
+        use crate::section::Section;
+        // Two overlapping squares, each with a hole in its non-overlapped
+        // region. The union merges into one piece and keeps both holes.
+        let hole_a = square(0.2, 0.3, 0.3);
+        let a = Section::new(square(0.0, 0.0, 1.2), vec![hole_a]);
+        let hole_b = square(1.5, 0.3, 0.3);
+        let b = Section::new(square(1.0, 0.0, 1.2), vec![hole_b]);
+
+        let result = section_union(&a, &b);
+        assert_eq!(result.len(), 1, "overlapping squares merge into one piece");
+        assert_eq!(result[0].holes.len(), 2, "union must preserve both holes");
+        // Material a (1.44-0.09) + material b (1.44-0.09) - overlap [1.0,1.2]x[0,1.2] (0.24).
+        let expected = (1.44 - 0.09) + (1.44 - 0.09) - 0.24;
+        assert!((result[0].area() - expected).abs() < 1e-6, "union area {}", result[0].area());
+    }
+
+    #[test]
+    fn section_union_drops_hole_filled_by_other() {
+        use crate::section::Section;
+        // A with a hole; B is a solid square exactly filling that hole.
+        // Union must fill the hole (B's material occupies it).
+        let hole = square(0.5, 0.5, 1.0);
+        let a = Section::new(square(0.0, 0.0, 2.0), vec![hole]);
+        let b = Section::new(square(0.5, 0.5, 1.0), vec![]);
+
+        let result = section_union(&a, &b);
+        assert_eq!(result.len(), 1);
+        // The hole is filled by B -> union is the full 2x2 square, no border hole.
+        assert_eq!(result[0].holes.len(), 0, "filled hole must disappear: {:?}", result[0].holes.len());
+        assert!((result[0].area() - 4.0).abs() < 1e-9, "union area {}", result[0].area());
+    }
+
+    #[test]
+    fn section_intersection_preserves_holes() {
+        use crate::section::Section;
+        // Two fully overlapping squares, each with its own hole. Intersection
+        // is material where BOTH have material, so both holes are voids.
+        let hole_a = square(0.5, 0.5, 0.5);
+        let a = Section::new(square(0.0, 0.0, 2.0), vec![hole_a]);
+        let hole_b = square(1.0, 1.0, 0.5);
+        let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
+
+        let result = section_intersection(&a, &b);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].holes.len(), 2, "intersection keeps both holes");
+    }
+
+    #[test]
+    fn section_union_clips_hole_partially_filled() {
+        use crate::section::Section;
+        // A = 2x2 with a centred 1x1 hole. B = solid rectangle filling the
+        // bottom-right quarter of that hole. The union keeps the hole minus the
+        // filled part (area 0.75) and drops the corner covered by B.
+        let hole = square(0.5, 0.5, 1.0); // [0.5,1.5]^2
+        let a = Section::new(square(0.0, 0.0, 2.0), vec![hole]);
+        let b = Section::new(square(1.0, 0.5, 0.5), vec![]); // [1.0,1.5]x[0.5,1.0]
+
+        let result = section_union(&a, &b);
+        assert_eq!(result.len(), 1);
+        let sec = &result[0];
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        // Surviving void = hole (area 1) minus B's filled part (area 0.25) = 0.75.
+        assert!(
+            (hole_area - 0.75).abs() < 1e-3,
+            "partially filled hole area: {}",
+            hole_area
+        );
+        // Union outer is the full 2x2; material = 4 - 0.75 = 3.25.
+        assert!((sec.area() - 3.25).abs() < 1e-3, "union area {}", sec.area());
     }
 
     #[test]
