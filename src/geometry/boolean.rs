@@ -660,11 +660,22 @@ fn holes_for_piece(
             void_regions.extend(b.holes.iter().cloned());
         }
         BoolOp::Difference => {
-            // A's holes plus B's material, both restricted to the piece.
+            // A's holes minus B's material that fills them, plus B's material as
+            // voids, both restricted to the piece.
+            for h in a.holes.iter() {
+                void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+            }
             void_regions.extend(material_inside(p, b));
-            void_regions.extend(a.holes.iter().cloned());
         }
     }
+
+    // Clip every candidate void to the piece boundary so that no hole ever
+    // extends outside `p`. A hole of one section that spans the intersection or
+    // difference cut line is trimmed to `hole ∩ p`, not kept whole.
+    void_regions = void_regions
+        .into_iter()
+        .flat_map(|r| polygon_boolean(p, &ccw(&r), BoolOp::Intersection))
+        .collect();
 
     // Keep only regions inside `p` that carry meaningful area. Any tiny region
     // that touches `p`'s boundary is an exterior sliver, not a hole, so it is
@@ -903,6 +914,70 @@ mod tests {
         let result = section_intersection(&a, &b);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].holes.len(), 2, "intersection keeps both holes");
+    }
+
+    #[test]
+    fn section_intersection_clips_hole_to_piece() {
+        use crate::section::Section;
+        // A = 10x10 with an 8x8 hole ([1,9]^2). B = 2x10 strip along the left
+        // edge ([0,2]x[0,10]). The intersection piece is only 2 wide, so the
+        // full 8x8 hole cannot fit inside it -- it must be clipped.
+        let hole = square(1.0, 1.0, 8.0); // [1,9]^2
+        let a = Section::new(square(0.0, 0.0, 10.0), vec![hole]);
+        let b_outer = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        let b = Section::new(b_outer, vec![]);
+
+        let result = section_intersection(&a, &b);
+        assert_eq!(result.len(), 1);
+        let sec = &result[0];
+        // Piece = [0,2]x[0,10], area 20.
+        assert!((sec.outer.area() - 20.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        // Hole clipped to [1,2]x[1,9], area 8, and it must lie inside the piece.
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        assert!((hole_area - 8.0).abs() < 1e-4, "clipped hole area {}", hole_area);
+        for h in &sec.holes {
+            assert!(h.vertices.iter().all(|v| sec.outer.contains_point(*v)),
+                "hole must not extend outside the piece");
+        }
+        // Net material = 20 - 8 = 12 (and not negative).
+        assert!((sec.area() - 12.0).abs() < 1e-4, "section area {}", sec.area());
+    }
+
+    #[test]
+    fn section_difference_clips_hole_to_piece() {
+        use crate::section::Section;
+        // A = 10x10 with an 8x8 hole ([1,9]^2). B = 5x10 strip along the left
+        // edge ([0,5]x[0,10]). The difference piece is [5,10]x[0,10], so only
+        // the part of A's hole inside it ([5,9]x[1,9]) survives, clipped.
+        let hole = square(1.0, 1.0, 8.0); // [1,9]^2
+        let a = Section::new(square(0.0, 0.0, 10.0), vec![hole]);
+        let b_outer = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(5.0, 0.0),
+            Point::new(5.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        let b = Section::new(b_outer, vec![]);
+
+        let result = section_difference(&a, &b);
+        assert_eq!(result.len(), 1);
+        let sec = &result[0];
+        // Piece = [5,10]x[0,10], area 50.
+        assert!((sec.outer.area() - 50.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        // Hole clipped to [5,9]x[1,9], area 32, inside the piece.
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        assert!((hole_area - 32.0).abs() < 1e-6, "clipped hole area {}", hole_area);
+        for h in &sec.holes {
+            assert!(h.vertices.iter().all(|v| sec.outer.contains_point(*v)),
+                "hole must not extend outside the piece");
+        }
+        // Net material = 50 - 32 = 18.
+        assert!((sec.area() - 18.0).abs() < 1e-6, "section area {}", sec.area());
     }
 
     #[test]
