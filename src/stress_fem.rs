@@ -53,10 +53,12 @@ fn compute_stress_from_fem(
         let psi_el = extract_nodal(&fem.psi, tri6.node_ids);
         let phi_el = extract_nodal(&fem.phi, tri6.node_ids);
 
-        // Elements already use centroidal coordinates, so pass cx=0, cy=0
+        // Elements use section-centroid coordinates; pass section centroid for stress calc
+        let cx = props.centroid.x;
+        let cy = props.centroid.y;
         let stresses = tri6.element_stress(
             loads.n, loads.mxx, loads.myy, loads.m11, loads.m22, loads.mzz, loads.vx, loads.vy, ea,
-            0.0, 0.0, ixx, iyy, ixy, i11, i22, phi, j, nu, &omega_el, &psi_el, &phi_el, delta_s,
+            cx, cy, ixx, iyy, ixy, i11, i22, phi, j, nu, &omega_el, &psi_el, &phi_el, delta_s,
         );
 
         for k in 0..6 {

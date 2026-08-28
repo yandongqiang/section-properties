@@ -5,7 +5,7 @@
 //! functions ψ, φ, then computes J, Iw, shear centre, shear areas and monosymmetry
 //! constants via Gaussian quadrature.
 
-use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6};
+use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6, build_tri6_elements};
 use crate::geometry::Point;
 use crate::mesh::{MeshParams, mesh_section};
 use crate::section::Section;
@@ -60,15 +60,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let tri6_mesh = tri3_to_tri6(&base_mesh.nodes, &base_mesh.elements);
     let n = tri6_mesh.nodes.len();
 
-    let mut elements: Vec<Tri6> = Vec::with_capacity(tri6_mesh.elements.len());
-    for (i, &elem) in tri6_mesh.elements.iter().enumerate() {
-        let mut points = [Point::new(0.0, 0.0); 6];
-        for k in 0..6 {
-            let p = tri6_mesh.nodes[elem[k]];
-            points[k] = Point::new(p.x - cx, p.y - cy);
-        }
-        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0).unwrap());
-    }
+    // Build elements with proper orientation (handled by build_tri6_elements)
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0);
 
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
@@ -226,7 +219,6 @@ fn min_edge_length(section: &Section) -> f64 {
     }
     if min_len.is_finite() { min_len } else { 1.0 }
 }
-
 /// Compute warping properties using FEM with Tri6 elements.
 pub fn compute_fem_warping_properties(
     section: &Section,
@@ -245,6 +237,7 @@ pub fn compute_fem_warping_properties(
     let _min_edge = min_edge_length(section);
     let _ = props;
     let target_size = (max_dim / 8.0).max(1e-4);
+    
     
 
     let mesh = mesh_section(
@@ -278,19 +271,11 @@ pub fn compute_fem_warping_properties(
         };
     }
 
-    // mesh_section already refines uniformly to target_size.
     let tri6_mesh = tri3_to_tri6(&mesh.nodes, &mesh.elements);
     let n = tri6_mesh.nodes.len();
 
-    let mut elements: Vec<Tri6> = Vec::with_capacity(tri6_mesh.elements.len());
-    for (i, &elem) in tri6_mesh.elements.iter().enumerate() {
-        let mut points = [Point::new(0.0, 0.0); 6];
-        for k in 0..6 {
-            let p = tri6_mesh.nodes[elem[k]];
-            points[k] = Point::new(p.x - cx, p.y - cy);
-        }
-        elements.push(Tri6::from_points(i, points, elem, 1.0, 1.0, 1.0).unwrap());
-    }
+    // Build elements with proper orientation (handled by build_tri6_elements)
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0);
 
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
