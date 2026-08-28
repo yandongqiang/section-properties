@@ -79,7 +79,9 @@ pub struct SparseLu {
 impl SparseLu {
     pub fn factor(a: &SparseMatrix) -> Result<SparseLu, String> {
         let n = a.n;
-        let csr = a.to_csr();
+        let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+        let a_ref = ac.as_ref().unwrap_or(a);
+        let (row_ptr, cols, vals) = a_ref.csr_data();
 
         let mut l_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut u_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -94,21 +96,21 @@ impl SparseLu {
         let mut row_scale = vec![1.0f64; n];
         for i in 0..n {
             let mut m = 0.0f64;
-            for k in csr.0[i]..csr.0[i + 1] {
-                m = m.max(csr.2[k].abs());
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                m = m.max(vals[k].abs());
             }
             row_scale[i] = m;
         }
 
         for i in 0..n {
             // Gather original row i into workspace.
-            for k in csr.0[i]..csr.0[i + 1] {
-                let c = csr.1[k];
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                let c = cols[k];
                 if !in_row[c] {
                     in_row[c] = true;
                     touched.push(c);
                 }
-                x[c] += csr.2[k];
+                x[c] += vals[k];
             }
 
             // Row-oriented elimination: for each earlier column k, take the
@@ -242,8 +244,10 @@ pub struct Ic0Factor {
 
 impl Ic0Factor {
     pub fn factor(a: &SparseMatrix) -> Result<Ic0Factor, String> {
-        let (row_ptr, cols, vals) = a.to_csr();
         let n = a.n;
+        let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+        let a_ref = ac.as_ref().unwrap_or(a);
+        let (row_ptr, cols, vals) = a_ref.csr_data();
 
         // Lower triangle row-wise with diagonal.
         let mut l_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -353,12 +357,14 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec
     };
 
     let n = b.len();
-    let csr = a.to_csr();
+    let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+    let a_ref = ac.as_ref().unwrap_or(a);
+    let (rptr, ccols, cvals) = a_ref.csr_data();
     let matvec = |p: &[f64], out: &mut [f64]| {
         for row in 0..n {
             let mut sum = 0.0;
-            for k in csr.0[row]..csr.0[row + 1] {
-                sum += csr.2[k] * p[csr.1[k]];
+            for k in rptr[row]..rptr[row + 1] {
+                sum += cvals[k] * p[ccols[k]];
             }
             out[row] = sum;
         }
@@ -413,7 +419,7 @@ pub mod pardiso {
     //! Direct solve via Intel MKL PARDISO (`mkl_rt`). Enable with
     //! `--features pardiso`; requires `mkl_rt.3.dll` (or equivalent) on PATH.
     use std::os::raw::c_void;
-    use super::super::{CscMatrix, SparseMatrix};
+    use super::super::{NEAR_ZERO_TOL, CscMatrix, SkylineLdlt, SparseMatrix};
 
     #[link(name = "mkl_rt.2", kind = "raw-dylib")]
     unsafe extern "C" {
@@ -590,7 +596,7 @@ pub mod pardiso {
             // lam can be recovered from the augmented solve; approximate via
             // residual of the constraint row is out of scope here, so mirror
             // the skyline implementation by refactoring K once more.
-            let ldlt = match super::super::SkylineLdlt::factor(&{
+            let ldlt = match SkylineLdlt::factor(&{
                 let m = {
                     // leading block from CSC columns 0..n
                     let n = self.n;
@@ -603,9 +609,10 @@ pub mod pardiso {
                             }
                         }
                     }
+                    sm.compress();
                     sm
                 };
-                m.compressed()
+                m
             }) {
                 Ok(l) => l,
                 Err(_) => return f64::INFINITY,
@@ -673,7 +680,9 @@ mod pardiso_tests {
         kmat.rows = k.rows.clone();
         kmat.cols = k.cols.clone();
         kmat.vals = k.vals.clone();
-        let prod = kmat.compressed().matvec(&u);
+        let mut kmat2 = kmat;
+kmat2.compress();
+let prod = kmat2.matvec(&u);
         for i in 0..n {
             assert!(
                 (prod[i] - f[i] + c[i]).abs() < 1e-6 || (prod[i] - f[i]).abs() < 1e-6,

@@ -292,18 +292,23 @@ fn smoke_solver_backends_agree() {
             k.add(i + 1, i, -1.0);
         }
     }
-    let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
+let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
 
-    let reference = SkylineLdlt::factor(&k.compressed()).unwrap().solve(&f);
+    let mut k2 = k.clone();
+    k2.compress();
+    let reference = SkylineLdlt::factor(&k2).unwrap().solve(&f);
 
     // LU direct
     let lu = solvers::SparseLu::factor(&k).unwrap();
     let x_lu = lu.solve(&f);
     // ICCG iterative
-    let x_iccg = solvers::iccg_solve(&k.compressed(), &f, 10000, 1e-12);
-// PCG iterative
-    let x_pcg =
-        section_properties::fea::cg_solve(&k.compressed(), &f, 10000, 1e-12).x;
+    let mut k3 = k.clone();
+    k3.compress();
+    let x_iccg = solvers::iccg_solve(&k3, &f, 10000, 1e-12);
+    // PCG iterative
+    let mut k4 = k.clone();
+    k4.compress();
+    let x_pcg = section_properties::fea::cg_solve(&k4, &f, 10000, 1e-12).x;
 
     for i in 0..n {
         assert!((reference[i] - x_lu[i]).abs() < 1e-7, "LU i={}", i);

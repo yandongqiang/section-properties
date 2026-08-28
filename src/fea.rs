@@ -830,18 +830,26 @@ pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Resul
 // Sparse matrix and conjugate gradient solver
 // ---------------------------------------------------------------------------
 
-/// Sparse matrix in COO (coordinate) format.
+/// Sparse matrix in CSR (compressed sparse row) format.
+///
+/// Triplets added via `add()` are stored uncompressed. Call `compress()`
+/// once to convert to canonical CSR (summing duplicates, sorting by row/col).
+/// After compression, `matvec`/`matvec_into` use the CSR structure.
 #[derive(Debug, Clone)]
 pub struct SparseMatrix {
     pub n: usize,
-    /// Assembled row indices (may contain duplicates).
-    pub rows: Vec<usize>,
-    /// Assembled column indices (may contain duplicates).
-    pub cols: Vec<usize>,
-    /// Assembled values (may contain duplicates).
-    pub vals: Vec<f64>,
-    /// Cached diagonal entries (sum of duplicates). Populated by `compressed()`.
-    diag: Option<Vec<f64>>,
+    /// COO triplets (before compression).
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    vals: Vec<f64>,
+    /// CSR structure (after compress()).
+    row_ptr: Vec<usize>,
+    csr_cols: Vec<usize>,
+    csr_vals: Vec<f64>,
+    /// Cached diagonal entries (sum of duplicates).
+    diag: Vec<f64>,
+    /// Whether the matrix is in CSR format.
+    compressed: bool,
 }
 
 impl SparseMatrix {
@@ -851,95 +859,58 @@ impl SparseMatrix {
             rows: Vec::new(),
             cols: Vec::new(),
             vals: Vec::new(),
-            diag: None,
+            row_ptr: vec![0; n + 1],
+            csr_cols: Vec::new(),
+            csr_vals: Vec::new(),
+            diag: vec![0.0; n],
+            compressed: false,
         }
     }
 
+    /// Add a triplet (duplicates allowed, summed on compress).
     pub fn add(&mut self, row: usize, col: usize, val: f64) {
+        debug_assert!(row < self.n && col < self.n);
         self.rows.push(row);
         self.cols.push(col);
         self.vals.push(val);
+        self.compressed = false;
     }
 
-    /// Compressed CSR representation for fast repeated matvec.
-    pub fn to_csr(&self) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
-        use std::collections::HashMap;
-        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
-        for k in 0..self.rows.len() {
-            *map.entry((self.rows[k], self.cols[k])).or_insert(0.0) += self.vals[k];
+    /// Convert COO triplets to canonical CSR (sum duplicates, sort).
+    /// Idempotent: safe to call multiple times.
+    pub fn compress(&mut self) {
+        if self.compressed {
+            return;
         }
-        let mut entries: Vec<(usize, usize, f64)> =
-            map.into_iter().filter(|(_, v)| *v != 0.0).map(|((r, c), v)| (r, c, v)).collect();
-        entries.sort_unstable_by_key(|e| (e.0, e.1));
-        let mut row_ptr = vec![0usize; self.n + 1];
-        let cols: Vec<usize> = entries.iter().map(|e| e.1).collect();
-        let vals: Vec<f64> = entries.iter().map(|e| e.2).collect();
-        for e in &entries {
-            row_ptr[e.0 + 1] += 1;
-        }
-        for i in 0..self.n {
-            row_ptr[i + 1] += row_ptr[i];
-        }
-        (row_ptr, cols, vals)
-    }
-
-    /// Matrix-vector product into a caller-provided buffer (no alloc).
-    pub fn matvec_into(&self, x: &[f64], y: &mut [f64]) {
-        for v in y.iter_mut() {
-            *v = 0.0;
-        }
-        for k in 0..self.rows.len() {
-            y[self.rows[k]] += self.vals[k] * x[self.cols[k]];
-        }
-    }
-
-    /// Matrix-vector product y = A*x.
-    pub fn matvec(&self, x: &[f64]) -> Vec<f64> {
-        let mut y = vec![0.0; self.n];
-        for k in 0..self.rows.len() {
-            y[self.rows[k]] += self.vals[k] * x[self.cols[k]];
-        }
-        y
-    }
-
-    /// Diagonal entry of row `i` (summing duplicates).
-    pub fn matvec_diag(&self, i: usize) -> f64 {
-        if let Some(ref d) = self.diag {
-            return d[i];
-        }
-        let mut d = 0.0;
-        for k in 0..self.rows.len() {
-            if self.rows[k] == i && self.cols[k] == i {
-                d += self.vals[k];
-            }
-        }
-        d
-    }
-
-    /// Sum duplicate triplets into a compressed copy (faster matvec).
-    /// Uses sort-based deduplication for deterministic iteration order.
-    pub fn compressed(&self) -> SparseMatrix {
         let n = self.n;
         let nnz = self.rows.len();
+
         if nnz == 0 {
-            return SparseMatrix::new(n);
+            self.row_ptr = vec![0; n + 1];
+            self.csr_cols.clear();
+            self.csr_vals.clear();
+            self.diag = vec![0.0; n];
+            self.compressed = true;
+            return;
         }
 
-        // Collect all triplets
+        // Collect and sort triplets by (row, col)
         let mut triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(nnz);
         for k in 0..nnz {
             triplets.push((self.rows[k], self.cols[k], self.vals[k]));
         }
-
-        // Sort by (row, col) for deterministic order
         triplets.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
         // Merge duplicates in a single pass
-        let mut m = SparseMatrix::new(self.n);
+        let mut csr_cols = Vec::with_capacity(triplets.len());
+        let mut csr_vals = Vec::with_capacity(triplets.len());
+        let mut row_ptr = vec![0usize; n + 1];
+        let mut diag = vec![0.0; n];
+
         let mut i = 0;
         while i < triplets.len() {
-            let mut r = triplets[i].0;
-            let mut c = triplets[i].1;
+            let r = triplets[i].0;
+            let c = triplets[i].1;
             let mut v = triplets[i].2;
             let mut j = i + 1;
             while j < triplets.len() && triplets[j].0 == r && triplets[j].1 == c {
@@ -947,43 +918,85 @@ impl SparseMatrix {
                 j += 1;
             }
             if v.abs() > 0.0 {
-                m.rows.push(r);
-                m.cols.push(c);
-                m.vals.push(v);
+                csr_cols.push(c);
+                csr_vals.push(v);
+                row_ptr[r + 1] += 1;
+                if r == c {
+                    diag[r] += v;
+                }
             }
             i = j;
         }
 
-        // Build diagonal cache.
-        let mut diag = vec![0.0; n];
-        for i in 0..m.rows.len() {
-            if m.rows[i] == m.cols[i] {
-                diag[m.rows[i]] += m.vals[i];
-            }
+        // Inclusive scan for row_ptr
+        for r in 0..n {
+            row_ptr[r + 1] += row_ptr[r];
         }
-        m.diag = Some(diag);
-        m
+
+        self.row_ptr = row_ptr;
+        self.csr_cols = csr_cols;
+        self.csr_vals = csr_vals;
+        self.diag = diag;
+        self.compressed = true;
+    }
+
+    /// Matrix-vector product y = A*x (requires compress() first).
+    pub fn matvec(&self, x: &[f64]) -> Vec<f64> {
+        let mut y = vec![0.0; self.n];
+        self.matvec_into(x, &mut y);
+        y
+    }
+
+    /// Matrix-vector product into a caller-provided buffer (requires compress() first).
+    pub fn matvec_into(&self, x: &[f64], y: &mut [f64]) {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before matvec");
+        }
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
+        for r in 0..self.n {
+            let start = self.row_ptr[r];
+            let end = self.row_ptr[r + 1];
+            let mut sum = 0.0;
+            for k in start..end {
+                sum += self.csr_vals[k] * x[self.csr_cols[k]];
+            }
+            y[r] = sum;
+        }
+    }
+
+    /// Diagonal entry of row `i` (requires compress() first).
+    pub fn matvec_diag(&self, i: usize) -> f64 {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before matvec_diag");
+        }
+        self.diag[i]
+    }
+
+    /// Get CSR data for external solvers (PARDISO, etc.).
+    pub fn csr_data(&self) -> (&[usize], &[usize], &[f64]) {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before csr_data");
+        }
+        (&self.row_ptr, &self.csr_cols, &self.csr_vals)
     }
 }
 
 /// Conjugate gradient solver with diagonal preconditioning.
 ///
+/// Requires `a` to be compressed (call `a.compress()` first).
 /// Returns a `CgResult` containing the solution and convergence information.
 pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgResult {
     let n = b.len();
 
     // Diagonal preconditioner: M = diag(A), M_inv = 1/diag(A).
-    // Entries may be stored as duplicate triplets, so accumulate.
-    let mut diag = vec![0.0; n];
-    for k in 0..a.rows.len() {
-        if a.rows[k] == a.cols[k] {
-            diag[a.rows[k]] += a.vals[k];
-        }
-    }
+    // Uses pre-computed diagonal from CSR structure.
     let mut m_inv = vec![1.0; n];
     for i in 0..n {
-        if diag[i].abs() > NEAR_ZERO_TOL {
-            m_inv[i] = 1.0 / diag[i];
+        let d = a.diag[i];
+        if d.abs() > NEAR_ZERO_TOL {
+            m_inv[i] = 1.0 / d;
         }
     }
 
@@ -1158,7 +1171,8 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     // Try solving without regularization first (matching Skyline behavior).
     // Warping Laplacian has a constant null space; CG will detect non-SPD
     // and we fall back to regularized K.
-    let k_reg = k.compressed();
+    let mut k_reg = k.clone();
+    k_reg.compress();
     let n = k.n;
 
     let w1 = cg_solve(&k_reg, f, max_iter, tol);
@@ -1169,7 +1183,8 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
         (w1.x, w2.x)
     } else {
         // Regularize K: K_reg = K + ε*I
-        let mut k_reg = k.compressed();
+        let mut k_reg = k.clone();
+        k_reg.compress();
         let mut diag_sum = 0.0;
         for i in 0..n {
             diag_sum += k_reg.matvec_diag(i);
@@ -1178,7 +1193,7 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
         for i in 0..n {
             k_reg.add(i, i, eps);
         }
-        let k_reg = k_reg.compressed();
+        k_reg.compress();
 
         let w1 = cg_solve(&k_reg, f, max_iter, tol).x;
         let w2 = cg_solve(&k_reg, c, max_iter, tol).x;
@@ -1295,8 +1310,56 @@ pub struct CscMatrix {
 }
 
 impl CscMatrix {
+    /// Build a CSC matrix from CSR data, summing duplicates
+    /// (mirrors `csr_matrix(...).tocsc()`).
+    pub fn from_csr(
+        n_rows: usize,
+        n_cols: usize,
+        row_ptr: &[usize],
+        csr_cols: &[usize],
+        csr_vals: &[f64],
+    ) -> Self {
+        debug_assert_eq!(row_ptr.len(), n_rows + 1);
+        debug_assert_eq!(csr_cols.len(), csr_vals.len());
+
+        // Count nonzeros per column
+        let mut counts = vec![0usize; n_cols];
+        for r in 0..n_rows {
+            let start = row_ptr[r];
+            let end = row_ptr[r + 1];
+            for k in start..end {
+                counts[csr_cols[k]] += 1;
+            }
+        }
+
+        // Build col_ptr
+        let mut col_ptr = vec![0usize; n_cols + 1];
+        for c in 0..n_cols {
+            col_ptr[c + 1] = col_ptr[c] + counts[c];
+        }
+
+        // Fill rows and vals
+        let mut rows = vec![0usize; csr_cols.len()];
+        let mut vals = vec![0.0; csr_vals.len()];
+        let mut col_counts = vec![0usize; n_cols];
+
+        for r in 0..n_rows {
+            let start = row_ptr[r];
+            let end = row_ptr[r + 1];
+            for k in start..end {
+                let c = csr_cols[k];
+                let idx = col_ptr[c] + col_counts[c];
+                rows[idx] = r;
+                vals[idx] = csr_vals[k];
+                col_counts[c] += 1;
+            }
+        }
+
+        Self { n_rows, n_cols, col_ptr, rows, vals }
+    }
+
     /// Build a CSC matrix from COO triplets, summing duplicates
-    /// (mirrors `coo_matrix(...).tocsc()`).
+    /// (mirrors `coo_matrix(...).tocsc()`). Kept for backward compatibility.
     pub fn from_coo(
         n_rows: usize,
         n_cols: usize,
@@ -1428,11 +1491,13 @@ impl DirectLagrangeSolver {
     ) -> Result<Self, crate::mesh::fem::FemError> {
         let instance = match kernel {
             LagrangeKernel::Skyline => {
-                let m = k.compressed();
+                let mut m = k.clone();
+                m.compress();
                 let m = match SkylineLdlt::factor(&m) {
                     Ok(ldlt) => ldlt,
                     Err(crate::mesh::fem::FemError::SingularMatrix) => {
-                        let mut m_reg = k.compressed();
+                        let mut m_reg = k.clone();
+                        m_reg.compress();
                         let mut diag_avg = 0.0;
                         for i in 0..m_reg.n {
                             diag_avg += m_reg.matvec_diag(i);
@@ -1441,7 +1506,7 @@ impl DirectLagrangeSolver {
                         for i in 0..m_reg.n {
                             m_reg.add(i, i, eps);
                         }
-                        let m_reg = m_reg.compressed();
+                        m_reg.compress();
                         SkylineLdlt::factor(&m_reg)?
                     }
                     Err(e) => return Err(e),
@@ -1595,13 +1660,25 @@ impl SkylineLdlt {
 
         let n = matrix.n;
 
-        // Compress duplicate triplets.
-        let mut map: HashMap<(usize, usize), f64> = HashMap::new();
-        for k in 0..matrix.rows.len() {
-            *map
-                .entry((matrix.rows[k], matrix.cols[k]))
-                .or_insert(0.0) += matrix.vals[k];
-        }
+        // Use CSR data if compressed, otherwise build from COO
+        let map: HashMap<(usize, usize), f64> = if matrix.compressed {
+            let mut m = HashMap::new();
+            for r in 0..n {
+                let start = matrix.row_ptr[r];
+                let end = matrix.row_ptr[r + 1];
+                for k in start..end {
+                    let c = matrix.csr_cols[k];
+                    *m.entry((r, c)).or_insert(0.0) += matrix.csr_vals[k];
+                }
+            }
+            m
+        } else {
+            let mut m = HashMap::new();
+            for k in 0..matrix.rows.len() {
+                *m.entry((matrix.rows[k], matrix.cols[k])).or_insert(0.0) += matrix.vals[k];
+            }
+            m
+        };
 
         // Adjacency for RCM.
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -1770,9 +1847,11 @@ mod direct_lagrange_tests {
         let c: Vec<f64> = vec![1.0; n];
         let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 0.05).collect();
 
-        let u_ref = SkylineLdlt::factor(&k.compressed())
-            .unwrap()
-            .solve_lagrange(&c, &f);
+        let u_ref = {
+            let mut k2 = k.clone();
+            k2.compress();
+            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f)
+        };
 
         // Python-style: assemble augmented CSC, factor leading block.
         let k_lg = DirectLagrangeSolver::assemble_torsion_lagrange(&k, &c);
@@ -1847,8 +1926,10 @@ mod skyline_tests {
         }
 
         // Compare against CG
+        let mut a2 = a.clone();
+        a2.compress();
         let b = vec![1.0, 2.0, 3.0, 4.0];
-        let x_cg = cg_solve(&a.compressed(), &b, 2000, SOLVER_TOL).x;
+        let x_cg = cg_solve(&a2, &b, 2000, SOLVER_TOL).x;
         let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b);
         for i in 0..4 {
             assert!((x_cg[i] - x_dir[i]).abs() < 1e-8);
@@ -1872,11 +1953,13 @@ mod skyline_tests {
 
         // High-precision CG reference
         let k_reg = {
-            let mut m = k.compressed();
+            let mut m = k.clone();
+            m.compress();
             for i in 0..n {
                 m.add(i, i, 1e-10);
             }
-            m.compressed()
+            m.compress();
+            m
         };
         let w1 = cg_solve(&k_reg, &f, 200000, 1e-13).x;
         let w2 = cg_solve(&k_reg, &c, 200000, 1e-13).x;
@@ -2042,7 +2125,11 @@ mod tests {
         let c: Vec<f64> = vec![1.0; n];
         let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1 + 0.05).collect();
 
-        let u = SkylineLdlt::factor(&k.compressed()).unwrap().solve_lagrange(&c, &f);
+        let u = {
+            let mut k2 = k.clone();
+            k2.compress();
+            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f)
+        };
         let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
         assert!(ct_u.abs() < 1e-10, "SkylineLdlt constraint residual c^T u = {}", ct_u);
     }
@@ -2055,6 +2142,7 @@ mod tests {
         a.add(0, 0, -1.0);
         a.add(1, 1, 1.0);
         let b = vec![1.0, 1.0];
+        a.compress();
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         // Should detect non-SPD (p^T A p <= 0) and not converge
         assert!(!result.converged(), "CG should not converge on non-SPD matrix");
@@ -2071,6 +2159,7 @@ mod tests {
         a.add(1, 0, 1.0);
         a.add(1, 1, 2.0);
         let b = vec![1.0, 2.0];
+        a.compress();
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         assert!(result.converged(), "CG should converge on SPD matrix: {}", result.residual);
         assert_eq!(result.status, CgStatus::Converged);

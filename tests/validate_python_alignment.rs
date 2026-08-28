@@ -321,12 +321,16 @@ fn skyline_2d_grid_matches_cg() {
     let f: Vec<f64> = (0..n).map(|i| ((i % 7) as f64 - 3.0).sin()).collect();
     let c: Vec<f64> = vec![1.0; n];
 
-    let u_ref = solve_lagrange_sparse(&k.compressed(), &c, &f);
+    let mut k2 = k.clone();
+    k2.compress();
+    let u_ref = solve_lagrange_sparse(&k2, &c, &f);
 
     // Plain-solve residual diagnostic
     let solver = SkylineLdlt::factor(&k.clone()).unwrap();
     let x_plain = solver.solve(&f);
-    let prod = k.compressed().matvec(&x_plain);
+    let mut k3 = k.clone();
+    k3.compress();
+    let prod = k3.matvec(&x_plain);
     let fnorm = f.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
     let res = prod
         .iter()
@@ -342,7 +346,8 @@ fn skyline_2d_grid_matches_cg() {
         .map(|(&a, &b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     // constraint-residual diagnostics
-    let kc = k.compressed();
+    let mut kc = k.clone();
+    kc.compress();
     let lambda_dir: f64 = {
         let w1 = solver.solve(&f);
         let w2 = solver.solve(&c);

@@ -82,7 +82,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     // Python-style direct solve: assemble the augmented (N+1)x(N+1)
     // Lagrangian matrix in CSC format and factor the leading K block once.
     let k_reg = {
-        let mut m = k_global.compressed();
+        let mut m = k_global.clone();
+        m.compress();
         let mut diag_avg = 0.0;
         for i in 0..n {
             diag_avg += m.matvec_diag(i);
@@ -91,7 +92,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         for i in 0..n {
             m.add(i, i, eps);
         }
-        m.compressed()
+        m.compress();
+        m
     };
     let _k_lg = crate::fea::DirectLagrangeSolver::assemble_torsion_lagrange(&k_global, &c_global);
     let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
@@ -295,7 +297,8 @@ pub fn compute_fem_warping_properties(
 
     // Direct solver: factor once, solve omega/psi/phi.
     let k_reg = {
-        let mut m = k_global.compressed();
+        let mut m = k_global.clone();
+        m.compress();
         let mut diag_avg = 0.0;
         for i in 0..n {
             diag_avg += m.matvec_diag(i);
@@ -304,7 +307,8 @@ pub fn compute_fem_warping_properties(
         for i in 0..n {
             m.add(i, i, eps);
         }
-        m.compressed()
+        m.compress();
+        m
     };
     let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
         Ok(s) => Some(s),
@@ -540,7 +544,7 @@ fn iccg_lagrange_solve(
     f: &[f64],
 ) -> Vec<f64> {
     let n = f.len();
-    let (row_ptr, cols, vals) = k_reg.compressed().to_csr();
+    let (row_ptr, cols, vals) = k_reg.csr_data();
     let matvec = |p: &[f64], out: &mut [f64]| {
         for row in 0..n {
             let mut s = 0.0;
