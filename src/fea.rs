@@ -110,19 +110,26 @@ pub fn shape_function(coords: &[[f64; 6]; 2], gp: (f64, f64, f64)) -> ShapeFunct
         + j_mat[0][2] * (j_mat[1][0] * j_mat[2][1] - j_mat[1][1] * j_mat[2][0]);
     let jacobian = 0.5 * det_j;
 
+    // Check for degenerate element (zero or negative Jacobian)
+    if jacobian.abs() <= 1e-15 {
+        return ShapeFunctionResult {
+            n,
+            b: [[0.0; 6]; 2],
+            j: jacobian,
+            x: 0.0,
+            y: 0.0,
+        };
+    }
+
     // B = tmp_array * J^{-1} * b_iso
     // tmp_array = [[0,1,0],[0,0,1]]
     // So B[0] = row 1 of J^{-1} * b_iso, B[1] = row 2 of J^{-1} * b_iso
+    let j_inv = inv3x3(&j_mat);
     let mut b = [[0.0; 6]; 2];
-    if jacobian.abs() > 1e-15 {
-        let j_inv = inv3x3(&j_mat);
-        // B[0][j] = sum_k j_inv[1][k] * b_iso[k][j]
-        // B[1][j] = sum_k j_inv[2][k] * b_iso[k][j]
-        for j in 0..6 {
-            for k in 0..3 {
-                b[0][j] += j_inv[1][k] * b_iso[k][j];
-                b[1][j] += j_inv[2][k] * b_iso[k][j];
-            }
+    for j in 0..6 {
+        for k in 0..3 {
+            b[0][j] += j_inv[1][k] * b_iso[k][j];
+            b[1][j] += j_inv[2][k] * b_iso[k][j];
         }
     }
 
@@ -686,6 +693,26 @@ pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6M
     }
 }
 
+/// Validates that a Tri6Mesh has no degenerate elements.
+///
+/// Returns `Err(FemError::DegenerateElement)` if any element has
+/// zero or negative Jacobian determinant at any Gauss point.
+pub fn validate_tri6_mesh(mesh: &Tri6Mesh) -> Result<(), crate::mesh::fem::FemError> {
+    for (i, &elem) in mesh.elements.iter().enumerate() {
+        let mut coords = [[0.0; 6]; 2];
+        for k in 0..6 {
+            coords[0][k] = mesh.nodes[elem[k]].x;
+            coords[1][k] = mesh.nodes[elem[k]].y;
+        }
+        // Check Jacobian at element centroid (xi=eta=zeta=1/3)
+        let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
+        if sf.j.abs() <= 1e-15 {
+            return Err(crate::mesh::fem::FemError::DegenerateElement);
+        }
+    }
+    Ok(())
+}
+
 fn get_or_create_midpoint(
     nodes: &mut Vec<Point>,
     edge_map: &mut HashMap<(usize, usize), usize>,
@@ -706,8 +733,9 @@ fn get_or_create_midpoint(
 }
 
 /// Build a list of Tri6 elements from a Tri6Mesh for a given material.
-pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Vec<Tri6> {
-    mesh.elements
+pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Result<Vec<Tri6>, crate::mesh::fem::FemError> {
+    validate_tri6_mesh(mesh)?;
+    Ok(mesh.elements
         .iter()
         .enumerate()
         .map(|(i, &elem)| {
@@ -717,7 +745,7 @@ pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Vec<T
             }
             Tri6::from_points(i, points, elem, em, gm, rho)
         })
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

@@ -833,6 +833,7 @@ pub enum FemError {
     InvalidMesh,
     MaterialNotFound,
     ConvergenceFailed,
+    DegenerateElement,
 }
 
 impl std::fmt::Display for FemError {
@@ -842,6 +843,7 @@ impl std::fmt::Display for FemError {
             FemError::InvalidMesh => write!(f, "Invalid mesh"),
             FemError::MaterialNotFound => write!(f, "Material not found"),
             FemError::ConvergenceFailed => write!(f, "Solver did not converge"),
+            FemError::DegenerateElement => write!(f, "Degenerate element (zero or negative Jacobian)"),
         }
     }
 }
