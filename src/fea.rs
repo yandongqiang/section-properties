@@ -999,7 +999,7 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
             x,
             iterations: 0,
             residual: 0.0,
-            converged: true,
+            status: CgStatus::InvalidInput,
         };
     }
 
@@ -1023,7 +1023,7 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
                 x,
                 iterations,
                 residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
-                converged: false,
+                status: CgStatus::NotPositiveDefinite,
             };
         }
 
@@ -1033,7 +1033,7 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
                 x,
                 iterations,
                 residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
-                converged: false,
+                status: CgStatus::Breakdown,
             };
         }
 
@@ -1051,18 +1051,33 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
         }
 
         if rz_old == 0.0 || !rz_old.is_finite() {
-            break;
+            return CgResult {
+                x,
+                iterations,
+                residual,
+                status: CgStatus::Breakdown,
+            };
         }
         for i in 0..n {
             z[i] = r[i] * m_inv[i];
         }
         let rz_new: f64 = r.iter().zip(z.iter()).map(|(a, b)| a * b).sum();
         if !rz_new.is_finite() {
-            break;
+            return CgResult {
+                x,
+                iterations,
+                residual,
+                status: CgStatus::Breakdown,
+            };
         }
         let beta = rz_new / rz_old;
         if !beta.is_finite() {
-            break;
+            return CgResult {
+                x,
+                iterations,
+                residual,
+                status: CgStatus::Breakdown,
+            };
         }
         for i in 0..n {
             p[i] = z[i] + beta * p[i];
@@ -1075,8 +1090,27 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
         x,
         iterations,
         residual,
-        converged,
+        status: if converged {
+            CgStatus::Converged
+        } else {
+            CgStatus::MaxIterations
+        },
     }
+}
+
+/// Conjugate Gradient solver termination status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CgStatus {
+    /// Converged to requested tolerance.
+    Converged,
+    /// Reached maximum iterations without converging.
+    MaxIterations,
+    /// Matrix not positive definite (p^T A p <= 0 detected).
+    NotPositiveDefinite,
+    /// Numerical breakdown (non-finite alpha, beta, or residual).
+    Breakdown,
+    /// Invalid input (empty RHS, non-finite b_norm).
+    InvalidInput,
 }
 
 /// Result of the Conjugate Gradient solver.
@@ -1088,8 +1122,15 @@ pub struct CgResult {
     pub iterations: usize,
     /// Final residual norm ||b - A*x||.
     pub residual: f64,
-    /// Whether the solver converged to the requested tolerance.
-    pub converged: bool,
+    /// Solver termination status.
+    pub status: CgStatus,
+}
+
+impl CgResult {
+    /// Returns true if the solver converged successfully.
+    pub fn converged(&self) -> bool {
+        matches!(self.status, CgStatus::Converged)
+    }
 }
 
 /// Solve the Lagrangian system using sparse CG + Schur complement.
@@ -1124,7 +1165,7 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     let w2 = cg_solve(&k_reg, c, max_iter, tol);
 
     // If CG didn't converge (breakdown or non-SPD), fall back to regularization.
-    let (w1, w2) = if w1.converged && w2.converged {
+    let (w1, w2) = if w1.converged() && w2.converged() {
         (w1.x, w2.x)
     } else {
         // Regularize K: K_reg = K + ε*I
@@ -2016,7 +2057,8 @@ mod tests {
         let b = vec![1.0, 1.0];
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         // Should detect non-SPD (p^T A p <= 0) and not converge
-        assert!(!result.converged, "CG should not converge on non-SPD matrix");
+        assert!(!result.converged(), "CG should not converge on non-SPD matrix");
+        assert_eq!(result.status, CgStatus::NotPositiveDefinite);
         // iterations may be 0 if breakdown happens on first check
     }
 
@@ -2030,7 +2072,8 @@ mod tests {
         a.add(1, 1, 2.0);
         let b = vec![1.0, 2.0];
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
-        assert!(result.converged, "CG should converge on SPD matrix: {}", result.residual);
+        assert!(result.converged(), "CG should converge on SPD matrix: {}", result.residual);
+        assert_eq!(result.status, CgStatus::Converged);
         // Check all output values are finite
         assert!(result.x.iter().all(|v| v.is_finite()), "Solution has non-finite values");
         assert!(result.residual.is_finite(), "Residual is non-finite");
