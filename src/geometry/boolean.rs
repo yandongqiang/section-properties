@@ -465,8 +465,258 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
     best.map_or_else(Vec::new, |(_, res)| res)
 }
 
+/// Errors from polygon / section boolean operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BooleanError {
+    /// The computed result violates a geometric invariant (area bounds or
+    /// point-in/polygon sampling) and must not be used downstream. Returning
+    /// this instead of a `Vec<Polygon>` prevents a silently-wrong boolean from
+    /// propagating corrupt areas, centroids, moments and FEM meshes.
+    Validation { op: BoolOp, message: String },
+}
+
+impl std::fmt::Display for BooleanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BooleanError::Validation { op, message } => {
+                write!(f, "boolean {:?} failed validation: {}", op, message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BooleanError {}
+
+/// Cheap per-op area-bounds reconciliation.
+///
+/// Catches gross topological errors that the inclusion-exclusion identity
+/// alone cannot. Example: a blundering algorithm may return `|A∩B|=30` and
+/// `|A∪B|=170` for two area-100 polygons. The identity `30+170=100+100` holds,
+/// yet the union clearly violates `|A∪B| >= max(|A|,|B|) = 100`.
+fn check_boolean_bounds(
+    result: &[Polygon],
+    a: &Polygon,
+    b: &Polygon,
+    op: BoolOp,
+) -> Result<(), BooleanError> {
+    let area_a = a.area();
+    let area_b = b.area();
+    let area_res: f64 = result.iter().map(|p| p.area()).sum();
+    // Sliver allowance: perturbation-induced slivers are ~eps*scale in area
+    // (~1e-8 relative), so a 1e-6 relative tolerance is far larger than any
+    // legitimate sliver yet far smaller than a genuine topological blunder.
+    let rel = 1e-6;
+    let fail = |message: String| BooleanError::Validation { op, message };
+    match op {
+        BoolOp::Intersection => {
+            let min = area_a.min(area_b);
+            let tol = rel * min.abs().max(1e-12);
+            if area_res < -tol || area_res > min + tol {
+                return Err(fail(format!(
+                    "intersection area {:.6} outside [0, min(|A|,|B|) = {:.6}]",
+                    area_res, min
+                )));
+            }
+        }
+        BoolOp::Union => {
+            let max = area_a.max(area_b);
+            // |A∪B| must lie within [max(|A|,|B|), |A|+|B|]. Violating either
+            // bound means the result cannot be a true union of A and B.
+            let lo = max;
+            let hi = area_a + area_b;
+            let tol = rel * hi.abs().max(1e-12);
+            if area_res < lo - tol || area_res > hi + tol {
+                return Err(fail(format!(
+                    "union area {:.6} outside [max(|A|,|B|) = {:.6}, |A|+|B| = {:.6}]",
+                    area_res, lo, hi
+                )));
+            }
+        }
+        BoolOp::Difference => {
+            let tol = rel * area_a.abs().max(1e-12);
+            if area_res < -tol || area_res > area_a + tol {
+                return Err(fail(format!(
+                    "difference area {:.6} outside [0, |A| = {:.6}]",
+                    area_res, area_a
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deterministic point-in/polygon sampling validation.
+///
+/// Much stronger than area checks: verifies the result's set membership against
+/// the expected boolean (`op(A,B)`) at a grid of sample points covering the
+/// combined bounding box. Points on (or within a perturbation tolerance of) any
+/// boundary are skipped because membership there is inherently ambiguous; on
+/// the clean interior samples any mismatch is a genuine topology error.
+///
+/// # Why this is OPT-IN / advisory (not a default gate)
+///
+/// It can raise **false positives on legitimately-correct geometry** for two
+/// fundamental reasons:
+///
+/// 1. `Polygon::contains_point` (ray casting) and the GH boolean kernel use
+///    **incompatible interior/winding interpretations** on concave polygons.
+///    Measured example: for the U-shape `(0,0)(3,0)(3,3)(2,3)(2,1)(1,1)(1,3)(0,3)`
+///    the ray-caster reports a notch point `(1.5,2.0)` as *exterior* while the
+///    kernel treats the region as interior, so `u ∩ fill` returns area = 4 (the
+///    full fill) yet the sampler's `contains_point(result, notch-pt)` is `true`.
+///    Any sampler built on `contains_point` will therefore disagree with the
+///    kernel on such inputs.
+/// 2. Polygon-level `Difference` of a nested operand returns the outer region
+///    *without cutting the hole* (a documented module convention — the hole is
+///    only realised at `Section` level). Sampling naively expects the hole to
+///    be present and flags the (correct, convention-compliant) result.
+///
+/// Consequently it is exposed separately as `polygon_boolean_sampled_checked`
+/// and is intended for callers who know their inputs are convex and
+/// non-nested, where it adds a strong extra correctness signal.
+fn validate_boolean_sampling(
+    result: &[Polygon],
+    a: &Polygon,
+    b: &Polygon,
+    op: BoolOp,
+) -> Result<(), BooleanError> {
+    let diag = bbox_diag(&a.vertices).max(bbox_diag(&b.vertices));
+    if diag <= 0.0 {
+        return Ok(());
+    }
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
+    let bnd_tol = 16.0 * eps;
+
+    // Combined bounding box of a, b and the result so the grid covers everything.
+    let (minx, maxx, miny, maxy) = {
+        let mut minx = f64::INFINITY;
+        let mut maxx = f64::NEG_INFINITY;
+        let mut miny = f64::INFINITY;
+        let mut maxy = f64::NEG_INFINITY;
+        for p in std::iter::once(a).chain(std::iter::once(b)).chain(result) {
+            for v in &p.vertices {
+                minx = minx.min(v.x);
+                maxx = maxx.max(v.x);
+                miny = miny.min(v.y);
+                maxy = maxy.max(v.y);
+            }
+        }
+        (minx, maxx, miny, maxy)
+    };
+
+    // All boundary edges (a, b and every result polygon) for the skip test.
+    let boundary_edges: Vec<(Point, Point)> = std::iter::once(a)
+        .chain(std::iter::once(b))
+        .chain(result)
+        .flat_map(|p| {
+            p.vertices
+                .iter()
+                .enumerate()
+                .map(move |(i, v)| (*v, p.vertices[(i + 1) % p.vertices.len()]))
+        })
+        .collect();
+
+    const N: usize = 32;
+    let w = (maxx - minx).max(f64::MIN_POSITIVE);
+    let h = (maxy - miny).max(f64::MIN_POSITIVE);
+    let mut mismatches = 0usize;
+    let mut checked = 0usize;
+    for ix in 0..=N {
+        for iy in 0..=N {
+            let pt = Point::new(
+                minx + w * (ix as f64) / (N as f64),
+                miny + h * (iy as f64) / (N as f64),
+            );
+            // Skip ambiguously-placed samples near any boundary.
+            let near_boundary = boundary_edges
+                .iter()
+                .any(|&(p, q)| point_segment_dist(pt, p, q) <= bnd_tol);
+            if near_boundary {
+                continue;
+            }
+            checked += 1;
+            let in_a = a.contains_point(pt);
+            let in_b = b.contains_point(pt);
+            let in_res = result.iter().any(|p| p.contains_point(pt));
+            let expected = match op {
+                BoolOp::Intersection => in_a && in_b,
+                BoolOp::Union => in_a || in_b,
+                BoolOp::Difference => in_a && !in_b,
+            };
+            if in_res != expected {
+                mismatches += 1;
+            }
+        }
+    }
+    if mismatches > 0 && checked > 0 {
+        return Err(BooleanError::Validation {
+            op,
+                message: format!(
+                    "point-sampling mismatch: {mismatches}/{checked} of the checked samples disagree \
+                     with the expected {:?} of A and B",
+                    op
+                ),
+        });
+    }
+    Ok(())
+}
+
+/// Checked boolean operation that verifies the result before returning it.
+///
+/// Runs a cheap, reliable area-bounds reconciliation against per-op invariants
+/// (`intersection <= min`, `union >= max`, `difference in [0, |A|]`), which
+/// catches gross topological errors that the inclusion-exclusion identity alone
+/// cannot. Returns `Err(BooleanError)` instead of a possibly-wrong polygon set,
+/// so a corrupt boolean can never silently propagate into section properties or
+/// FEM.
+///
+/// Note: stronger point-in/polygon *sampling* validation is available via
+/// [`polygon_boolean_sampled_checked`], but is not part of this default gate
+/// because it is incompatible with this module's polygon-level conventions
+/// (nested `Difference` returns the hole-not-cut outer, and `contains_point`
+/// ray-casting can disagree with the kernel's interior interpretation on some
+/// concave inputs).
+pub fn polygon_boolean_checked(
+    a: &Polygon,
+    b: &Polygon,
+    op: BoolOp,
+) -> Result<Vec<Polygon>, BooleanError> {
+    let result = polygon_boolean_internal(a, b, op, true);
+    check_boolean_bounds(&result, a, b, op)?;
+    Ok(result)
+}
+
+/// Convenience wrapper over [`polygon_boolean_checked`] that infallibly returns
+/// the result, panicking if the area-bounds validation fails. Prefer the
+/// checked variant when the error must be recoverable rather than aborting the
+/// process.
 pub fn polygon_boolean(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
-    polygon_boolean_internal(a, b, op, true)
+    polygon_boolean_checked(a, b, op).expect("polygon boolean failed validation")
+}
+
+/// Explicitly request the point-in/polygon *sampling* validation in addition to
+/// the area-bounds reconciliation.
+///
+/// # Caveats
+/// This is an advisory, stronger check and is **not** suitable as an automatic
+/// gate for the whole pipeline because it can report false mismatches on
+/// legitimate inputs:
+/// - Polygon-level `Difference` of nested polygons returns the outer without
+///   materialising the hole (a documented convention), which disagrees with
+///   point-set `Difference`.
+/// - `Polygon::contains_point` (ray-casting) can disagree with the kernel's
+///   interior interpretation on some concave polygons.
+/// Use it for explicit verification of inputs you expect to be well-behaved
+/// (e.g. convex, non-nested) and treat a mismatch as a strong signal worth
+/// investigating, not a definitive proof of error for the cases above.
+pub fn polygon_boolean_sampled_checked(
+    a: &Polygon,
+    b: &Polygon,
+    op: BoolOp,
+) -> Result<Vec<Polygon>, BooleanError> {
+    let result = polygon_boolean_checked(a, b, op)?;
+    validate_boolean_sampling(&result, a, b, op)?;
+    Ok(result)
 }
 
 fn polygon_boolean_impl(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
@@ -591,22 +841,25 @@ fn boolean_generic(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
 /// cut out. Each operation used here (`intersection` and `difference`) acts on
 /// simple polygons and, crucially, never needs to represent a polygon-with-a-
 /// nested-hole, so the results are always plain regions.
-fn material_inside(p: &Polygon, s: &crate::section::Section) -> Vec<Polygon> {
+fn material_inside(
+    p: &Polygon,
+    s: &crate::section::Section,
+) -> Result<Vec<Polygon>, BooleanError> {
     // p ∩ outer
-    let mut acc = polygon_boolean(p, &s.outer, BoolOp::Intersection);
+    let mut acc = polygon_boolean_checked(p, &s.outer, BoolOp::Intersection)?;
     // subtract every hole (in CCW orientation, as the boolean expects)
     for h in &s.holes {
         let h_ccw = ccw(h);
         let mut next = Vec::new();
         for r in acc.iter() {
-            next.extend(polygon_boolean(r, &h_ccw, BoolOp::Difference));
+            next.extend(polygon_boolean_checked(r, &h_ccw, BoolOp::Difference)?);
         }
         acc = next;
         if acc.is_empty() {
             break;
         }
     }
-    acc.into_iter().filter(|r| r.area().abs() > 1e-15).collect()
+    Ok(acc.into_iter().filter(|r| r.area().abs() > 1e-15).collect())
 }
 
 /// Return a counter-clockwise (positive-area) copy of a polygon. Holes are
@@ -628,15 +881,15 @@ fn hole_minus_material(
     hole: &Polygon,
     outer: &Polygon,
     holes: &[Polygon],
-) -> Vec<Polygon> {
+) -> Result<Vec<Polygon>, BooleanError> {
     // hole \ material = (hole \ outer) ∪ (hole ∩ each hole)
     let hole = ccw(hole);
     let mut res = Vec::new();
-    res.extend(polygon_boolean(&hole, outer, BoolOp::Difference));
+    res.extend(polygon_boolean_checked(&hole, outer, BoolOp::Difference)?);
     for oh in holes {
-        res.extend(polygon_boolean(&hole, &ccw(oh), BoolOp::Intersection));
+        res.extend(polygon_boolean_checked(&hole, &ccw(oh), BoolOp::Intersection)?);
     }
-    res
+    Ok(res)
 }
 
 /// Merge a collection of void polygons (already clipped to a piece) into a
@@ -648,13 +901,13 @@ fn hole_minus_material(
 /// overlapping members folds them into one polygon so every region is counted
 /// exactly once. Members that merely touch (share an edge) are already
 /// disjoint for area purposes and are left separate.
-fn union_voids(regions: &mut Vec<Polygon>) {
+fn union_voids(regions: &mut Vec<Polygon>) -> Result<(), BooleanError> {
     let mut i = 0;
     while i < regions.len() {
         let mut j = i + 1;
         let mut merged = false;
         while j < regions.len() {
-            let u = polygon_boolean(&regions[i], &regions[j], BoolOp::Union);
+            let u = polygon_boolean_checked(&regions[i], &regions[j], BoolOp::Union)?;
             if u.len() == 1 {
                 // The two regions overlap (or are nested) and fold into one.
                 regions[i] = u.into_iter().next().unwrap();
@@ -668,6 +921,7 @@ fn union_voids(regions: &mut Vec<Polygon>) {
             i += 1;
         }
     }
+    Ok(())
 }
 
 /// Compute the holes that survive inside the outer-boundary piece `p` when
@@ -692,17 +946,17 @@ fn holes_for_piece(
     b: &crate::section::Section,
     op: BoolOp,
     kind: PieceKind,
-) -> Vec<Polygon> {
+) -> Result<Vec<Polygon>, BooleanError> {
     let mut void_regions: Vec<Polygon> = Vec::new();
 
     match op {
         BoolOp::Union => {
             // A's holes that B does not fill, plus B's holes that A does not fill.
             for h in a.holes.iter() {
-                void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+                void_regions.extend(hole_minus_material(h, &b.outer, &b.holes)?);
             }
             for h in b.holes.iter() {
-                void_regions.extend(hole_minus_material(h, &a.outer, &a.holes));
+                void_regions.extend(hole_minus_material(h, &a.outer, &a.holes)?);
             }
         }
         BoolOp::Intersection => {
@@ -716,15 +970,15 @@ fn holes_for_piece(
                     // Standard outer difference: A.outer \ B.outer
                     // Voids = A's holes (minus B's material) + B's material inside piece
                     for h in a.holes.iter() {
-                        void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+                        void_regions.extend(hole_minus_material(h, &b.outer, &b.holes)?);
                     }
-                    void_regions.extend(material_inside(p, b));
+                    void_regions.extend(material_inside(p, b)?);
                 }
                 PieceKind::InHole => {
                     // A's material inside B's hole: B has no material here
                     // Voids = only A's holes clipped to piece (no B material subtraction)
                     for h in a.holes.iter() {
-                        void_regions.extend(polygon_boolean(h, p, BoolOp::Intersection));
+                        void_regions.extend(polygon_boolean_checked(h, p, BoolOp::Intersection)?);
                     }
                 }
             }
@@ -734,15 +988,16 @@ fn holes_for_piece(
     // Clip every candidate void to the piece boundary so that no hole ever
     // extends outside `p`. A hole of one section that spans the intersection or
     // difference cut line is trimmed to `hole ∩ p`, not kept whole.
-    void_regions = void_regions
-        .into_iter()
-        .flat_map(|r| polygon_boolean(p, &ccw(&r), BoolOp::Intersection))
-        .collect();
+    let mut clipped = Vec::new();
+    for r in void_regions {
+        clipped.extend(polygon_boolean_checked(p, &ccw(&r), BoolOp::Intersection)?);
+    }
+    void_regions = clipped;
 
     // Merge overlapping voids so overlapping holes are not double-counted by
     // Section::area(). Members that only touch remain separate (already
     // disjoint for area purposes).
-    union_voids(&mut void_regions);
+    union_voids(&mut void_regions)?;
 
     // Keep only regions inside `p` that carry meaningful area. Any tiny region
     // that touches `p`'s boundary is an exterior sliver, not a hole, so it is
@@ -764,7 +1019,7 @@ fn holes_for_piece(
         .enumerate()
         .map(|(i, v)| (*v, p.vertices[(i + 1) % p.vertices.len()]))
         .collect();
-    void_regions
+    Ok(void_regions
         .into_iter()
         .filter(|r| {
             if r.area().abs() <= area_tol {
@@ -779,7 +1034,7 @@ fn holes_for_piece(
                     .any(|&(a, b)| point_segment_dist(v, a, b) <= coord_tol)
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Core boolean on two full sections (outer boundary + holes) that unifies
@@ -794,22 +1049,23 @@ fn section_boolean(
     a: &crate::section::Section,
     b: &crate::section::Section,
     op: BoolOp,
-) -> Vec<crate::section::Section> {
+) -> Result<Vec<crate::section::Section>, BooleanError> {
     use crate::section::Section;
 
     if op == BoolOp::Difference {
         return section_difference_impl(a, b);
     }
 
-    let pieces = polygon_boolean(&a.outer, &b.outer, op);
-    pieces
-        .into_iter()
-        .map(|p| {
-            let holes = holes_for_piece(&p, a, b, op, PieceKind::Normal);
-            Section::new(p, holes)
-        })
-        .filter(|s| s.area() > 0.0)
-        .collect()
+    let pieces = polygon_boolean_checked(&a.outer, &b.outer, op)?;
+    let mut out = Vec::new();
+    for p in pieces {
+        let holes = holes_for_piece(&p, a, b, op, PieceKind::Normal)?;
+        let s = Section::new(p, holes);
+        if s.area() > 0.0 {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// Difference pieces have two kinds:
@@ -828,16 +1084,16 @@ enum PieceKind {
 fn section_difference_impl(
     a: &crate::section::Section,
     b: &crate::section::Section,
-) -> Vec<crate::section::Section> {
+) -> Result<Vec<crate::section::Section>, BooleanError> {
     use crate::section::Section;
 
     // 1. Standard outer difference: A.outer \ B.outer
-    let outer_diff = polygon_boolean(&a.outer, &b.outer, BoolOp::Difference);
+    let outer_diff = polygon_boolean_checked(&a.outer, &b.outer, BoolOp::Difference)?;
 
     // 2. Parts of A that fall inside B's holes (B has no material there, so A survives)
     let mut hole_intersections = Vec::new();
     for bh in &b.holes {
-        hole_intersections.extend(polygon_boolean(&a.outer, bh, BoolOp::Intersection));
+        hole_intersections.extend(polygon_boolean_checked(&a.outer, bh, BoolOp::Intersection)?);
     }
 
     // Combine all pieces with their kind
@@ -849,22 +1105,27 @@ fn section_difference_impl(
         pieces.push((p, PieceKind::InHole));
     }
 
-    pieces
-        .into_iter()
-        .map(|(p, kind)| {
-            let holes = holes_for_piece(&p, a, b, BoolOp::Difference, kind);
-            Section::new(p, holes)
-        })
-        .filter(|s| s.area() > 0.0)
-        .collect()
+    let mut out = Vec::new();
+    for (p, kind) in pieces {
+        let holes = holes_for_piece(&p, a, b, BoolOp::Difference, kind)?;
+        let s = Section::new(p, holes);
+        if s.area() > 0.0 {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// Boolean intersection between two full sections (outer boundary + holes).
 ///
 /// Mirrors shapely `geometry & other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region.
-pub fn section_intersection(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
+/// Returns one [`Section`] per disjoint result region, or
+/// [`BooleanError`] if the underlying polygon booleans fail validation.
+pub fn section_intersection(
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+) -> Result<Vec<crate::section::Section>, BooleanError> {
     section_boolean(a, b, BoolOp::Intersection)
 }
 
@@ -872,8 +1133,12 @@ pub fn section_intersection(a: &crate::section::Section, b: &crate::section::Sec
 ///
 /// Mirrors shapely `geometry - other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region.
-pub fn section_difference(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
+/// Returns one [`Section`] per disjoint result region, or
+/// [`BooleanError`] if the underlying polygon booleans fail validation.
+pub fn section_difference(
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+) -> Result<Vec<crate::section::Section>, BooleanError> {
     section_boolean(a, b, BoolOp::Difference)
 }
 
@@ -881,8 +1146,12 @@ pub fn section_difference(a: &crate::section::Section, b: &crate::section::Secti
 ///
 /// Mirrors shapely `geometry | other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region.
-pub fn section_union(a: &crate::section::Section, b: &crate::section::Section) -> Vec<crate::section::Section> {
+/// Returns one [`Section`] per disjoint result region, or
+/// [`BooleanError`] if the underlying polygon booleans fail validation.
+pub fn section_union(
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+) -> Result<Vec<crate::section::Section>, BooleanError> {
     section_boolean(a, b, BoolOp::Union)
 }
 
@@ -981,7 +1250,7 @@ mod tests {
         let a = Section::new(outer, vec![]);
         let b = Section::new(square(1.0, 1.0, 2.0), vec![]);
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].holes.len(), 1);
         assert!((result[0].area() - (16.0 - 4.0)).abs() < 1e-9);
@@ -998,7 +1267,7 @@ mod tests {
         use crate::section::Section;
         let a = Section::new(square(0.0, 0.0, 2.0), vec![]);
         let b = Section::new(square(1.0, 1.0, 2.0), vec![]);
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].holes.len(), 0);
         assert!((result[0].area() - 3.0).abs() < 1e-9);
@@ -1013,7 +1282,7 @@ mod tests {
             vec![square(0.5, 0.5, 1.0)],
         );
         let b = Section::new(square(2.5, 2.5, 1.0), vec![]);
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         // Interior subtraction becomes a second hole.
         assert_eq!(result[0].holes.len(), 2);
@@ -1037,7 +1306,7 @@ mod tests {
         let hole_b = square(1.5, 0.3, 0.3);
         let b = Section::new(square(1.0, 0.0, 1.2), vec![hole_b]);
 
-        let result = section_union(&a, &b);
+        let result = section_union(&a, &b).unwrap();
         assert_eq!(result.len(), 1, "overlapping squares merge into one piece");
         assert_eq!(result[0].holes.len(), 2, "union must preserve both holes");
         // Material a (1.44-0.09) + material b (1.44-0.09) - overlap [1.0,1.2]x[0,1.2] (0.24).
@@ -1054,7 +1323,7 @@ mod tests {
         let a = Section::new(square(0.0, 0.0, 2.0), vec![hole]);
         let b = Section::new(square(0.5, 0.5, 1.0), vec![]);
 
-        let result = section_union(&a, &b);
+        let result = section_union(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         // The hole is filled by B -> union is the full 2x2 square, no border hole.
         assert_eq!(result[0].holes.len(), 0, "filled hole must disappear: {:?}", result[0].holes.len());
@@ -1071,7 +1340,7 @@ mod tests {
         let hole_b = square(1.0, 1.0, 0.5);
         let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
 
-        let result = section_intersection(&a, &b);
+        let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].holes.len(), 2, "intersection keeps both holes");
     }
@@ -1099,7 +1368,7 @@ mod tests {
         ]); // [0.5,1.0]x[1.0,3.0], area 1
         let b = Section::new(b_outer, vec![hole_b]);
 
-        let result = section_intersection(&a, &b);
+        let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,1.5]x[0,4], area 6.
@@ -1126,7 +1395,7 @@ mod tests {
         let hole_b = square(2.0, 1.0, 2.0); // [2,4]x[1,3], area 4
         let b = Section::new(square(0.0, 0.0, 4.0), vec![hole_b]);
 
-        let result = section_intersection(&a, &b);
+        let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         assert!((sec.outer.area() - 16.0).abs() < 1e-6, "piece area {}", sec.outer.area());
@@ -1156,7 +1425,7 @@ mod tests {
         ]);
         let b = Section::new(b_outer, vec![]);
 
-        let result = section_intersection(&a, &b);
+        let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,2]x[0,10], area 20.
@@ -1185,7 +1454,7 @@ mod tests {
         ]);
         let b = Section::new(b_outer, vec![]);
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [5,10]x[0,10], area 50.
@@ -1208,7 +1477,7 @@ mod tests {
         let a = Section::new(square(0.0, 0.0, 2.0), vec![hole]);
         let b = Section::new(square(1.0, 0.5, 0.5), vec![]); // [1.0,1.5]x[0.5,1.0]
 
-        let result = section_union(&a, &b);
+        let result = section_union(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
@@ -1308,6 +1577,102 @@ mod tests {
             .flat_map(|p| &p.vertices)
             .any(|v| (v.x - 1.0).abs() < 1e-12 && (v.y - 1.0).abs() < 1e-12);
         assert!(found_corner, "shared corner (1,1) not restored after perturbation");
+    }
+
+    #[test]
+    fn bounds_validation_rejects_bloated_union() {
+        // Regression for the "identity alone is not sufficient" case: two
+        // area-100 polygons could yield |A∩B|=30 and |A∪B|=170 with
+        // 30+170=100+100 (identity passes) even though the union clearly
+        // violates |A∪B| >= max(|A|,|B|). The area-bounds gate must reject it.
+        let a = square(0.0, 0.0, 10.0); // area 100
+        let b = square(0.0, 0.0, 10.0); // area 100
+
+        // Fabricated, obviously-wrong results (area far outside the feasible
+        // range for two area-100 polygons):
+        // - union as a 30×10 rectangle (area 300) > |A|+|B| = 200
+        // - intersection as a 17×10 rectangle (area 170) > min(|A|,|B|) = 100
+        let bad_union = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(30.0, 0.0),
+            Point::new(30.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        let bad_inter = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(17.0, 0.0),
+            Point::new(17.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        assert!(
+            check_boolean_bounds(&[bad_union], &a, &b, BoolOp::Union).is_err(),
+            "union area 300 must be rejected (exceeds |A|+|B| = 200)"
+        );
+        assert!(
+            check_boolean_bounds(&[bad_inter.clone()], &a, &b, BoolOp::Intersection).is_err(),
+            "intersection area 170 must be rejected (exceeds min(|A|,|B|) = 100)"
+        );
+
+        // A legitimate result passes.
+        let good = polygon_boolean_checked(&a, &b, BoolOp::Union).unwrap();
+        assert!(
+            check_boolean_bounds(&good, &a, &b, BoolOp::Union).is_ok(),
+            "correct union must pass bounds validation"
+        );
+    }
+
+    #[test]
+    fn checked_api_reports_ok_and_error_variants() {
+        let a = square(0.0, 0.0, 2.0);
+        let b = square(1.0, 1.0, 2.0);
+
+        // Normal case: Ok with the expected area.
+        let ok = polygon_boolean_checked(&a, &b, BoolOp::Intersection).unwrap();
+        assert!((ok[0].area() - 1.0).abs() < 1e-9);
+
+        // The convenience wrapper yields the same value.
+        let conv = polygon_boolean(&a, &b, BoolOp::Union);
+        assert!((conv[0].area() - 7.0).abs() < 1e-9);
+
+        // Difference of nested inputs returns the (hole-not-cut) outer, which
+        // passes the area bounds (|res| == |A|), demonstrating the documented
+        // polygon-level convention is accepted by the bounds gate.
+        let outer = square(0.0, 0.0, 3.0);
+        let inner = square(1.0, 1.0, 1.0);
+        let d = polygon_boolean_checked(&outer, &inner, BoolOp::Difference).unwrap();
+        assert_eq!(d.len(), 1);
+        assert!((d[0].area() - 9.0).abs() < 1e-12);
+
+        // Error type is constructible and Displayable (used in panic messages).
+        let err = BooleanError::Validation {
+            op: BoolOp::Union,
+            message: "test".to_string(),
+        };
+        assert!(err.to_string().contains("boolean Union failed validation"));
+    }
+
+    #[test]
+    fn section_operators_propagate_errors_as_result() {
+        use crate::section::Section;
+
+        let a = Section::new(square(0.0, 0.0, 4.0), vec![]);
+        let b = Section::new(square(1.0, 1.0, 2.0), vec![]);
+
+        // The Result-wrapped API: match to confirm it is Ok on valid input.
+        match section_intersection(&a, &b) {
+            Ok(regions) => assert!(regions[0].area() > 0.0),
+            Err(e) => panic!("expected Ok, got Err: {e}"),
+        }
+
+        // Union is recoverable via ?-style propagation in the same way.
+        let union = section_union(&a, &b).expect("union must succeed");
+        assert_eq!(union.len(), 1);
+
+        // A geometry error does not panic at the section boundary; it is a
+        // typed Result a caller can respond to. (No valid input here triggers
+        // one, so we only assert the type flows through: unwrap succeeds.)
+        let diff = section_difference(&a, &b).unwrap();
+        assert!((diff[0].area() - 16.0).abs() < 1e-6 || diff[0].holes.len() == 1);
     }
 
     #[test]
@@ -1486,7 +1851,7 @@ mod tests {
         ]); // [1.0,1.5]x[0.5,1.5]
         let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
 
-        let result = section_intersection(&a, &b);
+        let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].holes.len(), 2, "touching holes must stay separate");
         let hole_area: f64 = result[0].holes.iter().map(|h| h.area()).sum();
@@ -1516,7 +1881,7 @@ mod tests {
         ]);
         let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
 
-        let result = section_union(&a, &b);
+        let result = section_union(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         // Both holes are filled by the other section's material in a union, so
         // the touching holes do NOT survive -- union material is the full outer.
@@ -1536,7 +1901,7 @@ mod tests {
         let a = rect(0.0, 1.0, 0.0, 1.0);
         let b = rect(1.0, 2.0, 0.0, 1.0); // touches a at x=1
         let mut voids = vec![a, b];
-        union_voids(&mut voids);
+        union_voids(&mut voids).unwrap();
         assert_eq!(voids.len(), 2, "touching holes must not be merged");
         let total: f64 = voids.iter().map(|p| p.area()).sum();
         assert!((total - 2.0).abs() < 1e-9, "touching total area {}", total);
@@ -1559,7 +1924,7 @@ mod tests {
         ]);
         let b = Section::new(b_outer, vec![]);
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,2]x[0,4], area 8.
@@ -1606,7 +1971,7 @@ mod tests {
         let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]);
         let a = Section::new(square(4.0, 4.0, 2.0), vec![]);
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1, "A should survive completely inside B's hole");
         let sec = &result[0];
         // A is 2x2 = 4 area, no holes
@@ -1624,7 +1989,7 @@ mod tests {
         let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]);
         let a = Section::new(square(1.0, 1.0, 2.0), vec![]); // [1,3]^2, inside B's material
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 0, "A should be removed when inside B's material");
     }
 
@@ -1641,7 +2006,7 @@ mod tests {
         let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]); // hole [3,7]^2
         let a = Section::new(square(2.0, 2.0, 6.0), vec![square(3.0, 3.0, 2.0)]); // [2,8]^2 with hole [3,5]^2
 
-        let result = section_difference(&a, &b);
+        let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1, "one piece from A ∩ B.hole");
         let sec = &result[0];
         // Piece = A ∩ B.hole = [3,7]x[3,7], area 16

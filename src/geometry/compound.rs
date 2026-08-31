@@ -214,44 +214,42 @@ impl Geometry {
     ///
     /// Mirrors `Geometry | other` (shapely `union`). Operates on the outer
     /// Boolean union with `other`.
-    pub fn union(&self, other: &Self) -> Option<Self> {
+    pub fn union(&self, other: &Self) -> Result<Option<Self>, super::boolean::BooleanError> {
         self.boolean_with_holes(other, super::boolean::BoolOp::Union)
     }
 
     /// Boolean intersection with `other`.
     ///
     /// Mirrors `Geometry & other` (shapely `intersection`).
-    pub fn intersection(&self, other: &Self) -> Option<Self> {
+    pub fn intersection(&self, other: &Self) -> Result<Option<Self>, super::boolean::BooleanError> {
         self.boolean_with_holes(other, super::boolean::BoolOp::Intersection)
     }
 
     /// Boolean difference: this geometry minus `other`.
     ///
     /// Mirrors `Geometry - other` (shapely `difference`).
-    pub fn subtract(&self, other: &Self) -> Option<Self> {
+    pub fn subtract(&self, other: &Self) -> Result<Option<Self>, super::boolean::BooleanError> {
         self.boolean_with_holes(other, super::boolean::BoolOp::Difference)
     }
 
-    fn boolean_with_holes(&self, other: &Self, op: super::boolean::BoolOp) -> Option<Self> {
+    fn boolean_with_holes(
+        &self,
+        other: &Self,
+        op: super::boolean::BoolOp,
+    ) -> Result<Option<Self>, super::boolean::BooleanError> {
         let a = Section::new(self.apply_transforms().outer, self.apply_transforms().holes);
         let b = Section::new(other.apply_transforms().outer, other.apply_transforms().holes);
 
         let results = match op {
-            super::boolean::BoolOp::Union => {
-                super::boolean::section_union(&a, &b)
-            }
-            super::boolean::BoolOp::Intersection => {
-                super::boolean::section_intersection(&a, &b)
-            }
-            super::boolean::BoolOp::Difference => {
-                super::boolean::section_difference(&a, &b)
-            }
+            super::boolean::BoolOp::Union => super::boolean::section_union(&a, &b)?,
+            super::boolean::BoolOp::Intersection => super::boolean::section_intersection(&a, &b)?,
+            super::boolean::BoolOp::Difference => super::boolean::section_difference(&a, &b)?,
         };
 
         let best = results
             .into_iter()
-            .max_by(|x, y| x.area().partial_cmp(&y.area()).unwrap())?;
-        Some(Geometry::new(best.outer, best.holes))
+            .max_by(|x, y| x.area().partial_cmp(&y.area()).unwrap());
+        Ok(best.map(|b| Geometry::new(b.outer, b.holes)))
     }
 
     /// Return a copy of this geometry with the transforms applied to all vertices.
@@ -634,7 +632,9 @@ impl CompoundGeometry {
                 for gb in &other.geometries {
                     let mut next = Vec::new();
                     for ga in &current {
-                        if let Some(diff) = ga.boolean_with_holes(gb, op) {
+                        if let Some(diff) =
+                            ga.boolean_with_holes(gb, op).expect("geometry boolean failed validation")
+                        {
                             next.push(diff);
                         }
                     }
@@ -666,7 +666,10 @@ impl CompoundGeometry {
                             if matches!(bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
                                 continue;
                             }
-                            if let Some(union) = acc[i].boolean_with_holes(&acc[j], super::boolean::BoolOp::Union) {
+                            if let Some(union) = acc[i]
+                                .boolean_with_holes(&acc[j], super::boolean::BoolOp::Union)
+                                .expect("geometry boolean failed validation")
+                            {
                                 merged = Some((i, j, union));
                                 break 'outer;
                             }
