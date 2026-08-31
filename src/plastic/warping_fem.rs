@@ -507,24 +507,26 @@ fn solve_with_fallback(
     f: &[f64],
 ) -> Vec<f64> {
     if let Some(s) = solver {
-        let w1 = s.solve(f);
-        let w2 = s.solve(c);
-        let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
-        let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        if ct_w1.abs() > 1e-15 {
-            let lambda = ct_w2 / ct_w1;
-            let u: Vec<f64> =
-                w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
-            // Relative residual of K u - f + lambda c = 0.
-            let prod = k_reg.matvec(&u);
-            let mut worst = 0.0f64;
-            let mut f_norm = 0.0f64;
-            for i in 0..prod.len() {
-                worst = worst.max((prod[i] - f[i] + lambda * c[i]).abs());
-                f_norm = f_norm.max(f[i].abs());
-            }
-            if worst <= 1e-6 * f_norm.max(1e-300) {
-                return u;
+        if let Ok(w1) = s.solve(f) {
+            if let Ok(w2) = s.solve(c) {
+                let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
+                let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+                if ct_w1.abs() > 1e-15 {
+                    let lambda = ct_w2 / ct_w1;
+                    let u: Vec<f64> =
+                        w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
+                    // Relative residual of K u - f + lambda c = 0.
+                    let prod = k_reg.matvec(&u);
+                    let mut worst = 0.0f64;
+                    let mut f_norm = 0.0f64;
+                    for i in 0..prod.len() {
+                        worst = worst.max((prod[i] - f[i] + lambda * c[i]).abs());
+                        f_norm = f_norm.max(f[i].abs());
+                    }
+                    if worst <= 1e-6 * f_norm.max(1e-300) {
+                        return u;
+                    }
+                }
             }
         }
     }

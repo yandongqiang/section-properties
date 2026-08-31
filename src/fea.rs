@@ -1451,6 +1451,25 @@ enum LagrangeKernelInstance {
     Pardiso(std::sync::Mutex<crate::fea::solvers::pardiso::PardisoSolver>),
 }
 
+/// Options controlling the direct Lagrangian solver behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolverOptions {
+    /// If true, automatically regularize a singular leading block by adding
+    /// a small multiple of the identity (eps ~ 1e-9 * avg_diag). Default: false.
+    ///
+    /// When false (default), a singular leading block returns
+    /// `FemError::SingularMatrix` instead of silently adding stiffness.
+    /// This prevents masking modeling errors (missing boundary conditions,
+    /// mechanisms, etc.) behind artificial stiffness.
+    pub auto_regularize_singular: bool,
+}
+
+impl Default for SolverOptions {
+    fn default() -> Self {
+        Self { auto_regularize_singular: false }
+    }
+}
+
 impl DirectLagrangeSolver {
     /// Assemble the augmented Lagrangian matrix exactly as Python
     /// `Section.assemble_torsion` does: [[K, c], [c^T, 0]] in CSC format.
@@ -1480,14 +1499,15 @@ impl DirectLagrangeSolver {
     /// select it explicitly via [`DirectLagrangeSolver::with_kernel`] when
     /// the environment is known to be complete.
     pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, crate::mesh::fem::FemError> {
-        Self::with_kernel(LagrangeKernel::Skyline, k, c)
+        Self::with_kernel(LagrangeKernel::Skyline, k, c, SolverOptions::default())
     }
 
-    /// Factor with an explicit kernel.
+    /// Factor with an explicit kernel and options.
     pub fn with_kernel(
         kernel: LagrangeKernel,
         k: &SparseMatrix,
         c: &[f64],
+        opts: SolverOptions,
     ) -> Result<Self, crate::mesh::fem::FemError> {
         let instance = match kernel {
             LagrangeKernel::Skyline => {
@@ -1495,7 +1515,7 @@ impl DirectLagrangeSolver {
                 m.compress();
                 let m = match SkylineLdlt::factor(&m) {
                     Ok(ldlt) => ldlt,
-                    Err(crate::mesh::fem::FemError::SingularMatrix) => {
+                    Err(crate::mesh::fem::FemError::SingularMatrix) if opts.auto_regularize_singular => {
                         let mut m_reg = k.clone();
                         m_reg.compress();
                         let mut diag_avg = 0.0;
@@ -1523,13 +1543,12 @@ impl DirectLagrangeSolver {
     }
 
     /// Solve [K c; c^T 0] [u; lam] = [f; 0] and return u.
-    pub fn solve(&self, f: &[f64]) -> Vec<f64> {
-        let (u, _lam) = self.solve_full(f);
-        u
+    pub fn solve(&self, f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+        self.solve_full(f).map(|(u, _lam)| u)
     }
 
     /// Solve returning `(u, lambda)`.
-    pub fn solve_full(&self, f: &[f64]) -> (Vec<f64>, f64) {
+    pub fn solve_full(&self, f: &[f64]) -> Result<(Vec<f64>, f64), crate::mesh::fem::FemError> {
         match &self.kernel {
             LagrangeKernelInstance::Skyline(ldlt) => {
                 let w1 = ldlt.solve(f);
@@ -1542,27 +1561,31 @@ impl DirectLagrangeSolver {
                     .zip(w2.iter())
                     .map(|(&a, &b)| a - lambda * b)
                     .collect();
-                (u, lambda)
+                Ok((u, lambda))
             }
             #[cfg(feature = "pardiso")]
             LagrangeKernelInstance::Pardiso(p) => {
                 // The augmented solve yields lambda as the last unknown.
-                match p.lock().unwrap().solve_with_multiplier(f) {
-                    Ok((u, lam)) => (u, lam),
-                    Err(_) => (vec![0.0; self.n], 0.0),
-                }
+                p.lock()
+                    .unwrap()
+                    .solve_with_multiplier(f)
+                    .map_err(|e| crate::mesh::fem::FemError::ConvergenceFailed)
             }
         }
     }
 
     /// Multiplier error metric |lam| / max|u| (Python's u[-1]/max|u|).
     pub fn multiplier_error(&self, f: &[f64], u: &[f64]) -> f64 {
-        let (_u_full, lambda) = self.solve_full(f);
-        let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        if max_u > 0.0 {
-            lambda.abs() / max_u
-        } else {
-            f64::INFINITY
+        match self.solve_full(f) {
+            Ok((_u_full, lambda)) => {
+                let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+                if max_u > 0.0 {
+                    lambda.abs() / max_u
+                } else {
+                    f64::INFINITY
+                }
+            }
+            Err(_) => f64::INFINITY,
         }
     }
 }
@@ -1858,7 +1881,7 @@ mod direct_lagrange_tests {
         assert_eq!(k_lg.n_rows, n + 1);
         assert_eq!(k_lg.n_cols, n + 1);
         let solver = DirectLagrangeSolver::new(&k, &c).unwrap();
-        let u_dir = solver.solve(&f);
+        let u_dir = solver.solve(&f).unwrap();
 
         for i in 0..n {
             assert!(
