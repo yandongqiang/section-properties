@@ -215,7 +215,7 @@ impl Geometry {
     /// Mirrors `Geometry | other` (shapely `union`). Returns a
     /// `CompoundGeometry` that can represent multiple disconnected regions.
     pub fn union(&self, other: &Self) -> Result<CompoundGeometry, super::boolean::BooleanError> {
-        self.boolean_with_holes(other, super::boolean::BoolOp::Union)
+        self.boolean_op(other, super::boolean::BoolOp::Union)
     }
 
     /// Boolean intersection with `other`.
@@ -223,7 +223,7 @@ impl Geometry {
     /// Mirrors `Geometry & other` (shapely `intersection`). Returns a
     /// `CompoundGeometry` that can represent multiple disconnected regions.
     pub fn intersection(&self, other: &Self) -> Result<CompoundGeometry, super::boolean::BooleanError> {
-        self.boolean_with_holes(other, super::boolean::BoolOp::Intersection)
+        self.boolean_op(other, super::boolean::BoolOp::Intersection)
     }
 
     /// Boolean difference: this geometry minus `other`.
@@ -231,10 +231,10 @@ impl Geometry {
     /// Mirrors `Geometry - other` (shapely `difference`). Returns a
     /// `CompoundGeometry` that can represent multiple disconnected regions.
     pub fn subtract(&self, other: &Self) -> Result<CompoundGeometry, super::boolean::BooleanError> {
-        self.boolean_with_holes(other, super::boolean::BoolOp::Difference)
+        self.boolean_op(other, super::boolean::BoolOp::Difference)
     }
 
-    fn boolean_with_holes(
+    fn boolean_op(
         &self,
         other: &Self,
         op: super::boolean::BoolOp,
@@ -635,7 +635,7 @@ impl CompoundGeometry {
                 for gb in &other.geometries {
                     let mut next = Vec::new();
                     for ga in &current {
-                        let diff = ga.boolean_with_holes(gb, op)?;
+                        let diff = ga.boolean_op(gb, op)?;
                         next.extend(diff.geometries);
                     }
                     current = next;
@@ -667,7 +667,7 @@ impl CompoundGeometry {
                                 continue;
                             }
                             if let Some(union) = acc[i]
-                                .boolean_with_holes(&acc[j], super::boolean::BoolOp::Union)?
+                                .boolean_op(&acc[j], super::boolean::BoolOp::Union)?
                                 .geometries
                                 .into_iter()
                                 .next()
@@ -695,17 +695,17 @@ impl CompoundGeometry {
     }
 
     /// Boolean union with `other`.
-    pub fn union_compound(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
+    pub fn union(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
         self.boolean(other, super::boolean::BoolOp::Union)
     }
 
     /// Boolean intersection with `other`.
-    pub fn intersection_compound(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
+    pub fn intersection(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
         self.boolean(other, super::boolean::BoolOp::Intersection)
     }
 
     /// Boolean difference: this compound minus `other`.
-    pub fn subtract_compound(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
+    pub fn subtract(&self, other: &Self) -> Result<Self, super::boolean::BooleanError> {
         self.boolean(other, super::boolean::BoolOp::Difference)
     }
     /// Total net area across all regions.

@@ -378,18 +378,18 @@ fn smoke_compound_boolean() {
     let b = CompoundGeometry::new(vec![sq(0.0, 0.0)]); // overlaps both halves
 
     // Difference: two half-squares remain (area 0.25 each)
-    let d = a.subtract_compound(&b).unwrap();
+    let d = a.subtract(&b).unwrap();
     // Each square loses its 0.25 overlap with b: 2 - 0.5 = 1.5
     assert!((d.area() - 1.5).abs() < 5e-3, "diff area {}", d.area());
 
     // Union: total area = 1 + 1 + overlap-dissolved... b covers middle:
     // A area=2, B=1, overlap with A = 2*0.25=0.5 -> union = 2+1-0.5=2.5
-    let u = a.union_compound(&b).unwrap();
+    let u = a.union(&b).unwrap();
     let expected_union = 2.0 + 1.0 - 0.5;
     assert!((u.area() - expected_union).abs() < 5e-2, "union {}", u.area());
 
     // Intersection: b ∩ a = 0.5
-    let i = a.intersection_compound(&b).unwrap();
+    let i = a.intersection(&b).unwrap();
     assert!((i.area() - 0.5).abs() < 5e-2, "inter {}", i.area());
 }
 
