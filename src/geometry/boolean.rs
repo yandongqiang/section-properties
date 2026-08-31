@@ -721,8 +721,12 @@ fn holes_for_piece(
     // dropped. Vertices may overhang `p`'s boundary by a tiny amount due to the
     // boolean perturbation, so allow a small coordinate tolerance rather than a
     // strict point-in-polygon test (which would break legitimate boundary holes).
+    //
+    // The perturbation can also fabricate phantom voids (area ~1e-8 * scale^2)
+    // where two holes merely touch, so the area threshold must exceed that scale
+    // to drop them while keeping genuine holes.
     let scale = bbox_diag(&p.vertices);
-    let area_tol = 1e-9 * p.area().abs().max(1e-12) + 1e-12 * scale * scale;
+    let area_tol = 1e-9 * p.area().abs().max(1e-12) + 1e-8 * scale * scale;
     let coord_tol = 1e-7 * scale;
     let edge_pairs: Vec<(Point, Point)> = p
         .vertices
@@ -1333,6 +1337,139 @@ mod tests {
         let d = polygon_boolean(&a, &b, BoolOp::Difference);
         let total: f64 = d.iter().map(|p| p.area()).sum();
         assert!((total - 2.0).abs() < 1e-9, "collinear difference: {}", total);
+    }
+
+    #[test]
+    fn touching_holes_stay_separate() {
+        use crate::section::Section;
+        // Two sections with the same 2x2 outer, each with a hole; the holes
+        // share the edge x=1.0 but do not overlap. The intersection piece is
+        // the full 2x2 and both holes are voids that merely touch -- they must
+        // NOT be merged into one hole (that would lose topology).
+        let hole_a = Polygon::new(vec![
+            Point::new(0.5, 0.5),
+            Point::new(1.0, 0.5),
+            Point::new(1.0, 1.5),
+            Point::new(0.5, 1.5),
+        ]); // [0.5,1.0]x[0.5,1.5]
+        let a = Section::new(square(0.0, 0.0, 2.0), vec![hole_a]);
+        let hole_b = Polygon::new(vec![
+            Point::new(1.0, 0.5),
+            Point::new(1.5, 0.5),
+            Point::new(1.5, 1.5),
+            Point::new(1.0, 1.5),
+        ]); // [1.0,1.5]x[0.5,1.5]
+        let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
+
+        let result = section_intersection(&a, &b);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].holes.len(), 2, "touching holes must stay separate");
+        let hole_area: f64 = result[0].holes.iter().map(|h| h.area()).sum();
+        // Two 0.5 wide x 1 tall holes = 1.0 total void; they must not be
+        // double-counted (which would give 1.0) nor merged+larger.
+        assert!((hole_area - 1.0).abs() < 1e-4, "touching holes total area {}", hole_area);
+        assert!((result[0].area() - (4.0 - 1.0)).abs() < 1e-4, "section area {}", result[0].area());
+    }
+
+    #[test]
+    fn union_does_not_merge_touching_holes() {
+        use crate::section::Section;
+        // Same touching holes, but via UNION. In a union neither hole is filled
+        // by the other section, so both survive and merely touch.
+        let hole_a = Polygon::new(vec![
+            Point::new(0.5, 0.5),
+            Point::new(1.0, 0.5),
+            Point::new(1.0, 1.5),
+            Point::new(0.5, 1.5),
+        ]);
+        let a = Section::new(square(0.0, 0.0, 2.0), vec![hole_a]);
+        let hole_b = Polygon::new(vec![
+            Point::new(1.0, 0.5),
+            Point::new(1.5, 0.5),
+            Point::new(1.5, 1.5),
+            Point::new(1.0, 1.5),
+        ]);
+        let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
+
+        let result = section_union(&a, &b);
+        assert_eq!(result.len(), 1);
+        // Both holes are filled by the other section's material in a union, so
+        // the touching holes do NOT survive -- union material is the full outer.
+        assert_eq!(result[0].holes.len(), 0,
+            "union fills both touching holes, got {} holes", result[0].holes.len());
+        assert!((result[0].area() - 4.0).abs() < 1e-4, "union section area {}", result[0].area());
+    }
+
+    #[test]
+    fn union_voids_keeps_touching_regions_separate() {
+        // Direct unit test of the union_voids() heuristic: two polygons that
+        // merely touch (share an edge) must NOT be merged into one by the
+        // `u.len() == 1` check, because touching polygons have zero overlap and
+        // are already disjoint for area purposes.
+        let rect = |x0: f64, x1: f64, y0: f64, y1: f64| Polygon::new(vec![
+            Point::new(x0, y0), Point::new(x1, y0), Point::new(x1, y1), Point::new(x0, y1)]);
+        let a = rect(0.0, 1.0, 0.0, 1.0);
+        let b = rect(1.0, 2.0, 0.0, 1.0); // touches a at x=1
+        let mut voids = vec![a, b];
+        union_voids(&mut voids);
+        assert_eq!(voids.len(), 2, "touching holes must not be merged");
+        let total: f64 = voids.iter().map(|p| p.area()).sum();
+        assert!((total - 2.0).abs() < 1e-9, "touching total area {}", total);
+    }
+
+    #[test]
+    fn section_difference_clips_existing_hole_union() {
+        use crate::section::Section;
+        // A = 4x4 with a 2x2 hole ([1,3]^2). B = right-half band [2,4]x[0,4]
+        // that slices through both A's hole and A's outer. The difference piece
+        // is the left half [0,2]x[0,4]; A's existing hole is clipped to the
+        // part inside the piece and the result must be the correct union of the
+        // clipped hole with any B material (here none remains inside the piece).
+        let a = Section::new(square(0.0, 0.0, 4.0), vec![square(1.0, 1.0, 2.0)]);
+        let b_outer = Polygon::new(vec![
+            Point::new(2.0, 0.0),
+            Point::new(4.0, 0.0),
+            Point::new(4.0, 4.0),
+            Point::new(2.0, 4.0),
+        ]);
+        let b = Section::new(b_outer, vec![]);
+
+        let result = section_difference(&a, &b);
+        assert_eq!(result.len(), 1);
+        let sec = &result[0];
+        // Piece = [0,2]x[0,4], area 8.
+        assert!((sec.outer.area() - 8.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        // Existing hole clipped to [1,2]x[1,3], area 2.
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        assert!((hole_area - 2.0).abs() < 1e-4, "clipped existing hole area {}", hole_area);
+        assert_holes_within_piece(&sec.outer, &sec.holes);
+        // Net material = 8 - 2 = 6.
+        assert!((sec.area() - 6.0).abs() < 1e-4, "section area {}", sec.area());
+    }
+
+    #[test]
+    fn nested_holes_are_rejected_by_validation() {
+        use crate::geometry::compound::CompoundGeometry;
+        use crate::section::Section;
+        // A single Section cannot represent a hole-within-a-hole (an island of
+        // material inside a void). Validation must reject it, since
+        // Section::area() would otherwise double-subtract the nested region.
+        let hole_outer = square(1.0, 1.0, 2.0); // [1,3]^2
+        let hole_inner = square(1.5, 1.5, 1.0); // [1.5,2.5]^2, nested inside
+        let s = Section::new(square(0.0, 0.0, 4.0), vec![hole_outer, hole_inner]);
+        let compound = CompoundGeometry::from_sections(&[s]);
+        assert!(
+            matches!(compound.validate(), Err(crate::geometry::compound::CompoundError::NestedHoles { .. })),
+            "nested holes must be rejected by geometry validation"
+        );
+
+        // A control: two non-nested, non-overlapping holes are valid.
+        let ok = Section::new(square(0.0, 0.0, 4.0), vec![
+            square(0.5, 0.5, 0.5),
+            square(3.0, 3.0, 0.5),
+        ]);
+        let compound_ok = CompoundGeometry::from_sections(&[ok]);
+        assert!(compound_ok.validate().is_ok(), "non-nested holes must validate");
     }
 }
 
