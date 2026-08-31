@@ -353,12 +353,17 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
 
     // Deterministic perturbation: try systematic shifts in fixed directions.
     // Directions chosen to avoid common edge orientations (horizontal, vertical,
-    // 45-degree). The first direction that satisfies the area invariant wins.
+    // 45-degree). The first direction that satisfies the inclusion-exclusion
+    // identity wins.
+    // Use much smaller epsilon to minimize coordinate distortion.
     let directions: &[(f64, f64)] = &[
         (1.0, 0.37),   // ~20° from horizontal
         (-0.61, 1.0),  // ~122° from horizontal
         (0.83, -0.83), // ~-45° from horizontal
     ];
+    // 1e-8 * diag: for diag=1e4 (mm), eps=0.1 µm. Large enough to resolve
+    // vertex-on-edge degeneracies, small enough that the post-hoc coordinate
+    // mapping eliminates geometric drift.
     let eps = 1e-8 * diag;
 
     let mut best: Option<(f64, Vec<Polygon>)> = None;
@@ -373,7 +378,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
         let result = polygon_boolean_impl(a, &b_shifted, op);
 
         // For perturbed results, accept if basic bounds check passes.
-        // Strict identity check is only for the unshifted fallback.
+        // Strict identity check is only for the final unshifted fallback.
         let area_result: f64 = result.iter().map(|p| p.area()).sum();
         let area_a = a.area();
         let area_b = b.area();
@@ -402,7 +407,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
         return result;
     }
 
-    // Ultimate fallback: run unshifted and validate it strictly.
+    // Ultimate fallback: run unshifted and validate strictly.
     let result = polygon_boolean_impl(a, b, op);
     if validate && !validate_boolean_result(&result, a, b, op) {
         // Even unshifted failed validation; return anyway.
@@ -752,16 +757,18 @@ fn holes_for_piece(
     // disjoint for area purposes).
     union_voids(&mut void_regions);
 
-    // Keep only regions inside `p` that carry meaningful area. Any tiny region
+// Keep only regions inside `p` that carry meaningful area. Any tiny region
     // that touches `p`'s boundary is an exterior sliver, not a hole, so it is
     // dropped. Vertices may overhang `p`'s boundary by a tiny amount due to the
     // boolean perturbation, so allow a small coordinate tolerance rather than a
     // strict point-in-polygon test (which would break legitimate boundary holes).
     //
-    // The perturbation can also fabricate phantom voids (area ~1e-8 * scale^2)
-    // where two holes merely touch, so the area threshold must exceed that scale
-    // to drop them while keeping genuine holes.
+    // The perturbation can also fabricate phantom voids (area ~eps * scale
+    // with eps=1e-8*diag) where two holes merely touch, so the area threshold
+    // must exceed that scale to drop them while keeping genuine holes.
     let scale = bbox_diag(&p.vertices);
+    // Relative tolerance (1e-9 * piece_area) plus absolute tolerance based on
+    // perturbation-induced phantom void area (~eps * scale with eps=1e-8*diag).
     let area_tol = 1e-9 * p.area().abs().max(1e-12) + 1e-8 * scale * scale;
     let coord_tol = 1e-7 * scale;
     let edge_pairs: Vec<(Point, Point)> = p
