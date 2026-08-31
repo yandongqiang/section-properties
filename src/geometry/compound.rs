@@ -239,8 +239,10 @@ impl Geometry {
         other: &Self,
         op: super::boolean::BoolOp,
     ) -> Result<CompoundGeometry, super::boolean::BooleanError> {
-        let a = Section::new(self.apply_transforms().outer, self.apply_transforms().holes);
-        let b = Section::new(other.apply_transforms().outer, other.apply_transforms().holes);
+        let a_trans = self.apply_transforms();
+        let b_trans = other.apply_transforms();
+        let a = Section::new(a_trans.outer, a_trans.holes);
+        let b = Section::new(b_trans.outer, b_trans.holes);
 
         let results = match op {
             super::boolean::BoolOp::Union => super::boolean::section_union(&a, &b)?,
