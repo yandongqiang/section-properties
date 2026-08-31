@@ -415,9 +415,10 @@ enum BBoxRelation {
     Overlap,
 }
 
-/// Quick bounding-box relation test for two polygons.
+/// Quick outer-boundary bounding-box relation test for two polygons.
 /// Returns Disjoint if separated, Touch if only boundaries touch, Overlap if interiors overlap.
-fn bbox_relation(a: &Polygon, b: &Polygon) -> BBoxRelation {
+/// Note: This checks OUTER boundaries only, not material (outer minus holes).
+fn outer_bbox_relation(a: &Polygon, b: &Polygon) -> BBoxRelation {
     let bbox = |pts: &[Point]| {
         pts.iter().fold(
             (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
@@ -489,7 +490,7 @@ impl CompoundGeometry {
             let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
             'outer: for i in 0..acc.len() {
                 for j in (i + 1)..acc.len() {
-                    if matches!(bbox_relation(&acc[i], &acc[j]), BBoxRelation::Disjoint) {
+                    if matches!(outer_bbox_relation(&acc[i], &acc[j]), BBoxRelation::Disjoint) {
                         continue;
                     }
                     let u = polygon_boolean(&acc[i], &acc[j], BoolOp::Union);
@@ -660,7 +661,7 @@ impl CompoundGeometry {
                     let mut merged: Option<(usize, usize, Vec<Geometry>)> = None;
                     'outer: for i in 0..acc.len() {
                         for j in (i + 1)..acc.len() {
-                            if matches!(bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
+                            if matches!(outer_bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
                                 continue;
                             }
                             let union_result = acc[i]
@@ -784,11 +785,34 @@ impl From<crate::section::Section> for CompoundGeometry {
 /// 3. **Full containment** – if all vertices of one outer lie inside the
 ///    other outer, the intersection polygon is non-empty *and* not
 ///    entirely absorbed by the union of all holes.
+fn intersection_point(a1: Point, a2: Point, b1: Point, b2: Point) -> Point {
+    // Line segment intersection using parametric form.
+    // a1 + t*(a2-a1) = b1 + u*(b2-b1)
+    let dx1 = a2.x - a1.x;
+    let dy1 = a2.y - a1.y;
+    let dx2 = b2.x - b1.x;
+    let dy2 = b2.y - b1.y;
+
+    let det = dx1 * dy2 - dy1 * dx2;
+    if det.abs() < 1e-12 {
+        // Parallel or collinear - return midpoint of overlapping range
+        // Simplified: return midpoint of a1-a2
+        return Point::new((a1.x + a2.x) * 0.5, (a1.y + a2.y) * 0.5);
+    }
+
+    let t = ((b1.x - a1.x) * dy2 - (b1.y - a1.y) * dx2) / det;
+    // Clamp to segment
+    let t = t.clamp(0.0, 1.0);
+    Point::new(a1.x + t * dx1, a1.y + t * dy1)
+}
+
 fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
     let a_outer = &a.outer;
     let b_outer = &b.outer;
 
     // 1. Edge–edge intersection between the two outer boundaries.
+    //    Only counts if the intersection point is in the MATERIAL
+    //    of both regions (not inside any hole).
     for i in 0..a_outer.vertices.len() {
         let a1 = a_outer.vertices[i];
         let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
@@ -796,7 +820,16 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
             let b1 = b_outer.vertices[j];
             let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
             if segments_interact(a1, a2, b1, b2) {
-                return true;
+                // Compute a representative point on the intersection.
+                // Use the midpoint of the overlapping segment or the
+                // intersection point itself.
+                let pt = intersection_point(a1, a2, b1, b2);
+                // Check if this point is in material of BOTH regions
+                let in_a_material = a_outer.contains_point(pt) && !a.holes.iter().any(|h| h.contains_point(pt));
+                let in_b_material = b_outer.contains_point(pt) && !b.holes.iter().any(|h| h.contains_point(pt));
+                if in_a_material && in_b_material {
+                    return true;
+                }
             }
         }
     }

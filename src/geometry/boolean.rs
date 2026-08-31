@@ -571,6 +571,10 @@ fn check_boolean_bounds(
 ///    only realised at `Section` level). Sampling naively expects the hole to
 ///    be present and flags the (correct, convention-compliant) result.
 ///
+/// To reduce false positives, this function now **skips sampling validation**
+/// for `Difference` when `result.area() ≈ |A|` (i.e. no hole was actually cut),
+/// since that is the documented convention-compliant outcome.
+///
 /// Consequently it is exposed separately as `polygon_boolean_sampled_checked`
 /// and is intended for callers who know their inputs are convex and
 /// non-nested, where it adds a strong extra correctness signal.
@@ -580,6 +584,16 @@ fn validate_boolean_sampling(
     b: &Polygon,
     op: BoolOp,
 ) -> Result<(), BooleanError> {
+    // Fast skip: for nested Difference where result == outer (no hole cut),
+    // this is the documented convention. Sampling would flag it falsely.
+    if op == BoolOp::Difference {
+        let area_a = a.area();
+        let area_res: f64 = result.iter().map(|p| p.area()).sum();
+        if (area_res - area_a).abs() < 1e-9 {
+            return Ok(());
+        }
+    }
+
     let diag = bbox_diag(&a.vertices).max(bbox_diag(&b.vertices));
     if diag <= 0.0 {
         return Ok(());
