@@ -665,7 +665,11 @@ impl CompoundGeometry {
                             }
                             let union_result = acc[i]
                                 .boolean_op(&acc[j], super::boolean::BoolOp::Union)?;
-                            if !union_result.geometries.is_empty() {
+                            // Only merge if the union actually produced a SINGLE region.
+                            // If it returns 2+ regions, the inputs were material-disjoint
+                            // (e.g. same outer bbox but holes isolate materials) and
+                            // merging would not reduce the set — it would cause an infinite loop.
+                            if union_result.geometries.len() == 1 {
                                 merged = Some((i, j, union_result.geometries));
                                 break 'outer;
                             }
