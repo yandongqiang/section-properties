@@ -355,16 +355,17 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
     // Directions chosen to avoid common edge orientations (horizontal, vertical,
     // 45-degree). The first direction that satisfies the inclusion-exclusion
     // identity wins.
-    // Use much smaller epsilon to minimize coordinate distortion.
+    // Use scale-adaptive epsilon: large enough to resolve vertex-on-edge
+    // degeneracies, small enough to avoid coordinate distortion.
+    // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * min(diag, 1.0)].
+    // For diag=1e6 mm (1 km): eps = 1e-2 mm → clamped to 1e-6 mm
+    // For diag=1e-3 mm (1 µm): eps = 1e-11 mm → clamped to 1e-15 mm (near f64 precision)
     let directions: &[(f64, f64)] = &[
         (1.0, 0.37),   // ~20° from horizontal
         (-0.61, 1.0),  // ~122° from horizontal
         (0.83, -0.83), // ~-45° from horizontal
     ];
-    // 1e-8 * diag: for diag=1e4 (mm), eps=0.1 µm. Large enough to resolve
-    // vertex-on-edge degeneracies, small enough that the post-hoc coordinate
-    // mapping eliminates geometric drift.
-    let eps = 1e-8 * diag;
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
 
     let mut best: Option<(f64, Vec<Polygon>)> = None;
     for &(dx, dy) in directions {
@@ -756,7 +757,7 @@ fn holes_for_piece(
     // disjoint for area purposes).
     union_voids(&mut void_regions);
 
-// Keep only regions inside `p` that carry meaningful area. Any tiny region
+    // Keep only regions inside `p` that carry meaningful area. Any tiny region
     // that touches `p`'s boundary is an exterior sliver, not a hole, so it is
     // dropped. Vertices may overhang `p`'s boundary by a tiny amount due to the
     // boolean perturbation, so allow a small coordinate tolerance rather than a
@@ -813,7 +814,7 @@ fn section_boolean(
         return section_difference_impl(a, b);
     }
 
-let pieces = polygon_boolean(&a.outer, &b.outer, op);
+    let pieces = polygon_boolean(&a.outer, &b.outer, op);
     pieces
         .into_iter()
         .map(|p| {

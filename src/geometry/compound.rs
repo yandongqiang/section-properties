@@ -609,8 +609,6 @@ impl CompoundGeometry {
     /// - Difference: each region of `self` reduced by every region of
     ///   `other` in sequence.
     pub fn boolean(&self, other: &Self, op: super::boolean::BoolOp) -> Self {
-        use super::boolean::polygon_boolean;
-
         match op {
             super::boolean::BoolOp::Intersection => {
                 // Intersection: pairwise intersection of all region pairs
@@ -971,6 +969,6 @@ fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
 }
 
 /// Check if two segments have any topological interaction (crossing, touching, or collinear overlap).
-fn segments_interact(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+pub fn segments_interact(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
     !matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::Disjoint)
 }
