@@ -253,6 +253,10 @@ pub struct FemSolver {
     pub dof_map: HashMap<(usize, usize), usize>,
     /// Fixed DOFs
     pub fixed_dofs: Vec<bool>,
+    /// Original (unmodified) global stiffness matrix, before any Dirichlet
+    /// boundary conditions are applied. Used to compute reaction forces as
+    /// `K_original * u`; `k_global` is mutated in place during assembly.
+    k_original: SprsMatrix,
 }
 
 impl FemSolver {
@@ -340,6 +344,9 @@ impl FemSolver {
             }
         }
 
+        let mut k_original = k_global.clone();
+        k_original.finalize();
+
         Ok(Self {
             k_global,
             f_global,
@@ -347,6 +354,7 @@ impl FemSolver {
             n_dof,
             dof_map,
             fixed_dofs,
+            k_original,
         })
     }
 
@@ -464,14 +472,19 @@ impl FemSolver {
     }
 
     /// Compute reaction forces at fixed DOFs.
+    ///
+    /// Reactions are `K_original * u` evaluated at the fixed DOFs, using the
+    /// unmodified stiffness matrix (before Dirichlet conditions were applied)
+    /// so that the true support forces are recovered rather than the prescribed
+    /// displacement values.
     pub fn reactions(&self, model: &FemModel) -> Vec<(usize, usize, f64)> {
         let mut reactions = Vec::new();
         for (node, dof, _) in &model.dirichlet_bcs {
             if let Some(&idx) = self.dof_map.get(&(*node, *dof)) {
-                // Reaction = K_fixed * u
+                // Reaction = K_original * u
                 let mut reaction = 0.0;
                 for j in 0..self.n_dof {
-                    reaction += self.k_global.get(idx, j) * self.u_global[j];
+                    reaction += self.k_original.get(idx, j) * self.u_global[j];
                 }
                 reactions.push((*node, *dof, reaction));
             }
@@ -930,5 +943,49 @@ mod tests {
         // Tip should deflect downward
         let disp = solver.displacement(3);
         assert!(disp.y < 0.0);
+    }
+
+    #[test]
+    fn reactions_balance_applied_load() {
+        // A single downward tip load on a cantilever must be balanced by
+        // upward reactions at the fixed support. This guards against the
+        // regression where reactions were computed from the already
+        // boundary-condition-modified stiffness matrix (returning ~0).
+        let mut mesh = Mesh::new();
+        mesh.nodes = vec![
+            Point::new(0.0, 0.0), // 0 - fixed
+            Point::new(1.0, 0.0), // 1
+            Point::new(0.0, 0.1), // 2 - fixed
+            Point::new(1.0, 0.1), // 3 - tip load
+        ];
+        mesh.elements = vec![[0, 1, 2], [1, 3, 2]];
+
+        let mut model = FemModel::new(mesh);
+        let props = MaterialProps::plane_stress(&STEEL_S355);
+        model.add_material(props);
+
+        model.fix_node(0);
+        model.fix_node(2);
+        model.add_nodal_force(3, 1, -1000.0);
+
+        let mut solver = FemSolver::from_model(&model).unwrap();
+        solver.solve().unwrap();
+
+        let reactions = solver.reactions(&model);
+
+        // Sum the vertical (dof 1) reactions at the two fixed nodes.
+        let mut vertical_reaction = 0.0;
+        for (node, dof, value) in &reactions {
+            assert!(node == &0 || node == &2, "reactions only at fixed nodes");
+            if *dof == 1 {
+                vertical_reaction += value;
+            }
+        }
+
+        // The fixed support must push up to balance the -1000 downward load.
+        assert!(
+            (vertical_reaction - 1000.0).abs() < 1e-6,
+            "vertical reactions should balance the applied load, got {vertical_reaction}"
+        );
     }
 }
