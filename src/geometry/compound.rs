@@ -613,19 +613,16 @@ impl CompoundGeometry {
         match op {
             super::boolean::BoolOp::Intersection => {
                 // Intersection: pairwise intersection of all region pairs
-                // Use polygon_boolean directly on outers (like original code, which worked)
-                // Note: This ignores holes, which is fine for simple cases
+                // Use Geometry::boolean_op which properly uses section_intersection
+                // and preserves holes
                 let mut out = Vec::new();
                 for ga in &self.geometries {
                     for gb in &other.geometries {
-                        out.extend(super::boolean::polygon_boolean(&ga.outer, &gb.outer, op));
+                        let inter = ga.boolean_op(gb, op)?;
+                        out.extend(inter.geometries);
                     }
                 }
-                let geometries = out
-                    .into_iter()
-                    .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
-                    .collect();
-                Ok(Self { geometries })
+                Ok(Self { geometries: out })
             }
             super::boolean::BoolOp::Difference => {
                 // Start with all self regions
@@ -660,29 +657,26 @@ impl CompoundGeometry {
 
                 // Merge overlapping regions iteratively
                 loop {
-                    let mut merged: Option<(usize, usize, Geometry)> = None;
+                    let mut merged: Option<(usize, usize, Vec<Geometry>)> = None;
                     'outer: for i in 0..acc.len() {
                         for j in (i + 1)..acc.len() {
                             if matches!(bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
                                 continue;
                             }
-                            if let Some(union) = acc[i]
-                                .boolean_op(&acc[j], super::boolean::BoolOp::Union)?
-                                .geometries
-                                .into_iter()
-                                .next()
-                            {
-                                merged = Some((i, j, union));
+                            let union_result = acc[i]
+                                .boolean_op(&acc[j], super::boolean::BoolOp::Union)?;
+                            if !union_result.geometries.is_empty() {
+                                merged = Some((i, j, union_result.geometries));
                                 break 'outer;
                             }
                         }
                     }
                     match merged {
-                        Some((i, j, union)) => {
+                        Some((i, j, new_geometries)) => {
                             let last = acc.len() - 1;
                             acc[j] = acc[last].clone();
                             acc.swap_remove(last);
-                            acc.splice(i..i + 1, std::iter::once(union));
+                            acc.splice(i..i + 1, new_geometries);
                         }
                         None => break,
                     }
