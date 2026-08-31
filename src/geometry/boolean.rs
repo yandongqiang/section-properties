@@ -409,7 +409,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
 
     // Ultimate fallback: run unshifted and validate strictly.
     let result = polygon_boolean_impl(a, b, op);
-    if validate && !validate_boolean_result(&result, a, b, op) {
+    if validate && !validate_boolean_inclusion_exclusion(&result, a, b, op) {
         // Even unshifted failed validation; return anyway.
     }
     result
@@ -422,16 +422,15 @@ pub fn polygon_boolean(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
 fn polygon_boolean_no_validate(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     polygon_boolean_internal(a, b, op, false)
 }
-/// Validate a boolean result using the area inclusion-exclusion identity.
+/// Validate a boolean result using the inclusion-exclusion identity.
 ///
 /// For any two polygons A, B:
-/// - `|A ∩ B| + |A ∪ B| = |A| + |B|`
-/// - `|A - B| = |A| - |A ∩ B|`
+/// - Intersection: `|A ∩ B| + |A ∪ B| = |A| + |B|`
+/// - Union: `|A ∪ B| + |A ∩ B| = |A| + |B|`
+/// - Difference: `|A - B| + |A ∩ B| = |A|`
 ///
 /// Returns `true` if the result satisfies these invariants within tolerance.
-/// Validate boolean result using bounds check and inclusion-exclusion identity
-/// (when numerically stable).
-fn validate_boolean_result(result: &[Polygon], a: &Polygon, b: &Polygon, op: BoolOp) -> bool {
+fn validate_boolean_inclusion_exclusion(result: &[Polygon], a: &Polygon, b: &Polygon, op: BoolOp) -> bool {
     let area_a = a.area();
     let area_b = b.area();
     let area_result: f64 = result.iter().map(|p| p.area()).sum();
