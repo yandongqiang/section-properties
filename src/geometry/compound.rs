@@ -379,6 +379,10 @@ pub enum CompoundError {
     /// Hole `hole` of `region` is not fully inside the region's outer
     /// boundary.
     HoleNotInsideOuter { region: usize, hole: usize },
+    /// Hole `b` of `region` is nested inside hole `a` (a hole-within-a-hole).
+    /// A single region cannot represent an island of material inside a void,
+    /// so nested holes are rejected.
+    NestedHoles { region: usize, a: usize, b: usize },
 }
 
 impl std::fmt::Display for CompoundError {
@@ -389,6 +393,9 @@ impl std::fmt::Display for CompoundError {
             }
             CompoundError::HoleNotInsideOuter { region, hole } => {
                 write!(f, "hole {hole} of region {region} is not fully inside its outer boundary")
+            }
+            CompoundError::NestedHoles { region, a, b } => {
+                write!(f, "region {region} has hole {b} nested inside hole {a} (holes cannot nest)")
             }
         }
     }
@@ -536,6 +543,21 @@ impl CompoundGeometry {
                         if segments_interact(h1, h2, o1, o2) {
                             return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
                         }
+                    }
+                }
+            }
+
+            // 3. No hole may be nested inside another hole of the same region.
+            // A hole-within-a-hole is an island of material inside a void, which
+            // a single region (one outer + holes) cannot represent.
+            for a in 0..g.holes.len() {
+                for b in (a + 1)..g.holes.len() {
+                    let ha = &g.holes[a];
+                    let hb = &g.holes[b];
+                    let a_contains_b = hb.vertices.iter().all(|v| ha.contains_point(*v));
+                    let b_contains_a = ha.vertices.iter().all(|v| hb.contains_point(*v));
+                    if a_contains_b || b_contains_a {
+                        return Err(CompoundError::NestedHoles { region: ri, a, b });
                     }
                 }
             }
