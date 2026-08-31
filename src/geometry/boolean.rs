@@ -1537,7 +1537,7 @@ mod tests {
         assert!(compound_ok.validate().is_ok(), "non-nested holes must validate");
     }
 
-    #[test]
+#[test]
     fn section_difference_a_inside_b_hole_survives() {
         use crate::section::Section;
         // B = 10x10 with a 4x4 hole in the center
@@ -1556,6 +1556,19 @@ mod tests {
     }
 
     #[test]
+    fn section_difference_a_inside_b_material_removed() {
+        use crate::section::Section;
+        // B = 10x10 with a 4x4 hole in the center [3,7]^2
+        // A = 2x2 completely inside B's MATERIAL (not hole), e.g. at [1,3]^2
+        // B has material where A is, so A should be completely removed in A - B
+        let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]);
+        let a = Section::new(square(1.0, 1.0, 2.0), vec![]); // [1,3]^2, inside B's material
+
+        let result = section_difference(&a, &b);
+        assert_eq!(result.len(), 0, "A should be removed when inside B's material");
+    }
+
+#[test]
     fn section_difference_a_partial_b_hole_clipped() {
         use crate::section::Section;
         // B = 10x10 with a 4x4 hole [3,7]^2
