@@ -667,6 +667,8 @@ fn union_voids(regions: &mut Vec<Polygon>) {
 ///   every hole of either section that lies inside the piece is a void.
 /// - **Difference**: material is `material(A) \ material(B)`, so the voids are
 ///   A's holes (inside the piece) plus any of B's material inside the piece.
+///   For pieces from `A.outer ∩ B.holes` (B's hole regions), B has no material
+///   there, so voids are only A's holes clipped to the piece.
 ///
 /// Candidate voids are clipped to `p`, unioned so that overlapping holes are
 /// not double-counted, and tiny/sliver regions dropped.
@@ -675,6 +677,7 @@ fn holes_for_piece(
     a: &crate::section::Section,
     b: &crate::section::Section,
     op: BoolOp,
+    kind: PieceKind,
 ) -> Vec<Polygon> {
     let mut void_regions: Vec<Polygon> = Vec::new();
 
@@ -694,12 +697,23 @@ fn holes_for_piece(
             void_regions.extend(b.holes.iter().cloned());
         }
         BoolOp::Difference => {
-            // A's holes minus B's material that fills them, plus B's material as
-            // voids, both restricted to the piece.
-            for h in a.holes.iter() {
-                void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+            match kind {
+                PieceKind::Normal => {
+                    // Standard outer difference: A.outer \ B.outer
+                    // Voids = A's holes (minus B's material) + B's material inside piece
+                    for h in a.holes.iter() {
+                        void_regions.extend(hole_minus_material(h, &b.outer, &b.holes));
+                    }
+                    void_regions.extend(material_inside(p, b));
+                }
+                PieceKind::InHole => {
+                    // A's material inside B's hole: B has no material here
+                    // Voids = only A's holes clipped to piece (no B material subtraction)
+                    for h in a.holes.iter() {
+                        void_regions.extend(polygon_boolean(h, p, BoolOp::Intersection));
+                    }
+                }
             }
-            void_regions.extend(material_inside(p, b));
         }
     }
 
@@ -767,11 +781,62 @@ fn section_boolean(
 ) -> Vec<crate::section::Section> {
     use crate::section::Section;
 
-    let pieces = polygon_boolean(&a.outer, &b.outer, op);
+    if op == BoolOp::Difference {
+        return section_difference_impl(a, b);
+    }
+
+let pieces = polygon_boolean(&a.outer, &b.outer, op);
     pieces
         .into_iter()
         .map(|p| {
-            let holes = holes_for_piece(&p, a, b, op);
+            let holes = holes_for_piece(&p, a, b, op, PieceKind::Normal);
+            Section::new(p, holes)
+        })
+        .filter(|s| s.area() > 0.0)
+        .collect()
+}
+
+/// Difference pieces have two kinds:
+/// - `Normal`: from `A.outer \ B.outer` (standard outer difference)
+/// - `InHole`: from `A.outer ∩ B.holes[i]` (A's material inside B's holes)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PieceKind {
+    Normal,
+    InHole,
+}
+
+/// Difference of two sections with proper hole handling.
+/// 
+/// Material = material(A) \ material(B) = (A.outer \ A.holes) \ (B.outer \ B.holes)
+/// = (A.outer \ B.outer) ∪ (A.outer ∩ B.holes) minus holes appropriately.
+fn section_difference_impl(
+    a: &crate::section::Section,
+    b: &crate::section::Section,
+) -> Vec<crate::section::Section> {
+    use crate::section::Section;
+
+    // 1. Standard outer difference: A.outer \ B.outer
+    let outer_diff = polygon_boolean(&a.outer, &b.outer, BoolOp::Difference);
+
+    // 2. Parts of A that fall inside B's holes (B has no material there, so A survives)
+    let mut hole_intersections = Vec::new();
+    for bh in &b.holes {
+        hole_intersections.extend(polygon_boolean(&a.outer, bh, BoolOp::Intersection));
+    }
+
+    // Combine all pieces with their kind
+    let mut pieces = Vec::new();
+    for p in outer_diff {
+        pieces.push((p, PieceKind::Normal));
+    }
+    for p in hole_intersections {
+        pieces.push((p, PieceKind::InHole));
+    }
+
+    pieces
+        .into_iter()
+        .map(|(p, kind)| {
+            let holes = holes_for_piece(&p, a, b, BoolOp::Difference, kind);
             Section::new(p, holes)
         })
         .filter(|s| s.area() > 0.0)
@@ -1470,6 +1535,50 @@ mod tests {
         ]);
         let compound_ok = CompoundGeometry::from_sections(&[ok]);
         assert!(compound_ok.validate().is_ok(), "non-nested holes must validate");
+    }
+
+    #[test]
+    fn section_difference_a_inside_b_hole_survives() {
+        use crate::section::Section;
+        // B = 10x10 with a 4x4 hole in the center
+        // A = 2x2 completely inside B's hole
+        // B has no material where A is, so A should survive completely in A - B
+        let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]);
+        let a = Section::new(square(4.0, 4.0, 2.0), vec![]);
+
+        let result = section_difference(&a, &b);
+        assert_eq!(result.len(), 1, "A should survive completely inside B's hole");
+        let sec = &result[0];
+        // A is 2x2 = 4 area, no holes
+        assert!((sec.outer.area() - 4.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert_eq!(sec.holes.len(), 0, "A has no holes");
+        assert!((sec.area() - 4.0).abs() < 1e-6, "section area {}", sec.area());
+    }
+
+    #[test]
+    fn section_difference_a_partial_b_hole_clipped() {
+        use crate::section::Section;
+        // B = 10x10 with a 4x4 hole [3,7]^2
+        // A = 6x6 [2,8]^2 with a 2x2 hole [3,5]^2
+        // A extends beyond B's hole on the right side.
+        // The Difference piece = A \ B.outer = [2,8]x[2,8] \ [0,10]^2 = empty (since A inside B.outer)
+        // Plus A ∩ B.hole = [3,7]x[3,7] ∩ [2,8]^2 = [3,7]x[3,7] (the part of A inside B's hole)
+        // That piece has A's hole [3,5]^2 clipped to it → [3,5]^2 survives (inside B's hole, B has no material)
+        // B material = none inside B's hole.
+        let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]); // hole [3,7]^2
+        let a = Section::new(square(2.0, 2.0, 6.0), vec![square(3.0, 3.0, 2.0)]); // [2,8]^2 with hole [3,5]^2
+
+        let result = section_difference(&a, &b);
+        assert_eq!(result.len(), 1, "one piece from A ∩ B.hole");
+        let sec = &result[0];
+        // Piece = A ∩ B.hole = [3,7]x[3,7], area 16
+        assert!((sec.outer.area() - 16.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        // A's hole [3,5]^2 is inside the piece, so survives fully
+        let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
+        assert!((hole_area - 4.0).abs() < 1e-4, "clipped hole area {}", hole_area);
+        assert_holes_within_piece(&sec.outer, &sec.holes);
+        // Net material = 16 - 4 = 12
+        assert!((sec.area() - 12.0).abs() < 1e-4, "section area {}", sec.area());
     }
 }
 
