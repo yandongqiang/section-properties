@@ -339,13 +339,28 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
         };
     }
 
-    // Robustness: when a vertex of either polygon sits exactly on the other
-    // polygon's boundary (or edges are collinear-overlapping), shift `b`
-    // by a fixed deterministic offset so the generic algorithm applies.
-    // Multiple directions are tried in a fixed order.
+    // Robustness: when a vertex of either polygon sits (nearly) on the other
+    // polygon's boundary (or edges are collinear-overlapping), the generic
+    // Greiner–Hormann algorithm cannot resolve the degeneracy. `b` is shifted
+    // by a fixed deterministic offset to remove the degeneracy; the result is
+    // then mapped back onto the original coordinates.
+    //
+    // The degeneracy-detection tolerance must match the perturbation scale:
+    // detecting a vertex only works if the shift is large enough to move it off
+    // the other polygon's boundary. We therefore derive `eps` first and scale
+    // the detection window by a small multiple of it.
     let diag = bbox_diag(&a.vertices).max(bbox_diag(&b.vertices));
-    let degenerate = has_vertex_on_boundary(&a.vertices, b, 1e-7 * diag)
-        || has_vertex_on_boundary(&b.vertices, a, 1e-7 * diag);
+    // Use scale-adaptive epsilon: large enough to resolve vertex-on-edge
+    // degeneracies, small enough to avoid coordinate distortion.
+    // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * min(diag, 1.0)].
+    // For diag=1e6 mm (1 km): eps = 1e-2 mm → clamped to 1e-6 mm
+    // For diag=1e-3 mm (1 µm): eps = 1e-11 mm → clamped to 1e-15 mm (near f64 precision)
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
+    // Detection window slightly larger than the shift so that any vertex we
+    // detect as degenerate is actually moved clear of the boundary.
+    let det_tol = 8.0 * eps;
+    let degenerate = has_vertex_on_boundary(&a.vertices, b, det_tol)
+        || has_vertex_on_boundary(&b.vertices, a, det_tol);
 
     if !degenerate {
         return polygon_boolean_impl(a, b, op);
@@ -353,135 +368,107 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
 
     // Deterministic perturbation: try systematic shifts in fixed directions.
     // Directions chosen to avoid common edge orientations (horizontal, vertical,
-    // 45-degree). The first direction that satisfies the inclusion-exclusion
-    // identity wins.
-    // Use scale-adaptive epsilon: large enough to resolve vertex-on-edge
-    // degeneracies, small enough to avoid coordinate distortion.
-    // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * min(diag, 1.0)].
-    // For diag=1e6 mm (1 km): eps = 1e-2 mm → clamped to 1e-6 mm
-    // For diag=1e-3 mm (1 µm): eps = 1e-11 mm → clamped to 1e-15 mm (near f64 precision)
+    // 45-degree).
     let directions: &[(f64, f64)] = &[
         (1.0, 0.37),   // ~20° from horizontal
         (-0.61, 1.0),  // ~122° from horizontal
         (0.83, -0.83), // ~-45° from horizontal
     ];
-    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
 
+    let area_a = a.area();
+    let area_b = b.area();
+    // Normaliser for the relative inclusion-exclusion error.
+    let denom = (area_a.abs() + area_b.abs()).max(1e-12);
+
+    // The inverse of `op`: |op(a,b)| + |complement(a,b)| = |a| + |b| always.
+    let comp_op = match op {
+        BoolOp::Intersection => BoolOp::Union,
+        BoolOp::Union => BoolOp::Intersection,
+        BoolOp::Difference => BoolOp::Intersection,
+    };
+
+    // Tracks the closest (mapped) result across directions, used as a
+    // best-effort fallback when no direction satisfies the strict identity.
     let mut best: Option<(f64, Vec<Polygon>)> = None;
+
     for &(dx, dy) in directions {
         let shifted: Vec<Point> = b
             .vertices
             .iter()
             .map(|p| Point::new(p.x + eps * dx, p.y + eps * dy))
             .collect();
-
         let b_shifted = Polygon::new(shifted);
+
+        // Compute the main op and its complement **in the same shifted frame**,
+        // using the non-perturbing impl. The shift removes the original
+        // degeneracy, so `polygon_boolean_impl` (bare GH + nesting fast paths)
+        // is exact on `(a, b_shifted)` and does not recurse back into this
+        // perturbation logic.
         let result = polygon_boolean_impl(a, &b_shifted, op);
+        let result_comp = polygon_boolean_impl(a, &b_shifted, comp_op);
 
-        // For perturbed results, accept if basic bounds check passes.
-        // Strict identity check is only for the final unshifted fallback.
+        // Area is translation-invariant, so summing the shifted-frame results
+        // and comparing against the per-op inclusion-exclusion reference gives
+        // the strict identity (both |a| and |b| are translation-invariant, and
+        // |b_shifted| == |b|):
+        //   Intersection/Union: |op| + |complement| = |a| + |b|
+        //   Difference:         |A\B| + |A∩B|      = |a|
         let area_result: f64 = result.iter().map(|p| p.area()).sum();
-        let area_a = a.area();
-        let area_b = b.area();
-        let bounds_ok = match op {
-            BoolOp::Intersection => area_result <= area_a.min(area_b) + 1e-12 && area_result >= -1e-12,
-            BoolOp::Union => area_result >= area_a.max(area_b) - 1e-12,
-            BoolOp::Difference => area_result <= area_a + 1e-12 && area_result >= -1e-12,
+        let area_comp: f64 = result_comp.iter().map(|p| p.area()).sum();
+        let rhs = match op {
+            BoolOp::Difference => area_a,
+            BoolOp::Intersection | BoolOp::Union => area_a + area_b,
         };
-        if bounds_ok {
-            return result;
+        let err = (area_result + area_comp - rhs).abs() / denom;
+
+        // Map the perturbed result back onto the original coordinates so that
+        // higher-order quantities (centroid, moments, principal axes) do not
+        // inherit the artificial `eps * direction` offset.
+        let mapped: Vec<Polygon> = result
+            .into_iter()
+            .map(|mut r| {
+                for v in &mut r.vertices {
+                    v.x -= eps * dx;
+                    v.y -= eps * dy;
+                }
+                r
+            })
+            .collect();
+
+        if err < 1e-9 {
+            // Strict inclusion-exclusion satisfied: accept.
+            return mapped;
         }
 
-        // Track error for fallback selection.
-        let err = match op {
-            BoolOp::Intersection => (area_result - area_a.min(area_b)).abs() / area_a.min(area_b).max(1.0),
-            BoolOp::Union => (area_a.max(area_b) - area_result).abs() / area_a.max(area_b).max(1.0),
-            BoolOp::Difference => (area_result - area_a).abs() / area_a.max(1.0),
-        };
-        if best.as_ref().map_or(true, |(be, _)| err < *be) {
-            best = Some((err, result));
+        // Track best-effort fallback (mapped) across all directions.
+        if best
+            .as_ref()
+            .map_or(true, |(be, _)| err < *be)
+        {
+            best = Some((err, mapped));
         }
     }
 
-    if let Some((_err, result)) = best {
-        // Accept best perturbed result if any.
-        return result;
+    // No direction satisfied the strict identity.
+    if validate {
+        // Strict mode: do not silently return a result that fails the
+        // inclusion-exclusion invariant. Surface the failure (this is a
+        // geometry-kernel safety net) and return the closest mapped estimate,
+        // which Section-level validation can reject downstream if needed.
+        eprintln!(
+            "WARN: boolean {:?} failed strict inclusion-exclusion after perturbation; returning best-effort result",
+            op
+        );
     }
-
-    // Ultimate fallback: run unshifted and validate strictly.
-    let result = polygon_boolean_impl(a, b, op);
-    if validate && !validate_boolean_inclusion_exclusion(&result, a, b, op) {
-        // Even unshifted failed validation; return anyway.
-    }
-    result
+    // Both validate modes return the best-effort (mapped) result rather than
+    // silently discarding validation.
+    best.map_or_else(Vec::new, |(_, res)| res)
 }
 
 pub fn polygon_boolean(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     polygon_boolean_internal(a, b, op, true)
 }
 
-fn polygon_boolean_no_validate(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
-    polygon_boolean_internal(a, b, op, false)
-}
-/// Validate a boolean result using the inclusion-exclusion identity.
-///
-/// For any two polygons A, B:
-/// - Intersection: `|A ∩ B| + |A ∪ B| = |A| + |B|`
-/// - Union: `|A ∪ B| + |A ∩ B| = |A| + |B|`
-/// - Difference: `|A - B| + |A ∩ B| = |A|`
-///
-/// Returns `true` if the result satisfies these invariants within tolerance.
-fn validate_boolean_inclusion_exclusion(result: &[Polygon], a: &Polygon, b: &Polygon, op: BoolOp) -> bool {
-    let area_a = a.area();
-    let area_b = b.area();
-    let area_result: f64 = result.iter().map(|p| p.area()).sum();
-
-    // Fast bounds check (always valid, no recursion)
-    let bounds_ok = match op {
-        BoolOp::Intersection => area_result <= area_a.min(area_b) + 1e-12 && area_result >= -1e-12,
-        BoolOp::Union => area_result >= area_a.max(area_b) - 1e-12,
-        BoolOp::Difference => area_result <= area_a + 1e-12 && area_result >= -1e-12,
-    };
-    if !bounds_ok {
-        return false;
-    }
-
-    // Inclusion-exclusion identity check (when complementary area is significant).
-    // Use NO-VALIDATE complementary operation to avoid recursion, but skip if
-    // complementary area is near zero (numerically unstable).
-    let (err, has_complement) = match op {
-        BoolOp::Intersection => {
-            let union = polygon_boolean_no_validate(a, b, BoolOp::Union);
-            let area_union: f64 = union.iter().map(|p| p.area()).sum();
-            let sum = area_result + area_union;
-            if sum < 1e-12 { (0.0, false) } else { ((sum - a.area() - b.area()).abs() / sum, true) }
-        }
-        BoolOp::Union => {
-            let inter = polygon_boolean_no_validate(a, b, BoolOp::Intersection);
-            let area_inter: f64 = inter.iter().map(|p| p.area()).sum();
-            let sum = area_result + area_inter;
-            if sum < 1e-12 { (0.0, false) } else { ((sum - a.area() - b.area()).abs() / sum, true) }
-        }
-        BoolOp::Difference => {
-            let inter = polygon_boolean_no_validate(a, b, BoolOp::Intersection);
-            let area_inter: f64 = inter.iter().map(|p| p.area()).sum();
-            let sum = area_result + area_inter;
-            if sum < 1e-12 { (0.0, false) } else { ((sum - a.area()).abs() / a.area().max(1.0), true) }
-        }
-    };
-
-    // If complementary area is negligible, skip identity check (unstable).
-    if !has_complement {
-        return true;
-    }
-
-    // Relative tolerance: 1e-4 is generous for floating-point on engineering scale.
-    err < 1e-4
-}
-
-/// Compute the area invariant error for a boolean result using
-/// the inclusion-exclusion identity.
-///
 fn polygon_boolean_impl(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
     // Fast paths for nesting / disjoint configurations.
     let a_in_b = a.vertices.iter().all(|v| b.contains_point(*v));
@@ -1279,6 +1266,50 @@ mod tests {
         assert!((area_a - inter - diff).abs() < 1e-3, "difference identity");
         assert!(inter > 0.0 && inter < area_b.min(area_a));
     }
+
+    #[test]
+    fn perturbation_result_is_mapped_back_to_original_frame() {
+        // Regression for P0b: when the boolean engine perturbs `b` to resolve a
+        // vertex-on-boundary degeneracy, the returned geometry must be mapped
+        // back onto the *original* coordinate frame (vertices reduced by
+        // `-eps * direction`). Otherwise B-originated vertices retain the
+        // artificial `~eps` offset, which corrupts higher-order section
+        // properties (centroid, moments, principal axes).
+        //
+        // Two unit squares that share exactly one corner: A=[0,1]^2, B=[1,2]^2
+        // touch at (1,1). The corner (1,1) lies on A's boundary, so the
+        // perturbation path is taken. A and B share no edges and do not cross,
+        // so the union has NO computed crossing points — every vertex is an
+        // original polygon vertex and must be restored to its exact position.
+        let a = square(0.0, 0.0, 1.0);
+        let b = square(1.0, 1.0, 1.0);
+
+        let u = polygon_boolean(&a, &b, BoolOp::Union);
+        let total: f64 = u.iter().map(|p| p.area()).sum();
+        assert!((total - 2.0).abs() < 1e-9, "union area: {}", total);
+
+        // B's far corner (2,2) is a pure B vertex. Without map-back it would
+        // sit at (2 + eps*dx, 2 + eps*dy); with map-back it is restored to
+        // exactly (2,2) up to floating-point roundoff.
+        let found = u
+            .iter()
+            .flat_map(|p| &p.vertices)
+            .any(|v| (v.x - 2.0).abs() < 1e-12 && (v.y - 2.0).abs() < 1e-12);
+        assert!(
+            found,
+            "B-originated vertex (2,2) not at its original position after \
+             perturbation; back-mapping missing?"
+        );
+
+        // The shared-corner point must also be exactly restored (it is emitted
+        // as an A vertex and, if not merged, as a duplicate B vertex).
+        let found_corner = u
+            .iter()
+            .flat_map(|p| &p.vertices)
+            .any(|v| (v.x - 1.0).abs() < 1e-12 && (v.y - 1.0).abs() < 1e-12);
+        assert!(found_corner, "shared corner (1,1) not restored after perturbation");
+    }
+
     #[test]
     fn non_convex_l_shape_intersection() {
         let l = Polygon::new(vec![
