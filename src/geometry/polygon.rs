@@ -1,5 +1,33 @@
 use super::Point;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PolygonError {
+    /// Polygon has fewer than 3 vertices.
+    TooFewVertices,
+    /// After deduplication, fewer than 3 distinct vertices remain.
+    TooFewDistinctVertices,
+    /// A vertex has non-finite coordinates.
+    NonFiniteVertex(usize),
+    /// Polygon has zero or near-zero area.
+    ZeroArea,
+    /// Polygon has self-intersections (non-adjacent edges cross).
+    SelfIntersection,
+}
+
+impl std::fmt::Display for PolygonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolygonError::TooFewVertices => write!(f, "polygon needs at least 3 vertices"),
+            PolygonError::TooFewDistinctVertices => write!(f, "polygon needs at least 3 distinct vertices"),
+            PolygonError::NonFiniteVertex(i) => write!(f, "vertex {} has non-finite coordinates", i),
+            PolygonError::ZeroArea => write!(f, "polygon has zero or near-zero area"),
+            PolygonError::SelfIntersection => write!(f, "polygon has self-intersections"),
+        }
+    }
+}
+
+impl std::error::Error for PolygonError {}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JoinStyle {
     Miter,
@@ -497,6 +525,85 @@ impl Polygon {
             self.clip_halfspace(n_x, n_y, c, false),
         )
     }
+
+    /// Check if the polygon has self-intersections (non-adjacent edges crossing).
+    ///
+    /// Returns `true` if any two non-adjacent edges intersect in their interiors.
+    /// This does not count shared vertices (adjacent edges) as intersections.
+    pub fn has_self_intersections(&self) -> bool {
+        let n = self.vertices.len();
+        if n < 4 {
+            return false;
+        }
+
+        for i in 0..n {
+            let a1 = self.vertices[i];
+            let a2 = self.vertices[(i + 1) % n];
+            for j in (i + 2)..n {
+                // Skip adjacent edges (share a vertex) and first/last pair.
+                if i == 0 && j == n - 1 {
+                    continue;
+                }
+                let b1 = self.vertices[j];
+                let b2 = self.vertices[(j + 1) % n];
+
+                if let Some((t_a, t_b)) = segment_intersection(a1, a2, b1, b2) {
+                    // Exclude intersections at endpoints (already shared vertices).
+                    if t_a > 1e-10 && t_a < 1.0 - 1e-10 && t_b > 1e-10 && t_b < 1.0 - 1e-10 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Validating constructor: returns an error if the polygon has
+    /// self-intersections or is otherwise invalid.
+    ///
+    /// Checks:
+    /// - At least 3 distinct vertices
+    /// - All vertices are finite
+    /// - Non-zero area
+    /// - No self-intersections
+    pub fn try_new(vertices: Vec<Point>) -> Result<Self, PolygonError> {
+        if vertices.len() < 3 {
+            return Err(PolygonError::TooFewVertices);
+        }
+
+        for (i, v) in vertices.iter().enumerate() {
+            if !v.x.is_finite() || !v.y.is_finite() {
+                return Err(PolygonError::NonFiniteVertex(i));
+            }
+        }
+
+        // Remove consecutive duplicate vertices and trailing closed-ring vertex.
+        let mut dedup: Vec<Point> = Vec::with_capacity(vertices.len());
+        for v in &vertices {
+            if dedup.last().map_or(true, |p| *p != *v) {
+                dedup.push(*v);
+            }
+        }
+        if dedup.len() > 1 && dedup[0] == *dedup.last().unwrap() {
+            dedup.pop();
+        }
+
+        if dedup.len() < 3 {
+            return Err(PolygonError::TooFewDistinctVertices);
+        }
+
+        let poly = Self { vertices: dedup };
+
+        if poly.signed_area().abs() <= f64::EPSILON {
+            return Err(PolygonError::ZeroArea);
+        }
+
+        if poly.has_self_intersections() {
+            return Err(PolygonError::SelfIntersection);
+        }
+
+        Ok(poly)
+    }
 }
 
 impl super::boundary::BoundaryExtrema for Polygon {
@@ -874,5 +981,122 @@ mod tests {
         let expected = std::f64::consts::FRAC_1_SQRT_2;
         assert!((lo + expected).abs() < 1e-12);
         assert!((hi - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn has_self_intersections_simple_rect() {
+        let rect = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ]);
+        assert!(!rect.has_self_intersections());
+    }
+
+    #[test]
+    fn has_self_intersections_bowtie() {
+        // Bow-tie with non-zero area: (0,0)-(10,0)-(0,10)-(8,8)
+        // Edge 1 (10,0)-(0,10) crosses Edge 3 (8,8)-(0,0)
+        let bowtie = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(8.0, 8.0),
+        ]);
+        assert!(bowtie.has_self_intersections());
+    }
+
+    #[test]
+    fn has_self_intersections_hourglass() {
+        // Hourglass: (0,0)-(10,0)-(5,5)-(10,10)-(0,10)
+        // Edge 1 (10,0)-(5,5) crosses Edge 4 (0,10)-(0,0) ? No
+        // Actually: Edge 0 (0,0)-(10,0) and Edge 2 (5,5)-(10,10) are parallel
+        // Edge 1 (10,0)-(5,5) and Edge 3 (10,10)-(0,10) don't cross in interiors
+        // This hourglass doesn't self-intersect in interior.
+        // Use a proper crossing: (0,0)-(10,0)-(5,5)-(10,10)-(0,10)
+        // Wait, this doesn't cross. Let me use a proper self-intersecting pentagon.
+        // (0,0) -> (10,0) -> (5,10) -> (10,10) -> (0,10)
+        // Edges: 0:(0,0)-(10,0), 1:(10,0)-(5,10), 2:(5,10)-(10,10), 3:(10,10)-(0,10), 4:(0,10)-(0,0)
+        // Check 0 vs 2: (0,0)-(10,0) and (5,10)-(10,10) - parallel
+        // Check 1 vs 3: (10,0)-(5,10) and (10,10)-(0,10) - cross?
+        // dx1=-5, dy1=10; dx2=-10, dy2=0
+        // denom = 50; t_a=2 (outside)
+        // Hmm, let's use a simpler self-intersecting shape.
+        // Triangle with a "spike" that crosses: (0,0)-(10,0)-(0,10)-(5,5)
+        // Wait that's 4 vertices. Let's use: (0,0)-(10,0)-(0,10)-(8,8) which we know works.
+        let hourglass = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(8.0, 8.0),
+        ]);
+        assert!(hourglass.has_self_intersections());
+    }
+
+    #[test]
+    fn try_new_valid_polygon() {
+        let verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ];
+        let poly = Polygon::try_new(verts).unwrap();
+        assert_eq!(poly.area(), 50.0);
+        assert!(!poly.has_self_intersections());
+    }
+
+#[test]
+    fn try_new_rejects_bowtie() {
+        // Same bow-tie as above: (0,0)-(10,0)-(0,10)-(8,8)
+        let verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(8.0, 8.0),
+        ];
+        let err = Polygon::try_new(verts).unwrap_err();
+        assert!(matches!(err, PolygonError::SelfIntersection));
+    }
+
+    #[test]
+    fn try_new_rejects_too_few_vertices() {
+        let err = Polygon::try_new(vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)]).unwrap_err();
+        assert!(matches!(err, PolygonError::TooFewVertices));
+    }
+
+    #[test]
+    fn try_new_rejects_zero_area() {
+        let verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0), // Collinear = zero area
+        ];
+        let err = Polygon::try_new(verts).unwrap_err();
+        assert!(matches!(err, PolygonError::ZeroArea));
+    }
+
+    #[test]
+    fn try_new_rejects_non_finite() {
+        let verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(f64::NAN, 1.0),
+        ];
+        let err = Polygon::try_new(verts).unwrap_err();
+        assert!(matches!(err, PolygonError::NonFiniteVertex(2)));
+    }
+
+    #[test]
+    fn try_new_rejects_duplicate_vertices() {
+        let verts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 0.0), // Duplicate
+            Point::new(0.0, 0.0), // Another duplicate
+            Point::new(0.0, 0.0), // Another duplicate
+        ];
+        let err = Polygon::try_new(verts).unwrap_err();
+        assert!(matches!(err, PolygonError::TooFewDistinctVertices));
     }
 }
