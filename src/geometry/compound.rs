@@ -797,8 +797,29 @@ fn intersection_point(a1: Point, a2: Point, b1: Point, b2: Point) -> Point {
 
     let det = dx1 * dy2 - dy1 * dx2;
     if det.abs() < 1e-12 {
-        // Parallel or collinear - return midpoint of overlapping range
-        // Simplified: return midpoint of a1-a2
+        // Parallel or collinear - compute midpoint of overlapping interval.
+        // Project all endpoints onto the line (a1->a2) and find overlap.
+        // Use parameter t along segment a1-a2.
+        let len2 = dx1 * dx1 + dy1 * dy1;
+        if len2 < 1e-24 {
+            // Degenerate segment - return a1
+            return a1;
+        }
+        // Project b1 and b2 onto a1-a2 line
+        let t_b1 = ((b1.x - a1.x) * dx1 + (b1.y - a1.y) * dy1) / len2;
+        let t_b2 = ((b2.x - a1.x) * dx1 + (b2.y - a1.y) * dy1) / len2;
+        // Segment a is [0, 1], segment b is [t_b1, t_b2] (may be reversed)
+        let b_lo = t_b1.min(t_b2);
+        let b_hi = t_b1.max(t_b2);
+        // Overlap interval
+        let lo = 0.0f64.max(b_lo);
+        let hi = 1.0f64.min(b_hi);
+        if lo <= hi {
+            // Overlap exists - return midpoint of overlap
+            let t_mid = (lo + hi) * 0.5;
+            return Point::new(a1.x + t_mid * dx1, a1.y + t_mid * dy1);
+        }
+        // No overlap - return midpoint of a (shouldn't happen if segments_interact returned true)
         return Point::new((a1.x + a2.x) * 0.5, (a1.y + a2.y) * 0.5);
     }
 

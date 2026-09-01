@@ -327,8 +327,8 @@ fn has_vertex_on_boundary(a: &[Point], b: &Polygon, tol: f64) -> bool {
 ///
 /// The result is validated against the area inclusion-exclusion identity:
 /// `|A| + |B| = |A∩B| + |A∪B|`, which is a strict mathematical invariant.
-/// Compute boolean operation on two polygons with optional validation.
-fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, _validate: bool) -> Result<Vec<Polygon>, BooleanError> {
+/// Compute boolean operation on two polygons.
+fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp) -> Result<Vec<Polygon>, BooleanError> {
     // Identical boundaries: exact fast path.
     if a.vertices.len() == b.vertices.len()
         && a.vertices.iter().zip(&b.vertices).all(|(p, q)| p == q)
@@ -387,10 +387,6 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, _validate: boo
         BoolOp::Difference => BoolOp::Intersection,
     };
 
-    // Tracks the closest (mapped) result across directions, used as a
-    // best-effort fallback when no direction satisfies the strict identity.
-    let mut best: Option<(f64, Vec<Polygon>)> = None;
-
     for &(dx, dy) in directions {
         let shifted: Vec<Point> = b
             .vertices
@@ -438,14 +434,6 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, _validate: boo
         if err < 1e-9 {
             // Strict inclusion-exclusion satisfied: accept.
             return Ok(mapped);
-        }
-
-        // Track best-effort fallback (mapped) across all directions.
-        if best
-            .as_ref()
-            .map_or(true, |(be, _)| err < *be)
-        {
-            best = Some((err, mapped));
         }
     }
 
@@ -686,7 +674,7 @@ pub fn polygon_boolean_checked(
     b: &Polygon,
     op: BoolOp,
 ) -> Result<Vec<Polygon>, BooleanError> {
-    let result = polygon_boolean_internal(a, b, op, true)?;
+    let result = polygon_boolean_internal(a, b, op)?;
     check_boolean_bounds(&result, a, b, op)?;
     Ok(result)
 }
