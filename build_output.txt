@@ -1,0 +1,123 @@
+   Compiling section-properties v0.1.0 (D:\code\section-properties)
+error[E0277]: the `?` operator can only be used on `Result`s, not `Option`s, in a function that returns `Result`
+  --> src\plastic\warping_fem.rs:64:71
+   |
+28 | pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Result<FemSolution, crate::mesh::fem::FemError> {
+   | ---------------------------------------------------------------------------------------------------------------------------- this function returns a `Result`
+...
+64 |     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0).ok()?;
+   |                                                                       ^ use `.ok_or(...)?` to provide an error compatible with `Result<FemSolution, fem::FemError>`
+
+error[E0277]: the `?` operator can only be used on `Option`s, not `Result`s, in a function that returns `Option`
+   --> src\plastic\warping_fem.rs:619:51
+    |
+612 | / pub fn warping_svg(
+613 | |     section: &Section,
+614 | |     props: &SectionProperties,
+615 | |     width: u32,
+616 | |     height: u32,
+617 | | ) -> Option<String> {
+    | |___________________- this function returns an `Option`
+618 |       use crate::io::{SvgExportOptions, plot_warping_svg};
+619 |       let fem = compute_fem_solution(section, props)?;
+    |                                                     ^ use `.ok()?` if you want to discard the `Result<Infallible, fem::FemError>` error information
+
+error[E0308]: mismatched types
+   --> src\stress.rs:200:16
+    |
+200 |         if let Some(fem_points) =
+    |                ^^^^^^^^^^^^^^^^ expected `Result<Vec<StressAtPoint>, FemError>`, found `Option<_>`
+201 |             crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads)
+    |             -------------------------------------------------------------------------- this expression has type `Result<Vec<StressAtPoint>, fem::FemError>`
+    |
+    = note: expected enum `Result<Vec<StressAtPoint>, fem::FemError>`
+               found enum `std::option::Option<_>`
+
+warning: variable does not need to be mutable
+  --> src\fea\solvers.rs:82:13
+   |
+82 |         let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+   |             ----^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\fea\solvers.rs:248:13
+    |
+248 |         let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\fea\solvers.rs:360:9
+    |
+360 |     let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `len_b2`
+   --> src\geometry\compound.rs:981:17
+    |
+981 |             let len_b2 = (b2.x - b1.x).powi(2) + (b2.y - b1.y).powi(2);
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_len_b2`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `inter`
+   --> src\geometry\polygon.rs:835:15
+    |
+835 |     for (idx, inter) in intersections.iter().enumerate() {
+    |               ^^^^^ help: if this is intentional, prefix it with an underscore: `_inter`
+
+warning: unused variable: `t`
+   --> src\geometry\polygon.rs:850:15
+    |
+850 |         for &(t, inter_idx) in &edge_intersections[edge_idx] {
+    |               ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `cx`
+   --> src\plastic\warping_fem.rs:229:9
+    |
+229 |     let cx = props.centroid.x;
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_cx`
+
+warning: unused variable: `cy`
+   --> src\plastic\warping_fem.rs:230:9
+    |
+230 |     let cy = props.centroid.y;
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_cy`
+
+warning: unused variable: `cx`
+   --> src\plastic\warping_fem.rs:676:9
+    |
+676 |     let cx = props.centroid.x;
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_cx`
+
+warning: unused variable: `cy`
+   --> src\plastic\warping_fem.rs:677:9
+    |
+677 |     let cy = props.centroid.y;
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_cy`
+
+warning: variable does not need to be mutable
+   --> src\section.rs:405:13
+    |
+405 |         let mut section = Self::new(outer, holes);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `t`
+   --> src\section_library\cold_formed.rs:591:13
+    |
+591 |         let t = self.thickness;
+    |             ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+warning: `section-properties` (lib) generated 12 warnings
+error: could not compile `section-properties` (lib) due to 3 previous errors; 12 warnings emitted

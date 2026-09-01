@@ -296,7 +296,7 @@ let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
 
     let mut k2 = k.clone();
     k2.compress();
-    let reference = SkylineLdlt::factor(&k2).unwrap().solve(&f);
+    let reference = SkylineLdlt::factor(&k2).unwrap().solve(&f).unwrap();
 
     // LU direct
     let lu = solvers::SparseLu::factor(&k).unwrap();

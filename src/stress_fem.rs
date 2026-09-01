@@ -11,12 +11,12 @@ use crate::stress::{SectionLoads, StressAtPoint};
 
 /// Compute FEM stresses at all mesh nodes.
 ///
-/// Returns `None` if FEM mesh generation or solving fails.
+/// Returns `Err` if FEM mesh generation or solving fails.
 pub fn calculate_stress_fem(
     section: &Section,
     props: &SectionProperties,
     loads: SectionLoads,
-) -> Option<Vec<StressAtPoint>> {
+) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
     let fem = compute_fem_solution(section, props)?;
     compute_stress_from_fem(&fem, props, loads)
 }
@@ -26,7 +26,7 @@ fn compute_stress_from_fem(
     fem: &FemSolution,
     props: &SectionProperties,
     loads: SectionLoads,
-) -> Option<Vec<StressAtPoint>> {
+) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
     let _cx = props.centroid.x;
     let _cy = props.centroid.y;
     let ea = props.area;
@@ -96,9 +96,9 @@ fn compute_stress_from_fem(
     }
 
     if result.is_empty() {
-        None
+        Err(crate::mesh::fem::FemError::ConvergenceFailed)
     } else {
-        Some(result)
+        Ok(result)
     }
 }
 

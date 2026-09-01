@@ -194,12 +194,15 @@ impl StressAnalysis {
     /// Uses FEM Tri6 element stress analysis (mirroring Python `stress_post.py`).
     /// Falls back to analytical formulas if FEM mesh generation fails.
     pub fn calculate_stress(&self, loads: SectionLoads) -> StressAnalysisResult {
-        let area = self.props.area;
+let area = self.props.area;
 
         // Try FEM Tri6 stress analysis first
-        if let Some(fem_points) =
-            crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads)
-        {
+        let fem_points = match crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads) {
+            Ok(points) => Some(points),
+            Err(_) => None,
+        };
+
+        if let Some(fem_points) = fem_points {
             let mut max_sigma_z = f64::NEG_INFINITY;
             let mut min_sigma_z = f64::INFINITY;
             let mut max_von_mises = 0.0;

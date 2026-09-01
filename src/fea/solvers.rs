@@ -36,11 +36,11 @@ impl SparseSolver {
     }
 
     /// Direct solve (LU / LDLT / PARDISO). Returns `None` for iterative
-    /// backends.
+    /// backends or if the solver fails.
     pub fn solve(&self, b: &[f64]) -> Option<Vec<f64>> {
         match self {
             SparseSolver::Lu(lu) => Some(lu.solve(b)),
-            SparseSolver::Ldlt(l) => Some(l.solve(b)),
+            SparseSolver::Ldlt(l) => l.solve(b).ok(),
         }
     }
 

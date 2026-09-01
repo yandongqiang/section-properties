@@ -24,8 +24,8 @@ pub struct FemSolution {
 }
 
 /// Compute full FEM solution: mesh + warping function ω + shear functions ψ, φ.
-/// Returns None if mesh generation or solving fails.
-pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Option<FemSolution> {
+/// Returns Err if mesh generation or solving fails.
+pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Result<FemSolution, crate::mesh::fem::FemError> {
     let cx = props.centroid.x;
     let cy = props.centroid.y;
     let ixx = props.ix;
@@ -53,7 +53,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         },
     );
     if base_mesh.elements.is_empty() {
-        return None;
+        return Err(crate::mesh::fem::FemError::ConvergenceFailed);
     }
 
     // mesh_section already refines uniformly to target_size.
@@ -61,7 +61,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
     let n = tri6_mesh.nodes.len();
 
     // Build elements with proper orientation
-    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0).ok()?;
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
 
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
@@ -101,7 +101,7 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         Err(_) => None,
     };
 
-    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion);
+    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -122,12 +122,12 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Opt
         }
     }
 
-    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi);
-    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi);
+    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi)?;
+    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi)?;
 
     let delta_s = 2.0 * (1.0 + nu) * (ixx * iyy - ixy * ixy);
 
-    Some(FemSolution {
+    Ok(FemSolution {
         tri6_mesh,
         elements,
         omega,
@@ -315,7 +315,7 @@ pub fn compute_fem_warping_properties(
         Err(_) => None,
     };
 
-    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion);
+    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
 
     let omega_dot_f: f64 = omega
         .iter()
@@ -336,8 +336,8 @@ let mut f_psi = vec![0.0; n];
         }
     }
 
-    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi);
-    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi);
+    let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi)?;
+    let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi)?;
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
@@ -505,7 +505,7 @@ fn solve_with_fallback(
     k_reg: &SparseMatrix,
     c: &[f64],
     f: &[f64],
-) -> Vec<f64> {
+) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     if let Some(s) = solver {
         if let Ok(w1) = s.solve(f) {
             if let Ok(w2) = s.solve(c) {
@@ -524,7 +524,7 @@ fn solve_with_fallback(
                         f_norm = f_norm.max(f[i].abs());
                     }
                     if worst <= 1e-6 * f_norm.max(1e-300) {
-                        return u;
+                        return Ok(u);
                     }
                 }
             }
@@ -614,7 +614,7 @@ pub fn warping_svg(
     props: &SectionProperties,
     width: u32,
     height: u32,
-) -> Option<String> {
+) -> Result<String, crate::mesh::fem::FemError> {
     use crate::io::{SvgExportOptions, plot_warping_svg};
     let fem = compute_fem_solution(section, props)?;
     let opts = SvgExportOptions {
@@ -623,7 +623,7 @@ pub fn warping_svg(
         title: Some("Warping function omega".to_string()),
         ..Default::default()
     };
-    Some(plot_warping_svg(&fem.tri6_mesh, &fem.omega, opts))
+    Ok(plot_warping_svg(&fem.tri6_mesh, &fem.omega, opts))
 }
 
 /// Compute analytical St. Venant torsion constant J for a section.

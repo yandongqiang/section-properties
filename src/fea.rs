@@ -1152,12 +1152,12 @@ impl CgResult {
 /// [c^T 0] [λ] = [0]
 ///
 /// u = K^{-1}*(f - c*λ),  λ = (c^T*K^{-1}*c)^{-1} * c^T*K^{-1}*f
-pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Vec<f64> {
+pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     solve_lagrange_sparse_tol(k, c, f, 1e-6)
 }
 
 /// Like [`solve_lagrange_sparse`] with an explicit relative CG tolerance.
-pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f64) -> Vec<f64> {
+pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f64) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     // Tight tolerances (needed for shear-centre difference quantities)
     // require a proportionally larger iteration budget.
     let n = k.n;
@@ -1204,7 +1204,7 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
 
     if ct_w2.abs() < NEAR_ZERO_TOL {
-        return w1;
+        return Ok(w1);
     }
     let lambda = ct_w1 / ct_w2;
 
@@ -1212,7 +1212,7 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
     for i in 0..n {
         u[i] = w1[i] - lambda * w2[i];
     }
-    u
+    Ok(u)
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,8 +1551,8 @@ impl DirectLagrangeSolver {
     pub fn solve_full(&self, f: &[f64]) -> Result<(Vec<f64>, f64), crate::mesh::fem::FemError> {
         match &self.kernel {
             LagrangeKernelInstance::Skyline(ldlt) => {
-                let w1 = ldlt.solve(f);
-                let w2 = ldlt.solve(&self.c);
+                let w1 = ldlt.solve(f)?;
+                let w2 = ldlt.solve(&self.c)?;
                 let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
                 let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
                 let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
@@ -1787,9 +1787,11 @@ impl SkylineLdlt {
     }
 
     /// Solve A x = b.
-    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
         let n = self.n;
-        debug_assert_eq!(b.len(), n);
+        if b.len() != n {
+            return Err(crate::mesh::fem::FemError::InvalidMesh);
+        }
 
         // Permute the right-hand side into the RCM ordering.
         let mut x: Vec<f64> = self.perm.iter().map(|&old| b[old]).collect();
@@ -1803,6 +1805,9 @@ impl SkylineLdlt {
         }
         // Diagonal scaling.
         for i in 0..n {
+            if self.diag[i].abs() < PIVOT_TOL {
+                return Err(crate::mesh::fem::FemError::SingularMatrix);
+            }
             x[i] /= self.diag[i];
         }
         // Backward substitution: L^T x = y via scattered updates.
@@ -1820,19 +1825,24 @@ impl SkylineLdlt {
         for (new_idx, &old_idx) in self.perm.iter().enumerate() {
             out[old_idx] = x[new_idx];
         }
-        out
+        Ok(out)
     }
 
     /// Solve with a Lagrange multiplier constraint vector, mirroring
     /// [`solve_lagrange_sparse`]: u = w1 - lambda * w2 with
     /// lambda = (c.w1)/(c.w2).
-    pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Vec<f64> {
-        let w1 = self.solve(f);
-        let w2 = self.solve(c);
+    pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+        let w1 = self.solve(f)?;
+        let w2 = self.solve(c)?;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
         let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
-        w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect()
+
+        let mut u = vec![0.0; self.n];
+        for i in 0..self.n {
+            u[i] = w1[i] - lambda * w2[i];
+        }
+        Ok(u)
     }
 }
 pub mod solvers;
@@ -1873,7 +1883,7 @@ mod direct_lagrange_tests {
         let u_ref = {
             let mut k2 = k.clone();
             k2.compress();
-            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f)
+            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f).unwrap()
         };
 
         // Python-style: assemble augmented CSC, factor leading block.
@@ -1935,7 +1945,7 @@ mod skyline_tests {
 
         // Solve two right-hand sides and verify A x = b.
         for b in [vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]] {
-            let x = solver.solve(&b);
+            let x = solver.solve(&b).unwrap();
             // residual check
             for row in 0..4 {
                 let mut sum = 0.0;
@@ -1953,7 +1963,7 @@ mod skyline_tests {
         a2.compress();
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let x_cg = cg_solve(&a2, &b, 2000, SOLVER_TOL).x;
-        let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b);
+        let x_dir = SkylineLdlt::factor(&a).unwrap().solve(&b).unwrap();
         for i in 0..4 {
             assert!((x_cg[i] - x_dir[i]).abs() < 1e-8);
         }
@@ -1992,7 +2002,7 @@ mod skyline_tests {
         let u_ref: Vec<f64> =
             w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
 
-        let u_dir = SkylineLdlt::factor(&k).unwrap().solve_lagrange(&c, &f);
+        let u_dir = SkylineLdlt::factor(&k).unwrap().solve_lagrange(&c, &f).unwrap();
         for i in 0..n {
             assert!(
                 (u_ref[i] - u_dir[i]).abs() < 5e-6,
@@ -2151,7 +2161,7 @@ mod tests {
         let u = {
             let mut k2 = k.clone();
             k2.compress();
-            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f)
+            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f).unwrap()
         };
         let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
         assert!(ct_u.abs() < 1e-10, "SkylineLdlt constraint residual c^T u = {}", ct_u);
