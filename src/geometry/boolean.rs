@@ -355,7 +355,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp) -> Result<Vec<
     // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * min(diag, 1.0)].
     // For diag=1e6 mm (1 km): eps = 1e-2 mm → clamped to 1e-6 mm
     // For diag=1e-3 mm (1 µm): eps = 1e-11 mm → clamped to 1e-15 mm (near f64 precision)
-    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.max(1.0));
     // Detection window slightly larger than the shift so that any vertex we
     // detect as degenerate is actually moved clear of the boundary.
     let det_tol = 8.0 * eps;
@@ -472,7 +472,7 @@ impl std::error::Error for BooleanError {}
 /// alone cannot. Example: a blundering algorithm may return `|A∩B|=30` and
 /// `|A∪B|=170` for two area-100 polygons. The identity `30+170=100+100` holds,
 /// yet the union clearly violates `|A∪B| >= max(|A|,|B|) = 100`.
-fn check_boolean_bounds(
+pub fn check_boolean_bounds(
     result: &[Polygon],
     a: &Polygon,
     b: &Polygon,
@@ -577,7 +577,7 @@ fn validate_boolean_sampling(
     if diag <= 0.0 {
         return Ok(());
     }
-    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.max(1.0));
     let bnd_tol = 16.0 * eps;
 
     // Combined bounding box of a, b and the result so the grid covers everything.
@@ -894,7 +894,7 @@ fn hole_minus_material(
 /// overlapping members folds them into one polygon so every region is counted
 /// exactly once. Members that merely touch (share an edge) are already
 /// disjoint for area purposes and are left separate.
-fn union_voids(regions: &mut Vec<Polygon>) -> Result<(), BooleanError> {
+pub fn union_voids(regions: &mut Vec<Polygon>) -> Result<(), BooleanError> {
     let mut i = 0;
     while i < regions.len() {
         let mut j = i + 1;
