@@ -792,17 +792,224 @@ fn segment_intersection(a1: Point, a2: Point, b1: Point, b2: Point) -> Option<(f
     }
 }
 
-/// Split polygon into simple loops at intersections.
-/// TODO: Currently a stub - does not actually split at intersections.
-/// Proper implementation needs to:
+/// Split a self-intersecting polygon into simple loops at intersection points.
+/// 
+/// This implements a practical version of the Vatti/Greiner-Hormann algorithm:
 /// 1. Insert intersection vertices into edge sequences
-/// 2. Build graph of edge segments between intersections
-/// 3. Extract all simple cycles (loops) via graph traversal
-/// 4. Filter by winding number / orientation for true offset semantics
-/// This is equivalent to polygon clipping (Vatti algorithm) or
-/// using a robust library (Clipper2, GEOS).
-fn split_into_loops(verts: &[Point], _intersections: &[Intersection]) -> Vec<Vec<Point>> {
-    vec![verts.to_vec()]
+/// 2. Build a directed graph of edge segments between vertices
+/// 3. At intersections, follow the "left-hand rule" to trace outer boundaries
+/// 4. Extract all simple cycles via graph traversal
+fn split_into_loops(verts: &[Point], intersections: &[Intersection]) -> Vec<Vec<Point>> {
+    if intersections.is_empty() {
+        return vec![verts.to_vec()];
+    }
+
+    let n = verts.len();
+    let num_intersections = intersections.len();
+    
+    // Build edge_intersections: for each edge, list of (t, intersection_idx)
+    let mut edge_intersections: Vec<Vec<(f64, usize)>> = vec![Vec::new(); n];
+    for (idx, inter) in intersections.iter().enumerate() {
+        edge_intersections[inter.edge_a].push((inter.t_a, idx));
+    }
+    
+    // Sort intersections on each edge by parameter t
+    for edge_list in &mut edge_intersections {
+        edge_list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    }
+    
+    // Total vertices = n original + num_intersections
+    let total_verts = n + num_intersections;
+    
+    // Build vertex array: first n are original, then intersection points
+    let mut vertex_point = Vec::with_capacity(total_verts);
+    for &p in verts {
+        vertex_point.push(p);
+    }
+    for inter in intersections {
+        vertex_point.push(inter.point);
+    }
+    
+    // Map from (edge_idx, intersection_idx) -> vertex index
+    let mut inter_vertex_idx = vec![None; num_intersections];
+    for (idx, inter) in intersections.iter().enumerate() {
+        inter_vertex_idx[idx] = Some(n + idx);
+    }
+    
+    // Build adjacency list
+    let mut adj = vec![Vec::new(); total_verts];
+    
+    // Connect consecutive vertices along each original edge
+    for edge_idx in 0..n {
+        let a_orig_idx = edge_idx;
+        let b_orig_idx = (edge_idx + 1) % n;
+        
+        // Collect all vertices on this edge: start, intersections..., end
+        let mut edge_verts = vec![a_orig_idx];
+        
+        for &(t, inter_idx) in &edge_intersections[edge_idx] {
+            if let Some(v_idx) = inter_vertex_idx[inter_idx] {
+                edge_verts.push(v_idx);
+            }
+        }
+        edge_verts.push(b_orig_idx);
+        
+        // Connect consecutive vertices
+        for i in 0..edge_verts.len() - 1 {
+            let v1 = edge_verts[i];
+            let v2 = edge_verts[i + 1];
+            adj[v1].push(v2);
+            adj[v2].push(v1);
+        }
+    }
+    
+    // Add cross-connections at intersections
+    for (idx, inter) in intersections.iter().enumerate() {
+        if let Some(v_a) = inter_vertex_idx[idx] {
+            // Find the corresponding vertex on the other edge
+            // The intersection appears on both edges with possibly different t
+            // Find the other edge's intersection with the same point
+            for (other_idx, other_inter) in intersections.iter().enumerate() {
+                if other_idx != idx && 
+                   (other_inter.point.x - inter.point.x).abs() < 1e-10 &&
+                   (other_inter.point.y - inter.point.y).abs() < 1e-10 {
+                    if let Some(v_b) = inter_vertex_idx[other_idx] {
+                        adj[v_a].push(v_b);
+                        adj[v_b].push(v_a);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Remove duplicates and self-loops
+    for i in 0..total_verts {
+        adj[i].sort();
+        adj[i].dedup();
+        adj[i].retain(|&x| x != i);
+    }
+    
+    // Extract simple cycles using edge-based traversal
+    let mut visited_edges = std::collections::HashSet::new();
+    let mut cycles = Vec::new();
+    
+    // Helper to get edge key
+    let edge_key = |a: usize, b: usize| (a.min(b), a.max(b));
+    
+    for start in 0..total_verts {
+        for &next in &adj[start] {
+            let ekey = edge_key(start, next);
+            if visited_edges.contains(&ekey) {
+                continue;
+            }
+            
+            let mut cycle = Vec::new();
+            let mut curr = start;
+            let mut prev = next;
+            
+            loop {
+                cycle.push(vertex_point[curr]);
+                visited_edges.insert(edge_key(curr, prev));
+                
+                // Find next vertex
+                let neighbors = &adj[prev];
+                if neighbors.len() == 2 {
+                    let next_v = if neighbors[0] == curr { neighbors[1] } else { neighbors[0] };
+                    curr = prev;
+                    prev = next_v;
+                } else if neighbors.len() > 2 {
+                    // At intersection - apply left-hand rule for CCW outer boundary
+                    let a = vertex_point[curr];
+                    let b = vertex_point[prev];
+                    let dir = Point::new(b.x - a.x, b.y - a.y);
+                    
+                    let mut best_next = neighbors[0];
+                    let mut best_cross = f64::NEG_INFINITY;
+                    
+                    for &cand in neighbors {
+                        if cand == curr { continue; }
+                        let c = vertex_point[cand];
+                        let next_dir = Point::new(c.x - b.x, c.y - b.y);
+                        let cross = dir.x * next_dir.y - dir.y * next_dir.x;
+                        if cross > best_cross {
+                            best_cross = cross;
+                            best_next = cand;
+                        }
+                    }
+                    curr = prev;
+                    prev = best_next;
+                } else {
+                    break;
+                }
+                
+                // Check if we've returned to start
+                if prev == start && curr == next {
+                    break;
+                }
+                
+                // Prevent infinite loops
+                if cycle.len() > total_verts * 2 {
+                    break;
+                }
+            }
+            
+            if cycle.len() >= 3 {
+                // Check if closed
+                let first = cycle[0];
+                let last = cycle[cycle.len() - 1];
+                if (first.x - last.x).abs() < 1e-10 && (first.y - last.y).abs() < 1e-10 {
+                    // Remove duplicate last point
+                    cycle.pop();
+                    cycles.push(cycle);
+                }
+            }
+        }
+    }
+    
+    // Filter cycles: remove duplicates
+    let mut unique_cycles: Vec<Vec<Point>> = Vec::new();
+    for cycle in cycles {
+        if cycle.len() < 3 { continue; }
+        
+        // Normalize cycle: start from leftmost-bottommost vertex
+        let mut min_idx = 0;
+        for i in 1..cycle.len() {
+            if cycle[i].x < cycle[min_idx].x || 
+               (cycle[i].x == cycle[min_idx].x && cycle[i].y < cycle[min_idx].y) {
+                min_idx = i;
+            }
+        }
+        
+        // Rotate to canonical form
+        let mut canonical = Vec::with_capacity(cycle.len());
+        for i in 0..cycle.len() {
+            canonical.push(cycle[(min_idx + i) % cycle.len()]);
+        }
+        
+        // Check if already have this cycle
+        let mut is_dup = false;
+        for existing in &unique_cycles {
+            if existing.len() == canonical.len() {
+                let mut match_ = true;
+                for i in 0..canonical.len() {
+                    if (existing[i].x - canonical[i].x).abs() > 1e-10 ||
+                       (existing[i].y - canonical[i].y).abs() > 1e-10 {
+                        match_ = false;
+                        break;
+                    }
+                }
+                if match_ {
+                    is_dup = true;
+                    break;
+                }
+            }
+        }
+        if !is_dup {
+            unique_cycles.push(canonical);
+        }
+    }
+    
+    unique_cycles
 }
 
 /// Helper function to check if a point is on a line segment.
