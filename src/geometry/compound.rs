@@ -836,26 +836,26 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
     // 1. Edge–edge intersection between the two outer boundaries.
     //    Only counts if the intersection point is in the MATERIAL
     //    of both regions (not inside any hole).
-    for i in 0..a_outer.vertices.len() {
-        let a1 = a_outer.vertices[i];
-        let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
-        for j in 0..b_outer.vertices.len() {
-            let b1 = b_outer.vertices[j];
-            let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
-            if segments_interact(a1, a2, b1, b2) {
-                // Compute a representative point on the intersection.
-                // Use the midpoint of the overlapping segment or the
-                // intersection point itself.
-                let pt = intersection_point(a1, a2, b1, b2);
-                // Check if this point is in material of BOTH regions
-                let in_a_material = a_outer.contains_point(pt) && !a.holes.iter().any(|h| h.contains_point(pt));
-                let in_b_material = b_outer.contains_point(pt) && !b.holes.iter().any(|h| h.contains_point(pt));
-                if in_a_material && in_b_material {
-                    return true;
+for i in 0..a_outer.vertices.len() {
+            let a1 = a_outer.vertices[i];
+            let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
+            for j in 0..b_outer.vertices.len() {
+                let b1 = b_outer.vertices[j];
+                let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
+                if segments_overlap(a1, a2, b1, b2) {
+                    // Compute a representative point on the overlap.
+                    // Use the midpoint of the overlapping segment or the
+                    // intersection point itself.
+                    let pt = intersection_point(a1, a2, b1, b2);
+                    // Check if this point is in material of BOTH regions
+                    let in_a_material = a_outer.contains_point(pt) && !a.holes.iter().any(|h| h.contains_point(pt));
+                    let in_b_material = b_outer.contains_point(pt) && !b.holes.iter().any(|h| h.contains_point(pt));
+                    if in_a_material && in_b_material {
+                        return true;
+                    }
                 }
             }
         }
-    }
 
     // 2. Vertex containment: any vertex of `a` inside `b`'s material?
     for v in &a_outer.vertices {
@@ -972,7 +972,38 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
         let overlap_y = a_max_y >= b_min_y - EPS && b_max_y >= a_min_y - EPS;
 
         if overlap_x && overlap_y {
-            return SegmentRelation::CollinearOverlap;
+            // They overlap - now distinguish between Touch (point contact)
+            // and CollinearOverlap (positive-length overlap)
+            // For collinear segments, overlap length is the intersection of intervals
+            // on the line. We can compute the overlap length parameter.
+            // If the overlap is just a single point, it's Touch.
+            let len_a2 = (a2.x - a1.x).powi(2) + (a2.y - a1.y).powi(2);
+            let len_b2 = (b2.x - b1.x).powi(2) + (b2.y - b1.y).powi(2);
+            
+            // Project b1, b2 onto segment a's line (parameter t in [0,1])
+            let t_b1 = if len_a2 > EPS {
+                ((b1.x - a1.x) * (a2.x - a1.x) + (b1.y - a1.y) * (a2.y - a1.y)) / len_a2
+            } else { 0.0 };
+            let t_b2 = if len_a2 > EPS {
+                ((b2.x - a1.x) * (a2.x - a1.x) + (b2.y - a1.y) * (a2.y - a1.y)) / len_a2
+            } else { 0.0 };
+            
+            let b_lo = t_b1.min(t_b2);
+            let b_hi = t_b1.max(t_b2);
+            
+            // Overlap interval on segment a's parameter space
+            let lo = 0.0f64.max(b_lo);
+            let hi = 1.0f64.min(b_hi);
+            
+            if lo <= hi {
+                let overlap_len = (hi - lo) * len_a2.sqrt();
+                if overlap_len > EPS {
+                    return SegmentRelation::CollinearOverlap;
+                } else {
+                    // Overlap is just a point
+                    return SegmentRelation::Touch;
+                }
+            }
         }
         return SegmentRelation::Disjoint;
     }
@@ -1028,6 +1059,94 @@ fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
 }
 
 /// Check if two segments have any topological interaction (crossing, touching, or collinear overlap).
+/// Returns true for ProperCross, CollinearOverlap, and Touch.
 pub fn segments_interact(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
     !matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::Disjoint)
+}
+
+/// Check if two segments have positive-length overlap or proper crossing (area overlap).
+/// Returns true for ProperCross and CollinearOverlap only.
+/// Returns false for Touch (endpoint contact) and Disjoint.
+pub fn segments_overlap(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
+    matches!(
+        segment_relation(a1, a2, b1, b2),
+        SegmentRelation::ProperCross | SegmentRelation::CollinearOverlap
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Point, SegmentRelation, segment_relation, segments_interact, segments_overlap};
+
+    #[test]
+    fn segment_relation_proper_cross() {
+        // Crossing segments
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(10.0, 10.0);
+        let b1 = Point::new(0.0, 10.0);
+        let b2 = Point::new(10.0, 0.0);
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross);
+        assert!(segments_overlap(a1, a2, b1, b2));
+        assert!(segments_interact(a1, a2, b1, b2));
+    }
+
+    #[test]
+    fn segment_relation_touch_endpoint() {
+        // Segments touching at endpoint
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(5.0, 0.0);
+        let b1 = Point::new(5.0, 0.0);
+        let b2 = Point::new(10.0, 0.0);
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::Touch);
+        assert!(!segments_overlap(a1, a2, b1, b2));
+        assert!(segments_interact(a1, a2, b1, b2));
+    }
+
+    #[test]
+    fn segment_relation_collinear_overlap() {
+        // Collinear overlapping segments
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(10.0, 0.0);
+        let b1 = Point::new(5.0, 0.0);
+        let b2 = Point::new(15.0, 0.0);
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::CollinearOverlap);
+        assert!(segments_overlap(a1, a2, b1, b2));
+        assert!(segments_interact(a1, a2, b1, b2));
+    }
+
+    #[test]
+    fn segment_relation_collinear_touch() {
+        // Collinear segments touching at endpoint
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(5.0, 0.0);
+        let b1 = Point::new(5.0, 0.0);
+        let b2 = Point::new(10.0, 0.0);
+        // This is Touch, not CollinearOverlap, because overlap is just a point
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::Touch);
+        assert!(!segments_overlap(a1, a2, b1, b2));
+        assert!(segments_interact(a1, a2, b1, b2));
+    }
+
+    #[test]
+    fn segment_relation_disjoint() {
+        // Disjoint segments
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(5.0, 0.0);
+        let b1 = Point::new(6.0, 0.0);
+        let b2 = Point::new(10.0, 0.0);
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::Disjoint);
+        assert!(!segments_overlap(a1, a2, b1, b2));
+        assert!(!segments_interact(a1, a2, b1, b2));
+    }
+
+    #[test]
+    fn segment_relation_cross_near_endpoint() {
+        // Proper cross very near endpoint but still crossing
+        let a1 = Point::new(0.0, 0.0);
+        let a2 = Point::new(10.0, 10.0);
+        let b1 = Point::new(0.0, 10.0);
+        let b2 = Point::new(10.0, 0.0);
+        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross);
+        assert!(segments_overlap(a1, a2, b1, b2));
+    }
 }
