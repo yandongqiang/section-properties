@@ -328,15 +328,15 @@ fn has_vertex_on_boundary(a: &[Point], b: &Polygon, tol: f64) -> bool {
 /// The result is validated against the area inclusion-exclusion identity:
 /// `|A| + |B| = |A∩B| + |A∪B|`, which is a strict mathematical invariant.
 /// Compute boolean operation on two polygons with optional validation.
-fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool) -> Vec<Polygon> {
+fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, _validate: bool) -> Result<Vec<Polygon>, BooleanError> {
     // Identical boundaries: exact fast path.
     if a.vertices.len() == b.vertices.len()
         && a.vertices.iter().zip(&b.vertices).all(|(p, q)| p == q)
     {
-        return match op {
+        return Ok(match op {
             BoolOp::Intersection | BoolOp::Union => vec![a.clone()],
             BoolOp::Difference => vec![],
-        };
+        });
     }
 
     // Robustness: when a vertex of either polygon sits (nearly) on the other
@@ -363,7 +363,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
         || has_vertex_on_boundary(&b.vertices, a, det_tol);
 
     if !degenerate {
-        return polygon_boolean_impl(a, b, op);
+        return Ok(polygon_boolean_impl(a, b, op));
     }
 
     // Deterministic perturbation: try systematic shifts in fixed directions.
@@ -437,7 +437,7 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
 
         if err < 1e-9 {
             // Strict inclusion-exclusion satisfied: accept.
-            return mapped;
+            return Ok(mapped);
         }
 
         // Track best-effort fallback (mapped) across all directions.
@@ -450,19 +450,10 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp, validate: bool
     }
 
     // No direction satisfied the strict identity.
-    if validate {
-        // Strict mode: do not silently return a result that fails the
-        // inclusion-exclusion invariant. Surface the failure (this is a
-        // geometry-kernel safety net) and return the closest mapped estimate,
-        // which Section-level validation can reject downstream if needed.
-        eprintln!(
-            "WARN: boolean {:?} failed strict inclusion-exclusion after perturbation; returning best-effort result",
-            op
-        );
-    }
-    // Both validate modes return the best-effort (mapped) result rather than
-    // silently discarding validation.
-    best.map_or_else(Vec::new, |(_, res)| res)
+    Err(BooleanError::Validation {
+        op,
+        message: "boolean operation failed strict inclusion-exclusion identity after perturbation; no perturbation direction produced a geometrically consistent result".to_string(),
+    })
 }
 
 /// Errors from polygon / section boolean operations.
@@ -695,7 +686,7 @@ pub fn polygon_boolean_checked(
     b: &Polygon,
     op: BoolOp,
 ) -> Result<Vec<Polygon>, BooleanError> {
-    let result = polygon_boolean_internal(a, b, op, true);
+    let result = polygon_boolean_internal(a, b, op, true)?;
     check_boolean_bounds(&result, a, b, op)?;
     Ok(result)
 }
