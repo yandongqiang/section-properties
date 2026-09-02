@@ -1,6 +1,6 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
-use super::{SkylineLdlt, SparseMatrix, PIVOT_TOL};
+use super::{SkylineLdlt, SparseMatrix, PIVOT_TOL, CgResult, CgStatus, cg_solve};
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,31 +17,144 @@ pub enum SolverKind {
     Pardiso,
 }
 
-/// A factored solver able to solve A x = b for multiple right-hand sides.
-pub enum SparseSolver {
-    Lu(SparseLu),
-    Ldlt(SkylineLdlt),
+/// Error type for solver operations.
+#[derive(Debug, Clone)]
+pub enum SolverError {
+    FactorizationFailed(String),
+    SolveFailed(String),
+    InvalidInput(String),
+    NotImplemented(String),
 }
 
-impl SparseSolver {
-    /// Factor `matrix` with the selected backend. CG backends are not
-    /// factored here; use [`SparseSolver::solve_iterative`].
-    pub fn factor(kind: SolverKind, matrix: &SparseMatrix) -> Result<Self, String> {
+impl std::fmt::Display for SolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SolverError::FactorizationFailed(msg) => write!(f, "factorization failed: {}", msg),
+            SolverError::SolveFailed(msg) => write!(f, "solve failed: {}", msg),
+            SolverError::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
+            SolverError::NotImplemented(msg) => write!(f, "not implemented: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SolverError {}
+
+impl From<String> for SolverError {
+    fn from(s: String) -> Self {
+        SolverError::SolveFailed(s)
+    }
+}
+
+/// Direct solver types (factor once, solve many).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectSolver {
+    SparseLu,
+    SkylineLdlt,
+    #[cfg(feature = "pardiso")]
+    Pardiso,
+}
+
+/// Iterative solver types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterativeSolver {
+    PcG,
+    Iccg,
+}
+
+/// A factored direct solver able to solve A x = b for multiple right-hand sides.
+pub enum FactoredDirectSolver {
+    Lu(SparseLu),
+    Ldlt(SkylineLdlt),
+    #[cfg(feature = "pardiso")]
+    Pardiso(crate::fea::solvers::pardiso::PardisoSolver),
+}
+
+impl FactoredDirectSolver {
+    /// Factor `matrix` with the selected direct backend.
+    pub fn factor(kind: DirectSolver, matrix: &SparseMatrix) -> Result<Self, SolverError> {
         match kind {
-            SolverKind::SparseLu => Ok(SparseSolver::Lu(SparseLu::factor(matrix)?)),
-            SolverKind::SkylineLdlt | SolverKind::PcG | SolverKind::Iccg | SolverKind::Pardiso => {
-                Ok(SparseSolver::Ldlt(SkylineLdlt::factor(matrix).map_err(|e| e.to_string())?))
+            DirectSolver::SparseLu => Ok(FactoredDirectSolver::Lu(SparseLu::factor(matrix)?)),
+            DirectSolver::SkylineLdlt => Ok(FactoredDirectSolver::Ldlt(
+                SkylineLdlt::factor(matrix).map_err(|e| SolverError::FactorizationFailed(e.to_string()))?
+            )),
+            #[cfg(feature = "pardiso")]
+            DirectSolver::Pardiso => {
+                // PARDISO requires the constraint vector for the augmented system
+                // This is a limitation - we'll need to handle this separately
+                Err(SolverError::NotImplemented("PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead.".to_string()))
             }
         }
     }
 
-    /// Direct solve (LU / LDLT / PARDISO). Returns `None` for iterative
-    /// backends or if the solver fails.
-    pub fn solve(&self, b: &[f64]) -> Option<Vec<f64>> {
+    /// Direct solve (LU / LDLT). Returns error if solver fails.
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, SolverError> {
         match self {
-            SparseSolver::Lu(lu) => Some(lu.solve(b)),
-            SparseSolver::Ldlt(l) => l.solve(b).ok(),
+            FactoredDirectSolver::Lu(lu) => Ok(lu.solve(b)),
+            FactoredDirectSolver::Ldlt(l) => l.solve(b).map_err(|e| SolverError::SolveFailed(e.to_string())),
         }
+    }
+}
+
+/// Iterative solver for multiple right-hand sides.
+pub struct IterativeSolverInstance {
+    kind: IterativeSolver,
+    matrix: SparseMatrix,
+    max_iter: usize,
+    tol: f64,
+}
+
+impl IterativeSolverInstance {
+    /// Create a new iterative solver instance.
+    pub fn new(kind: IterativeSolver, matrix: SparseMatrix, max_iter: usize, tol: f64) -> Self {
+        Self {
+            kind,
+            matrix,
+            max_iter,
+            tol,
+        }
+    }
+
+    /// Solve A x = b. Returns error if solver fails or doesn't converge.
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, SolverError> {
+        match self.kind {
+            IterativeSolver::PcG => {
+                let result = cg_solve(&self.matrix, b, self.max_iter, self.tol);
+                match result.status {
+                    CgStatus::Converged => Ok(result.x),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
+                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
+                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                }
+            }
+            IterativeSolver::Iccg => {
+                // ICCG can fail and fall back to CG
+                let x = iccg_solve(&self.matrix, b, self.max_iter, self.tol);
+                Ok(x)
+            }
+        }
+    }
+}
+
+/// Legacy SparseSolver for backward compatibility.
+pub struct SparseSolver {
+    direct: FactoredDirectSolver,
+}
+
+impl SparseSolver {
+    /// Factor `matrix` with the selected backend.
+    pub fn factor(kind: SolverKind, matrix: &SparseMatrix) -> Result<Self, String> {
+        match kind {
+            SolverKind::SparseLu => Ok(SparseSolver { direct: FactoredDirectSolver::factor(DirectSolver::SparseLu, matrix).map_err(|e| e.to_string())? }),
+            SolverKind::SkylineLdlt => Ok(SparseSolver { direct: FactoredDirectSolver::factor(DirectSolver::SkylineLdlt, matrix).map_err(|e| e.to_string())? }),
+            SolverKind::Pardiso => Err("PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead.".to_string()),
+            SolverKind::PcG | SolverKind::Iccg => Err("iterative solvers (PCG, ICCG) do not support factor(). Use solve_iterative() or IterativeSolverInstance.".to_string()),
+        }
+    }
+
+    /// Direct solve (LU / LDLT). Returns error if solver fails.
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, SolverError> {
+        self.direct.solve(b)
     }
 
     /// Iterative solve used for PCG/ICCG kinds.
@@ -51,10 +164,24 @@ impl SparseSolver {
         b: &[f64],
         max_iter: usize,
         tol: f64,
-    ) -> Vec<f64> {
+    ) -> Result<Vec<f64>, SolverError> {
         match kind {
-            SolverKind::Iccg => iccg_solve(matrix, b, max_iter, tol),
-            _ => super::cg_solve(matrix, b, max_iter, tol).x,
+            SolverKind::PcG => {
+                let result = cg_solve(matrix, b, max_iter, tol);
+                match result.status {
+                    CgStatus::Converged => Ok(result.x),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
+                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
+                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                }
+            }
+            SolverKind::Iccg => {
+                // ICCG can fail and fall back to CG
+                let x = iccg_solve(matrix, b, max_iter, tol);
+                Ok(x)
+            }
+            _ => Err(SolverError::NotImplemented("solver kind not supported for iterative solve".to_string())),
         }
     }
 }

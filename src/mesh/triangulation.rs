@@ -686,3 +686,75 @@ mod tests {
         assert!((r2 - 0.5).abs() < 1e-6);
     }
 }
+
+/// Mesh density control for automated sizing based on section bounding box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshControl {
+    /// Coarse mesh: target_size = max_dim / 4
+    Coarse,
+    /// Normal mesh: target_size = max_dim / 6 (default)
+    Normal,
+    /// Fine mesh: target_size = max_dim / 10
+    Fine,
+    /// Very fine mesh: target_size = max_dim / 20
+    VeryFine,
+    /// Custom target size (uses target_size field directly)
+    Custom,
+}
+
+impl Default for MeshControl {
+    fn default() -> Self {
+        MeshControl::Normal
+    }
+}
+
+impl MeshControl {
+    /// Compute target_size from section bounding box diagonal.
+    pub fn compute_target_size(self, max_dim: f64) -> f64 {
+        match self {
+            MeshControl::Coarse => max_dim / 4.0,
+            MeshControl::Normal => max_dim / 6.0,
+            MeshControl::Fine => max_dim / 10.0,
+            MeshControl::VeryFine => max_dim / 20.0,
+            MeshControl::Custom => max_dim / 6.0, // Fallback, should be overridden
+        }
+    }
+    
+    /// Compute target_size with thin-walled adjustment.
+    pub fn compute_target_size_thin_walled(self, max_dim: f64, min_edge: f64) -> f64 {
+        let base = self.compute_target_size(max_dim);
+        match self {
+            MeshControl::Coarse | MeshControl::Normal => {
+                // For thin-walled, ensure we don't go below max_dim/20
+                base.max(max_dim / 20.0).min(min_edge / 2.0)
+            }
+            MeshControl::Fine | MeshControl::VeryFine => {
+                // For fine meshes, use min edge length but cap at base
+                (min_edge / 2.0).min(base).max(max_dim / 50.0)
+            }
+            MeshControl::Custom => base,
+        }
+    }
+}
+
+/// Create MeshParams from MeshControl and section dimensions.
+pub fn mesh_params_from_control(
+    control: MeshControl,
+    max_dim: f64,
+    min_edge: f64,
+    is_thin_walled: bool,
+) -> crate::mesh::MeshParams {
+    let target_size = if is_thin_walled {
+        control.compute_target_size_thin_walled(max_dim, min_edge)
+    } else {
+        control.compute_target_size(max_dim)
+    };
+    crate::mesh::MeshParams {
+        target_size,
+        max_size: target_size * 2.0,
+        min_size: target_size * 0.3,
+        quality_threshold: 0.3,
+        use_delaunay: true,
+        max_iterations: 10,
+    }
+}

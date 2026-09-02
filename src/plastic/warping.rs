@@ -96,16 +96,16 @@ impl WarpingProperties {
         let is_solid_circle = crate::plastic::warping_fem::geometry_detection::is_solid_circle(section);
         let is_chs = crate::plastic::warping_fem::geometry_detection::is_chs(section);
         let is_solid_rect = crate::plastic::warping_fem::geometry_detection::is_solid_rectangle(section);
-        let is_rhs = crate::plastic::warping_fem::geometry_detection::is_rhs(section);
         
-        let is_near_circular = is_solid_circle || is_chs;
-        let is_rectangular = is_solid_rect || is_rhs;
+        // Only use fast-path for sections with EXACT analytical formulas
+        // RHS is NOT included because we don't have exact Iw or shear areas
+        let has_exact_formulas = is_solid_circle || is_chs || is_solid_rect;
 
         // Build a FemWarpingResult with either exact analytical or FEM results
-        let fem = if is_near_circular || is_rectangular {
+        let fem = if has_exact_formulas {
             // Exact analytical solution available - skip FEM entirely
-            eprintln!("EARLY DETECTION: near_circular={} rectangular={} (solid_circle={} chs={} solid_rect={} rhs={})", 
-                is_near_circular, is_rectangular, is_solid_circle, is_chs, is_solid_rect, is_rhs);
+            eprintln!("EARLY DETECTION: exact_formulas=true (solid_circle={} chs={} solid_rect={})", 
+                is_solid_circle, is_chs, is_solid_rect);
             let sc = analytical_shear_center(section, &props);
             let (beta_x, beta_y) = analytical_beta(&props, sc);
             
@@ -117,13 +117,16 @@ impl WarpingProperties {
             } else if is_solid_rect {
                 crate::plastic::warping_fem::exact_shear_area_rectangle(section, &props)
             } else {
-                // RHS: approximate
-                (props.area * 0.85, props.area * 0.85)
+                (0.0, 0.0)
             };
 
+            // Use exact J and Iw (unwrap is safe since has_exact_formulas implies we have formulas)
+            let j = crate::plastic::warping_fem::analytical_j(section, &props).unwrap_or(props.ix + props.iy);
+            let iw = crate::plastic::warping_fem::analytical_iw(section, &props).unwrap_or(0.0);
+
             FemWarpingResult {
-                j: analytical_j(section, &props),
-                iw: analytical_iw(section, &props),
+                j,
+                iw,
                 shear_center: sc,
                 shear_center_elastic: sc,
                 beta_x_plus: beta_x,
@@ -139,9 +142,11 @@ impl WarpingProperties {
             compute_fem_warping_properties(section, &props).unwrap_or_else(|_| {
                 let sc = analytical_shear_center(section, &props);
                 let (beta_x, beta_y) = analytical_beta(&props, sc);
+                let j = crate::plastic::warping_fem::analytical_j(section, &props).unwrap_or(props.ix + props.iy);
+                let iw = crate::plastic::warping_fem::analytical_iw(section, &props).unwrap_or(0.0);
                 FemWarpingResult {
-                    j: analytical_j(section, &props),
-                    iw: analytical_iw(section, &props),
+                    j,
+                    iw,
                     shear_center: sc,
                     shear_center_elastic: sc,
                     beta_x_plus: beta_x,
@@ -171,9 +176,7 @@ impl WarpingProperties {
         let is_solid_circle = crate::plastic::warping_fem::geometry_detection::is_solid_circle(section);
         let is_chs = crate::plastic::warping_fem::geometry_detection::is_chs(section);
         let is_solid_rect = crate::plastic::warping_fem::geometry_detection::is_solid_rectangle(section);
-        let is_rhs = crate::plastic::warping_fem::geometry_detection::is_rhs(section);
-        let is_near_circular = is_solid_circle || is_chs;
-        let is_rectangular = is_solid_rect || is_rhs;
+        let has_exact_formulas = is_solid_circle || is_chs || is_solid_rect;
 
         // FEM shear areas may be inaccurate for thin-walled sections with coarse meshes.
         // Fall back to approximate formulas when FEM gives zero, negative or
@@ -213,7 +216,7 @@ impl WarpingProperties {
         // Principal axis shear areas from tensor rotation (Python method)
         // For fast-path sections, we already have exact shear areas aligned with centroidal axes.
         // Since these sections are symmetric, principal axes = centroidal axes.
-        let (a_s11, a_s22) = if is_near_circular || is_rectangular {
+        let (a_s11, a_s22) = if has_exact_formulas {
             // For circle/rectangle: principal axes align with centroidal axes
             // and exact shear areas were already computed in FemWarpingResult
             (fem.a_s11, fem.a_s22)
@@ -229,9 +232,11 @@ impl WarpingProperties {
             let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props).unwrap_or_else(|_| {
                 let sc = analytical_shear_center(&rotated_section, &rotated_props);
                 let (beta_x, beta_y) = analytical_beta(&rotated_props, sc);
+                let j = crate::plastic::warping_fem::analytical_j(&rotated_section, &rotated_props).unwrap_or(rotated_props.ix + rotated_props.iy);
+                let iw = crate::plastic::warping_fem::analytical_iw(&rotated_section, &rotated_props).unwrap_or(0.0);
                 FemWarpingResult {
-                    j: analytical_j(&rotated_section, &rotated_props),
-                    iw: analytical_iw(&rotated_section, &rotated_props),
+                    j,
+                    iw,
                     shear_center: sc,
                     shear_center_elastic: sc,
                     beta_x_plus: beta_x,
@@ -251,7 +256,7 @@ impl WarpingProperties {
         };
 
         // Principal axis monosymmetry constants
-        let (beta_11, beta_22) = if is_near_circular || is_rectangular {
+        let (beta_11, beta_22) = if has_exact_formulas {
             (beta_x, beta_y)
         } else if phi.abs() < 1e-10 {
             (beta_x, beta_y)
@@ -263,9 +268,11 @@ impl WarpingProperties {
             let rotated_fem = compute_fem_warping_properties(&rotated_section, &rotated_props).unwrap_or_else(|_| {
                 let sc = analytical_shear_center(&rotated_section, &rotated_props);
                 let (beta_x, beta_y) = analytical_beta(&rotated_props, sc);
+                let j = crate::plastic::warping_fem::analytical_j(&rotated_section, &rotated_props).unwrap_or(rotated_props.ix + rotated_props.iy);
+                let iw = crate::plastic::warping_fem::analytical_iw(&rotated_section, &rotated_props).unwrap_or(0.0);
                 FemWarpingResult {
-                    j: analytical_j(&rotated_section, &rotated_props),
-                    iw: analytical_iw(&rotated_section, &rotated_props),
+                    j,
+                    iw,
                     shear_center: sc,
                     shear_center_elastic: sc,
                     beta_x_plus: beta_x,

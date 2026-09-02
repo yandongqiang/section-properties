@@ -17,6 +17,11 @@ pub use fem_analysis::{
 };
 pub use triangulation::{Triangle, Triangulation, triangulate_polygon, triangulate_section};
 
+/// Mesh density control for automated sizing based on section bounding box.
+pub use crate::mesh::triangulation::MeshControl;
+/// Create mesh params from control and section dimensions.
+pub use crate::mesh::triangulation::mesh_params_from_control;
+
 use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_library::CompositeSection;

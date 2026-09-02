@@ -7,7 +7,7 @@
 
 use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6, build_tri6_elements};
 use crate::geometry::Point;
-use crate::mesh::{MeshParams, mesh_section};
+use crate::mesh::{mesh_section, mesh_params_from_control, MeshControl, MeshParams};
 use crate::plastic::warping::ThinWalledCheck;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -66,28 +66,15 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
-    
-    // Use mesh size max_dim / 6 (balanced accuracy and speed)
-    // For thin-walled sections, use max_dim / 8 but not smaller than max_dim / 20
     let is_thin_walled = section.is_thin_walled();
-    let target_size = if is_thin_walled {
-        (max_dim / 8.0).max(max_dim / 20.0).max(1e-4)
-    } else {
-        (max_dim / 6.0).max(1e-4)
-    };
+    
+    // Use MeshControl::Normal (default) for backward compatibility
+    // In the future, this could be made configurable
+    let mesh_control = MeshControl::Normal;
+    let params = mesh_params_from_control(mesh_control, max_dim, min_edge, is_thin_walled);
 
     // Bridged triangulation keeps hole boundaries as exact mesh edges.
-    let base_mesh = mesh_section(
-        section,
-        MeshParams {
-            target_size,
-            max_size: target_size * 2.0,
-            min_size: target_size * 0.3,
-            quality_threshold: 0.3,
-            use_delaunay: true,
-            max_iterations: 10,
-        },
-    );
+    let base_mesh = mesh_section(section, params);
     if base_mesh.elements.is_empty() {
         return Err(crate::mesh::fem::FemError::ConvergenceFailed);
     }
@@ -298,36 +285,20 @@ pub fn compute_fem_warping_properties(
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
-    
-    // Use mesh size max_dim / 6 (balanced accuracy and speed)
-    // For thin-walled sections, use max_dim / 8 but not smaller than max_dim / 20
     let is_thin_walled = section.is_thin_walled();
-    let target_size = if is_thin_walled {
-        (max_dim / 8.0).max(max_dim / 20.0).max(1e-4)
-    } else {
-        (max_dim / 6.0).max(1e-4)
-    };
     
-    
+    // Use MeshControl::Normal (default) for backward compatibility
+    let mesh_control = MeshControl::Normal;
+    let params = mesh_params_from_control(mesh_control, max_dim, min_edge, is_thin_walled);
 
-    let mesh = mesh_section(
-        section,
-        MeshParams {
-            target_size,
-            max_size: target_size * 2.0,
-            min_size: target_size * 0.3,
-            quality_threshold: 0.3,
-            use_delaunay: true,
-            max_iterations: 10,
-        },
-    );
+    let mesh = mesh_section(section, params);
 
 
     let _t0 = std::time::Instant::now();
 
     if mesh.elements.is_empty() {
         return Ok(FemWarpingResult {
-            j: analytical_j(section, props),
+            j: analytical_j(section, props).unwrap_or(props.ix + props.iy),
             iw: 0.0,
             shear_center: Point::new(0.0, 0.0),
             shear_center_elastic: Point::new(0.0, 0.0),
@@ -852,21 +823,22 @@ use geometry_detection::*;
 
 /// Compute analytical St. Venant torsion constant J for a section.
 /// Uses exact Saint-Venant formulas for solid rectangles/circles, thin-walled approximation for open sections.
-pub fn analytical_j(section: &Section, props: &SectionProperties) -> f64 {
+/// Returns None for sections without known exact formulas (should use FEM).
+pub fn analytical_j(section: &Section, props: &SectionProperties) -> Option<f64> {
     // Try to detect section type from geometry
     let area = props.area;
 
     // Solid circle: J = π*r⁴/2
     if is_solid_circle(section) {
         if let Some(r) = circle_radius(&section.outer) {
-            return std::f64::consts::PI * r.powi(4) / 2.0;
+            return Some(std::f64::consts::PI * r.powi(4) / 2.0);
         }
     }
 
     // CHS: J = π*(r_outer⁴ - r_inner⁴)/2
     if is_chs(section) {
         if let (Some(r_outer), Some(r_inner)) = (circle_radius(&section.outer), circle_radius(&section.holes[0])) {
-            return std::f64::consts::PI * (r_outer.powi(4) - r_inner.powi(4)) / 2.0;
+            return Some(std::f64::consts::PI * (r_outer.powi(4) - r_inner.powi(4)) / 2.0);
         }
     }
 
@@ -875,36 +847,39 @@ pub fn analytical_j(section: &Section, props: &SectionProperties) -> f64 {
         if let Some((a, b)) = rectangle_dimensions(&section.outer) {
             let (a, b) = if a >= b { (a, b) } else { (b, a) };
             let beta = 1.0 / 3.0 - 0.21 * (b / a) * (1.0 - b.powi(4) / (12.0 * a.powi(4)));
-            return beta * a * b.powi(3);
+            return Some(beta * a * b.powi(3));
         }
     }
 
     // RHS (rectangular hollow section): J ≈ 2*t*(h-t)*(b-t)²*(h-t+b-t) / (h-t+b-t) ... 
     // Simplified: use thin-walled closed formula J = 4*A² / ∮(ds/t)
+    // Only use if section is actually thin-walled (t << min(b,h))
     if is_rhs(section) {
         if let (Some((bo, ho)), Some((bi, hi))) = (rectangle_dimensions(&section.outer), rectangle_dimensions(&section.holes[0])) {
-            // Thin-walled closed section approximation
             let t1 = (ho - hi) / 2.0;
             let t2 = (bo - bi) / 2.0;
             if t1 > 0.0 && t2 > 0.0 {
-                let a_enclosed = bi * hi;
-                let perimeter_over_t = 2.0 * (bi / t1 + hi / t2);
-                return 4.0 * a_enclosed * a_enclosed / perimeter_over_t;
+                // Check if thin-walled: wall thickness < 1/10 of smaller dimension
+                let min_dim = bo.min(ho).min(bi.min(hi));
+                if t1 < min_dim * 0.1 && t2 < min_dim * 0.1 {
+                    let a_enclosed = bi * hi;
+                    let perimeter_over_t = 2.0 * (bi / t1 + hi / t2);
+                    return Some(4.0 * a_enclosed * a_enclosed / perimeter_over_t);
+                }
             }
         }
     }
 
-    // General solid section: J = polar moment (upper bound)
-    // Thin-walled open sections will be handled by FEM
-    props.ix + props.iy
+    // General section: no exact formula available, use FEM
+    None
 }
 
 /// Compute analytical warping constant Iw for a section.
 /// For doubly symmetric sections, Iw = 0. For mono-symmetric (channels), use standard formula.
-pub fn analytical_iw(section: &Section, props: &SectionProperties) -> f64 {
+/// Returns None for sections without known exact formulas (should use FEM).
+pub fn analytical_iw(section: &Section, props: &SectionProperties) -> Option<f64> {
     // For doubly symmetric I-sections, Iw ≈ Ix * hy^2 / 4 (approx)
     // For channels symmetric about x-axis: Iw ≈ (tf * bf^3 * hw^2) / 12
-    // General approximation
     if props.ixy.abs() < 1e-12 {
         // Could be doubly symmetric or mono-symmetric about x or y
         // Check if doubly symmetric by testing symmetry
@@ -912,23 +887,23 @@ pub fn analytical_iw(section: &Section, props: &SectionProperties) -> f64 {
         let sym_y = is_symmetric_about_y(section);
         if sym_x && sym_y {
             // Doubly symmetric: Iw = 0
-            0.0
+            Some(0.0)
         } else if sym_x {
             // Symmetric about x (channel with horizontal web): Iw > 0
             // Approximate: Iw ~ Iy * h^2 / 4
             let h = section.bounds().3 - section.bounds().2;
-            props.iy * h * h * 0.25
+            Some(props.iy * h * h * 0.25)
         } else if sym_y {
             // Symmetric about y (channel with vertical web): Iw > 0
             let b = section.bounds().1 - section.bounds().0;
-            props.ix * b * b * 0.25
+            Some(props.ix * b * b * 0.25)
         } else {
-            // Asymmetric: small positive
-            props.ix * props.iy * 0.1
+            // Asymmetric: no exact formula available
+            None
         }
     } else {
-        // Asymmetric: small positive
-        props.ix * props.iy * 0.1
+        // Asymmetric: no exact formula available
+        None
     }
 }
 
@@ -961,12 +936,20 @@ pub fn exact_shear_area_circle(section: &Section, props: &SectionProperties) -> 
 /// Compute exact shear area for CHS
 pub fn exact_shear_area_chs(section: &Section, props: &SectionProperties) -> (f64, f64) {
     if is_chs(section) {
-        // For CHS: Ay = Az = A * (1 - (r_i/r_o)^4) / (1 - (r_i/r_o)^2) * 2/3 ... simplified
-        // Approximate as thin-walled: A_s = 2 * A (for shear parallel to wall)
-        let area = props.area;
-        let ay = area * 2.0;
-        let az = area * 2.0;
-        return (ay, az);
+        if let (Some(r_outer), Some(r_inner)) = (circle_radius(&section.outer), circle_radius(&section.holes[0])) {
+            // For CHS: Exact formula from Timoshenko/Gere
+            // As = A * (1 - (r_i/r_o)^4) / (1 - (r_i/r_o)^2) * 4/3
+            // For thin-walled (r_i ≈ r_o): As ≈ 2 * A
+            // For solid circle (r_i = 0): As = 9/10 * A
+            let area = props.area;
+            let ratio = r_inner / r_outer;
+            let ratio2 = ratio * ratio;
+            let ratio4 = ratio2 * ratio2;
+            let factor = (1.0 - ratio4) / (1.0 - ratio2) * 4.0 / 3.0;
+            let ay = area * factor;
+            let az = area * factor;
+            return (ay, az);
+        }
     }
     (0.0, 0.0)
 }
