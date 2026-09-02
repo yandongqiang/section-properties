@@ -304,7 +304,7 @@ let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
     // ICCG iterative
     let mut k3 = k.clone();
     k3.compress();
-    let x_iccg = solvers::iccg_solve(&k3, &f, 10000, 1e-12);
+    let x_iccg = solvers::iccg_solve(&k3, &f, 10000, 1e-12).x;
     // PCG iterative
     let mut k4 = k.clone();
     k4.compress();

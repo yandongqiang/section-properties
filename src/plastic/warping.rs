@@ -139,11 +139,23 @@ impl WarpingProperties {
             }
         } else {
             // General section: use FEM with analytical fallback
-            compute_fem_warping_properties(section, &props).unwrap_or_else(|_| {
+            // Note: FEM is the primary method; fallback is only for edge cases
+            compute_fem_warping_properties(section, &props).unwrap_or_else(|e| {
+                eprintln!("WARNING: FEM warping failed ({}), using analytical fallback (results may be approximate)", e);
                 let sc = analytical_shear_center(section, &props);
                 let (beta_x, beta_y) = analytical_beta(&props, sc);
                 let j = crate::plastic::warping_fem::analytical_j(section, &props).unwrap_or(props.ix + props.iy);
-                let iw = crate::plastic::warping_fem::analytical_iw(section, &props).unwrap_or(0.0);
+                // For Iw: use bounding-box based approximation for open sections
+                // Iw ≈ (Ix * Iy)^0.5 * (h^2) / 4 for open sections, 0 for closed
+                let iw = if section.holes.is_empty() {
+                    // Open section approximation
+                    let h = section.bounds().3 - section.bounds().2;
+                    let b = section.bounds().1 - section.bounds().0;
+                    let geom_mean = (props.ix * props.iy).sqrt();
+                    geom_mean * h * h / 4.0 * (b / h).min(1.0)
+                } else {
+                    0.0
+                };
                 FemWarpingResult {
                     j,
                     iw,

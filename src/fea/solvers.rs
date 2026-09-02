@@ -128,9 +128,14 @@ impl IterativeSolverInstance {
                 }
             }
             IterativeSolver::Iccg => {
-                // ICCG can fail and fall back to CG
-                let x = iccg_solve(&self.matrix, b, self.max_iter, self.tol);
-                Ok(x)
+                let result = iccg_solve(&self.matrix, b, self.max_iter, self.tol);
+                match result.status {
+                    CgStatus::Converged => Ok(result.x),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
+                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
+                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                }
             }
         }
     }
@@ -177,9 +182,14 @@ impl SparseSolver {
                 }
             }
             SolverKind::Iccg => {
-                // ICCG can fail and fall back to CG
-                let x = iccg_solve(matrix, b, max_iter, tol);
-                Ok(x)
+                let result = iccg_solve(matrix, b, max_iter, tol);
+                match result.status {
+                    CgStatus::Converged => Ok(result.x),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
+                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
+                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                }
             }
             _ => Err(SolverError::NotImplemented("solver kind not supported for iterative solve".to_string())),
         }
@@ -477,10 +487,10 @@ impl Ic0Factor {
 }
 
 /// IC(0)-preconditioned conjugate gradient.
-pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec<f64> {
+pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgResult {
     let ic = match Ic0Factor::factor(a) {
         Ok(f) => f,
-        Err(_) => return super::cg_solve(a, b, max_iter, tol).x,
+        Err(_) => return super::cg_solve(a, b, max_iter, tol),
     };
 
     let n = b.len();
@@ -500,42 +510,88 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> Vec
     let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
     let mut x = vec![0.0f64; n];
     if b_norm == 0.0 {
-        return x;
+        return CgResult {
+            x,
+            iterations: 0,
+            residual: 0.0,
+            status: CgStatus::InvalidInput,
+        };
     }
 
     let mut r = b.to_vec();
     let mut z = ic.solve(&r);
     let mut p = z.clone();
     let mut rz: f64 = r.iter().zip(z.iter()).map(|(&a, &b2)| a * b2).sum();
+    let mut iterations = 0;
 
     let mut ap = vec![0.0f64; n];
-    for _ in 0..max_iter {
+    for iter in 0..max_iter {
         matvec(&p, &mut ap);
         let pap: f64 = p.iter().zip(ap.iter()).map(|(&a, &b2)| a * b2).sum();
         if pap.abs() <= 0.0 {
-            break;
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                status: CgStatus::Breakdown,
+            };
         }
         let alpha = rz / pap;
+        if !alpha.is_finite() {
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                status: CgStatus::Breakdown,
+            };
+        }
         for i in 0..n {
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
         }
+
         let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+        iterations = iter + 1;
         if rn < tol * b_norm {
-            break;
+            return CgResult {
+                x,
+                iterations,
+                residual: rn,
+                status: CgStatus::Converged,
+            };
         }
+
         z = ic.solve(&r);
         let rz_new: f64 = r.iter().zip(z.iter()).map(|(&a, &b2)| a * b2).sum();
-        if rz == 0.0 {
-            break;
+        if rz == 0.0 || !rz.is_finite() {
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                status: CgStatus::Breakdown,
+            };
         }
         let beta = rz_new / rz;
+        if !beta.is_finite() {
+            return CgResult {
+                x,
+                iterations,
+                residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+                status: CgStatus::Breakdown,
+            };
+        }
         for i in 0..n {
             p[i] = z[i] + beta * p[i];
         }
         rz = rz_new;
     }
-    x
+
+    CgResult {
+        x,
+        iterations,
+        residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
+        status: CgStatus::MaxIterations,
+    }
 }
 
 // ---------------------------------------------------------------------------

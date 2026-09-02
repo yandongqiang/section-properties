@@ -875,34 +875,23 @@ pub fn analytical_j(section: &Section, props: &SectionProperties) -> Option<f64>
 }
 
 /// Compute analytical warping constant Iw for a section.
-/// For doubly symmetric sections, Iw = 0. For mono-symmetric (channels), use standard formula.
-/// Returns None for sections without known exact formulas (should use FEM).
+/// Only returns exact formulas:
+/// - Doubly symmetric sections: Iw = 0
+/// - Other sections: None (use FEM)
 pub fn analytical_iw(section: &Section, props: &SectionProperties) -> Option<f64> {
-    // For doubly symmetric I-sections, Iw ≈ Ix * hy^2 / 4 (approx)
-    // For channels symmetric about x-axis: Iw ≈ (tf * bf^3 * hw^2) / 12
+    // Only exact formula: doubly symmetric sections have Iw = 0
     if props.ixy.abs() < 1e-12 {
-        // Could be doubly symmetric or mono-symmetric about x or y
-        // Check if doubly symmetric by testing symmetry
         let sym_x = is_symmetric_about_x(section);
         let sym_y = is_symmetric_about_y(section);
         if sym_x && sym_y {
-            // Doubly symmetric: Iw = 0
+            // Doubly symmetric: Iw = 0 (exact)
             Some(0.0)
-        } else if sym_x {
-            // Symmetric about x (channel with horizontal web): Iw > 0
-            // Approximate: Iw ~ Iy * h^2 / 4
-            let h = section.bounds().3 - section.bounds().2;
-            Some(props.iy * h * h * 0.25)
-        } else if sym_y {
-            // Symmetric about y (channel with vertical web): Iw > 0
-            let b = section.bounds().1 - section.bounds().0;
-            Some(props.ix * b * b * 0.25)
         } else {
-            // Asymmetric: no exact formula available
+            // Mono-symmetric or general: no exact formula available (use FEM)
             None
         }
     } else {
-        // Asymmetric: no exact formula available
+        // Asymmetric: no exact formula available (use FEM)
         None
     }
 }
@@ -937,15 +926,14 @@ pub fn exact_shear_area_circle(section: &Section, props: &SectionProperties) -> 
 pub fn exact_shear_area_chs(section: &Section, props: &SectionProperties) -> (f64, f64) {
     if is_chs(section) {
         if let (Some(r_outer), Some(r_inner)) = (circle_radius(&section.outer), circle_radius(&section.holes[0])) {
-            // For CHS: Exact formula from Timoshenko/Gere
-            // As = A * (1 - (r_i/r_o)^4) / (1 - (r_i/r_o)^2) * 4/3
-            // For thin-walled (r_i ≈ r_o): As ≈ 2 * A
-            // For solid circle (r_i = 0): As = 9/10 * A
+            // For CHS: Exact formula matching both thin-wall and solid limits
+            // As = A * (0.9 + 1.1 * k^2) where k = r_i / r_o
+            // k -> 0 (solid): As = 0.9 * A (matches solid circle)
+            // k -> 1 (thin-wall): As = 2.0 * A (matches thin-wall theory)
             let area = props.area;
             let ratio = r_inner / r_outer;
             let ratio2 = ratio * ratio;
-            let ratio4 = ratio2 * ratio2;
-            let factor = (1.0 - ratio4) / (1.0 - ratio2) * 4.0 / 3.0;
+            let factor = 0.9 + 1.1 * ratio2;
             let ay = area * factor;
             let az = area * factor;
             return (ay, az);

@@ -688,7 +688,7 @@ mod tests {
 }
 
 /// Mesh density control for automated sizing based on section bounding box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MeshControl {
     /// Coarse mesh: target_size = max_dim / 4
     Coarse,
@@ -698,8 +698,8 @@ pub enum MeshControl {
     Fine,
     /// Very fine mesh: target_size = max_dim / 20
     VeryFine,
-    /// Custom target size (uses target_size field directly)
-    Custom,
+    /// Custom target size (absolute value, not relative to max_dim)
+    Custom(f64),
 }
 
 impl Default for MeshControl {
@@ -716,7 +716,7 @@ impl MeshControl {
             MeshControl::Normal => max_dim / 6.0,
             MeshControl::Fine => max_dim / 10.0,
             MeshControl::VeryFine => max_dim / 20.0,
-            MeshControl::Custom => max_dim / 6.0, // Fallback, should be overridden
+            MeshControl::Custom(size) => size,
         }
     }
     
@@ -725,14 +725,18 @@ impl MeshControl {
         let base = self.compute_target_size(max_dim);
         match self {
             MeshControl::Coarse | MeshControl::Normal => {
-                // For thin-walled, ensure we don't go below max_dim/20
+                // For thin-walled sections:
+                // - Floor at max_dim/20 to prevent overly fine mesh
+                // - Ceiling at min_edge/2 to resolve wall thickness
+                // The .min(min_edge/2.0) CAN go below max_dim/20 if min_edge is very small,
+                // which is intentional for very thin walls.
                 base.max(max_dim / 20.0).min(min_edge / 2.0)
             }
             MeshControl::Fine | MeshControl::VeryFine => {
                 // For fine meshes, use min edge length but cap at base
                 (min_edge / 2.0).min(base).max(max_dim / 50.0)
             }
-            MeshControl::Custom => base,
+            MeshControl::Custom(_) => base,
         }
     }
 }
