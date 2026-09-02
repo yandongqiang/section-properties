@@ -352,10 +352,12 @@ fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp) -> Result<Vec<
     let diag = bbox_diag(&a.vertices).max(bbox_diag(&b.vertices));
     // Use scale-adaptive epsilon: large enough to resolve vertex-on-edge
     // degeneracies, small enough to avoid coordinate distortion.
-    // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * max(diag, 1.0)].
-    // For diag=1e6 mm (1 km): eps = 1e-2 mm → clamped to 1e0 mm (1.0 mm)
+    // eps = 1e-8 * diag, clamped to [1e-12 * diag, 1e-6 * min(diag, 1.0)].
+    // For diag=1e6 mm (1 km): eps = 1e-2 mm (clamped to 1e-6 * 1.0 = 1 µm)
     // For diag=1e-3 mm (1 µm): eps = 1e-11 mm → clamped to 1e-15 mm (near f64 precision)
-    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.max(1.0));
+    // This ensures the perturbation is never larger than 1 micron for large models,
+    // avoiding the issue where 0.5 mm gaps were incorrectly merged.
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
     // Detection window slightly larger than the shift so that any vertex we
     // detect as degenerate is actually moved clear of the boundary.
     let det_tol = 8.0 * eps;
@@ -577,7 +579,7 @@ fn validate_boolean_sampling(
     if diag <= 0.0 {
         return Ok(());
     }
-    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.max(1.0));
+    let eps = (1e-8 * diag).clamp(1e-12 * diag, 1e-6 * diag.min(1.0));
     let bnd_tol = 16.0 * eps;
 
     // Combined bounding box of a, b and the result so the grid covers everything.

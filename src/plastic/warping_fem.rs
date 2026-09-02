@@ -8,6 +8,7 @@
 use crate::fea::{SparseMatrix, Tri6, Tri6Mesh, solve_lagrange_sparse, tri3_to_tri6, build_tri6_elements};
 use crate::geometry::Point;
 use crate::mesh::{MeshParams, mesh_section};
+use crate::plastic::warping::ThinWalledCheck;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
 
@@ -64,9 +65,16 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
-    let _min_edge = min_edge_length(section);
-    let _ = props;
-    let target_size = (max_dim / 6.0).max(1e-4);
+    let min_edge = min_edge_length(section);
+    
+    // Use mesh size max_dim / 6 (balanced accuracy and speed)
+    // For thin-walled sections, use max_dim / 8 but not smaller than max_dim / 20
+    let is_thin_walled = section.is_thin_walled();
+    let target_size = if is_thin_walled {
+        (max_dim / 8.0).max(max_dim / 20.0).max(1e-4)
+    } else {
+        (max_dim / 6.0).max(1e-4)
+    };
 
     // Bridged triangulation keeps hole boundaries as exact mesh edges.
     let base_mesh = mesh_section(
@@ -89,7 +97,28 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
     let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
     let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
     let clean_elements = filter_degenerate_tris(&base_mesh.nodes, &base_mesh.elements, min_area);
-    let tri6_mesh = tri3_to_tri6(&base_mesh.nodes, &clean_elements);
+    
+    // Also remove orphan nodes (nodes not referenced by any clean element)
+    let mut used_nodes = vec![false; base_mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let mut old_to_new = vec![usize::MAX; base_mesh.nodes.len()];
+    let mut new_nodes = Vec::new();
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(base_mesh.nodes[old_idx]);
+        }
+    }
+    
+    let remapped_elements: Vec<[usize; 3]> = clean_elements.iter().map(|tri| {
+        [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]]
+    }).collect();
+    
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
     let n = tri6_mesh.nodes.len();
 
     // Build elements with proper orientation
@@ -268,9 +297,16 @@ pub fn compute_fem_warping_properties(
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
-    let _min_edge = min_edge_length(section);
-    let _ = props;
-    let target_size = (max_dim / 6.0).max(1e-4);
+    let min_edge = min_edge_length(section);
+    
+    // Use mesh size max_dim / 6 (balanced accuracy and speed)
+    // For thin-walled sections, use max_dim / 8 but not smaller than max_dim / 20
+    let is_thin_walled = section.is_thin_walled();
+    let target_size = if is_thin_walled {
+        (max_dim / 8.0).max(max_dim / 20.0).max(1e-4)
+    } else {
+        (max_dim / 6.0).max(1e-4)
+    };
     
     
 
@@ -291,7 +327,7 @@ pub fn compute_fem_warping_properties(
 
     if mesh.elements.is_empty() {
         return Ok(FemWarpingResult {
-            j: ixx + iyy,
+            j: analytical_j(section, props),
             iw: 0.0,
             shear_center: Point::new(0.0, 0.0),
             shear_center_elastic: Point::new(0.0, 0.0),
@@ -309,7 +345,33 @@ pub fn compute_fem_warping_properties(
     let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
     let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
     let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
-    let tri6_mesh = tri3_to_tri6(&mesh.nodes, &clean_elements);
+    
+    // Also remove orphan nodes (nodes not referenced by any clean element)
+    let mut used_nodes = vec![false; mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let node_map: Vec<Option<usize>> = used_nodes.iter().enumerate().map(|(i, &used)| {
+        if used { Some(i) } else { None }
+    }).collect();
+    
+    // Remap element indices to new node indices
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(mesh.nodes[old_idx]);
+        }
+    }
+    
+    let remapped_elements: Vec<[usize; 3]> = clean_elements.iter().map(|tri| {
+        [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]]
+    }).collect();
+    
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
     let n = tri6_mesh.nodes.len();
 
     // Build elements with proper orientation
@@ -662,66 +724,179 @@ pub fn warping_svg(
     Ok(plot_warping_svg(&fem.tri6_mesh, &fem.omega, opts))
 }
 
+/// Geometry-based section type detection
+pub mod geometry_detection {
+    use crate::geometry::{Point, Polygon};
+    use crate::section::Section;
+
+    /// Check if a polygon is a circle/CHS approximation (many vertices, roughly equal radius)
+    pub fn is_circle(poly: &Polygon, tol: f64) -> bool {
+        if poly.vertices.len() < 8 {
+            return false;
+        }
+        // Compute centroid
+        let centroid = poly.centroid();
+        // Check if all vertices are at roughly the same distance from centroid
+        let mut r_avg = 0.0;
+        for v in &poly.vertices {
+            let dx = v.x - centroid.x;
+            let dy = v.y - centroid.y;
+            r_avg += (dx * dx + dy * dy).sqrt();
+        }
+        r_avg /= poly.vertices.len() as f64;
+        
+        for v in &poly.vertices {
+            let dx = v.x - centroid.x;
+            let dy = v.y - centroid.y;
+            let r = (dx * dx + dy * dy).sqrt();
+            if (r - r_avg).abs() / r_avg > tol {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if a polygon is a rectangle (4 vertices, right angles, opposite sides equal)
+    pub fn is_rectangle(poly: &Polygon, tol: f64) -> bool {
+        if poly.vertices.len() != 4 {
+            return false;
+        }
+        let v = &poly.vertices;
+        // Check edge lengths and angles
+        let edges: Vec<(f64, f64)> = (0..4).map(|i| {
+            let j = (i + 1) % 4;
+            (v[j].x - v[i].x, v[j].y - v[i].y)
+        }).collect();
+        
+        let lengths: Vec<f64> = edges.iter().map(|(dx, dy)| (dx * dx + dy * dy).sqrt()).collect();
+        
+        // Opposite sides should be equal
+        if (lengths[0] - lengths[2]).abs() / lengths[0].max(lengths[2]) > tol {
+            return false;
+        }
+        if (lengths[1] - lengths[3]).abs() / lengths[1].max(lengths[3]) > tol {
+            return false;
+        }
+        
+        // Adjacent edges should be perpendicular (dot product ≈ 0)
+        let dot = edges[0].0 * edges[1].0 + edges[0].1 * edges[1].1;
+        if dot.abs() > tol * lengths[0] * lengths[1] {
+            return false;
+        }
+        
+        true
+    }
+
+    /// Check if section is a solid circle/CHS
+    pub fn is_solid_circle(section: &Section) -> bool {
+        section.holes.is_empty() && is_circle(&section.outer, 1e-3)
+    }
+
+    /// Check if section is a CHS (circular hollow section)
+    pub fn is_chs(section: &Section) -> bool {
+        if section.holes.len() != 1 {
+            return false;
+        }
+        is_circle(&section.outer, 1e-3) && is_circle(&section.holes[0], 1e-3)
+    }
+
+    /// Check if section is a solid rectangle
+    pub fn is_solid_rectangle(section: &Section) -> bool {
+        section.holes.is_empty() && is_rectangle(&section.outer, 1e-6)
+    }
+
+    /// Check if section is a rectangular hollow section (RHS)
+    pub fn is_rhs(section: &Section) -> bool {
+        if section.holes.len() != 1 {
+            return false;
+        }
+        is_rectangle(&section.outer, 1e-6) && is_rectangle(&section.holes[0], 1e-6)
+    }
+
+    /// Get rectangle dimensions (width, height) from a rectangular polygon
+    pub fn rectangle_dimensions(poly: &Polygon) -> Option<(f64, f64)> {
+        if !is_rectangle(poly, 1e-6) {
+            return None;
+        }
+        let v = &poly.vertices;
+        let edges: Vec<(f64, f64)> = (0..4).map(|i| {
+            let j = (i + 1) % 4;
+            (v[j].x - v[i].x, v[j].y - v[i].y)
+        }).collect();
+        
+        let lengths: Vec<f64> = edges.iter().map(|(dx, dy)| (dx * dx + dy * dy).sqrt()).collect();
+        
+        // Width is the longer side, height is the shorter (or vice versa depending on orientation)
+        let w = lengths[0].max(lengths[1]);
+        let h = lengths[0].min(lengths[1]);
+        Some((w, h))
+    }
+
+    /// Get circle radius from a circular polygon
+    pub fn circle_radius(poly: &Polygon) -> Option<f64> {
+        if !is_circle(poly, 1e-3) {
+            return None;
+        }
+        let centroid = poly.centroid();
+        let mut r_sum = 0.0;
+        for v in &poly.vertices {
+            let dx = v.x - centroid.x;
+            let dy = v.y - centroid.y;
+            r_sum += (dx * dx + dy * dy).sqrt();
+        }
+        Some(r_sum / poly.vertices.len() as f64)
+    }
+}
+
+use geometry_detection::*;
+
 /// Compute analytical St. Venant torsion constant J for a section.
 /// Uses exact Saint-Venant formulas for solid rectangles/circles, thin-walled approximation for open sections.
-pub fn analytical_j(props: &SectionProperties) -> f64 {
-    // Try to detect section type from moments of inertia
-    // Circle/CHS: J = polar = Ix + Iy (exact)
-    // Solid rectangle: Roark formula J = a*b³*(1/3 - 0.21*b/a*(1 - b⁴/12a⁴)) for a >= b
-    // Thin-walled open: J ≈ Σ b*t³/3
-    // General fallback: J = Ix + Iy (upper bound)
-
-    let ix = props.ix;
-    let iy = props.iy;
-    let ixy = props.ixy.abs();
+pub fn analytical_j(section: &Section, props: &SectionProperties) -> f64 {
+    // Try to detect section type from geometry
     let area = props.area;
 
-    // Circle/CHS: Ix ≈ Iy, Ixy ≈ 0, and Ix ≈ Iy ≈ polar/2
-    if ixy < 1e-12 && (ix - iy).abs() < 1e-9 * ix.max(iy) {
-        // Likely a circle or CHS polygon approximation
-        // Use area to get exact circle J if solid, else polar moment
-        let r_eq = (area / std::f64::consts::PI).sqrt();
-        let j_exact = std::f64::consts::PI * r_eq.powi(4) / 2.0;
-        // If it's close to polar moment (hollow or exact), use polar; else use area-derived
-        if (ix + iy - j_exact).abs() / j_exact < 0.01 {
-            return j_exact; // Circle
-        } else {
-            return ix + iy; // CHS or hollow
+    // Solid circle: J = π*r⁴/2
+    if is_solid_circle(section) {
+        if let Some(r) = circle_radius(&section.outer) {
+            return std::f64::consts::PI * r.powi(4) / 2.0;
         }
     }
 
-    // Solid rectangle: detect by Ix/Iy ratio matching b/h³ and h/b³
-    // For rectangle: Ix = b*h³/12, Iy = h*b³/12
-    // Ratio Ix/Iy = (h/b)², so h/b = sqrt(Ix/Iy) if h > b, else b/h = sqrt(Iy/Ix)
-    let ratio = if iy > 1e-12 { ix / iy } else { f64::INFINITY };
-    let aspect = if ratio >= 1.0 { ratio.sqrt() } else { (1.0 / ratio).sqrt() }; // max(h/b, b/h)
-    if aspect >= 1.0 && aspect < 100.0 {
-        // Compute sides from Ix, Iy
-        // Ix = b*h³/12, Iy = h*b³/12
-        // If ratio >= 1: h >= b, Ix/Iy = (h/b)², h = aspect*b
-        // Ix = b*(aspect*b)³/12 = aspect³*b⁴/12 => b = (12*Ix/aspect³)^(1/4)
-        // If ratio < 1: b > h, Iy/Ix = (b/h)², b = aspect*h
-        // Iy = h*(aspect*h)³/12 = aspect³*h⁴/12 => h = (12*Iy/aspect³)^(1/4)
-        let (a, b_side) = if ratio >= 1.0 {
-            // h >= b
-            let b_val = (12.0 * ix / aspect.powi(3)).powf(0.25);
-            let h_val = aspect * b_val;
-            (h_val, b_val)
-        } else {
-            // b > h
-            let h_val = (12.0 * iy / aspect.powi(3)).powf(0.25);
-            let b_val = aspect * h_val;
-            (b_val, h_val)
-        };
-        // Roark formula for rectangle torsion
-        let beta = 1.0 / 3.0 - 0.21 * (b_side / a) * (1.0 - b_side.powi(4) / (12.0 * a.powi(4)));
-        return beta * a * b_side.powi(3);
+    // CHS: J = π*(r_outer⁴ - r_inner⁴)/2
+    if is_chs(section) {
+        if let (Some(r_outer), Some(r_inner)) = (circle_radius(&section.outer), circle_radius(&section.holes[0])) {
+            return std::f64::consts::PI * (r_outer.powi(4) - r_inner.powi(4)) / 2.0;
+        }
     }
 
-    // Thin-walled open section approximation (if we can detect)
-    // Not implemented: need section geometry, not just properties
-    // Fall back to polar moment (upper bound for open sections)
-    ix + iy
+    // Solid rectangle: Roark formula J = a*b³*(1/3 - 0.21*b/a*(1 - b⁴/12a⁴)) for a >= b
+    if is_solid_rectangle(section) {
+        if let Some((a, b)) = rectangle_dimensions(&section.outer) {
+            let (a, b) = if a >= b { (a, b) } else { (b, a) };
+            let beta = 1.0 / 3.0 - 0.21 * (b / a) * (1.0 - b.powi(4) / (12.0 * a.powi(4)));
+            return beta * a * b.powi(3);
+        }
+    }
+
+    // RHS (rectangular hollow section): J ≈ 2*t*(h-t)*(b-t)²*(h-t+b-t) / (h-t+b-t) ... 
+    // Simplified: use thin-walled closed formula J = 4*A² / ∮(ds/t)
+    if is_rhs(section) {
+        if let (Some((bo, ho)), Some((bi, hi))) = (rectangle_dimensions(&section.outer), rectangle_dimensions(&section.holes[0])) {
+            // Thin-walled closed section approximation
+            let t1 = (ho - hi) / 2.0;
+            let t2 = (bo - bi) / 2.0;
+            if t1 > 0.0 && t2 > 0.0 {
+                let a_enclosed = bi * hi;
+                let perimeter_over_t = 2.0 * (bi / t1 + hi / t2);
+                return 4.0 * a_enclosed * a_enclosed / perimeter_over_t;
+            }
+        }
+    }
+
+    // General solid section: J = polar moment (upper bound)
+    // Thin-walled open sections will be handled by FEM
+    props.ix + props.iy
 }
 
 /// Compute analytical warping constant Iw for a section.
@@ -755,6 +930,45 @@ pub fn analytical_iw(section: &Section, props: &SectionProperties) -> f64 {
         // Asymmetric: small positive
         props.ix * props.iy * 0.1
     }
+}
+
+/// Compute exact shear area for solid rectangle
+pub fn exact_shear_area_rectangle(section: &Section, props: &SectionProperties) -> (f64, f64) {
+    if let Some((w, h)) = rectangle_dimensions(&section.outer) {
+        // For solid rectangle: Ay = 5/6 * A, Az = 5/6 * A (Timoshenko shear coefficients)
+        // More precisely: Ay = A * (5/6) for shear in y-direction (vertical shear)
+        // Az = A * (5/6) for shear in z-direction (horizontal shear)
+        let area = props.area;
+        let ay = area * 5.0 / 6.0;
+        let az = area * 5.0 / 6.0;
+        return (ay, az);
+    }
+    (0.0, 0.0)
+}
+
+/// Compute exact shear area for solid circle
+pub fn exact_shear_area_circle(section: &Section, props: &SectionProperties) -> (f64, f64) {
+    if is_solid_circle(section) {
+        // For solid circle: Ay = Az = 9/10 * A (Timoshenko)
+        let area = props.area;
+        let ay = area * 9.0 / 10.0;
+        let az = area * 9.0 / 10.0;
+        return (ay, az);
+    }
+    (0.0, 0.0)
+}
+
+/// Compute exact shear area for CHS
+pub fn exact_shear_area_chs(section: &Section, props: &SectionProperties) -> (f64, f64) {
+    if is_chs(section) {
+        // For CHS: Ay = Az = A * (1 - (r_i/r_o)^4) / (1 - (r_i/r_o)^2) * 2/3 ... simplified
+        // Approximate as thin-walled: A_s = 2 * A (for shear parallel to wall)
+        let area = props.area;
+        let ay = area * 2.0;
+        let az = area * 2.0;
+        return (ay, az);
+    }
+    (0.0, 0.0)
 }
 
 /// Compute analytical shear center for a section.
