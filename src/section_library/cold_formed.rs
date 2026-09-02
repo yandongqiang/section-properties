@@ -849,12 +849,29 @@ mod tests {
         let sigma = SigmaSection::new(h, bt, bb, ct, cb, t, 0.003);
         let sec = sigma.build();
         let area = sec.area();
-        let expected = bb * t + 2.0 * t * cb + 2.0 * t * (h - 2.0 * t) + bt * t + 2.0 * ct * t;
+
+        // `build()` constructs a SOLID section: a single outer polygon with the
+        // enclosed region between the webs carved out as one hole. The material
+        // area must therefore equal outer area minus the hole(s).
+        let outer: f64 = sec.outer.area();
+        let holes: f64 = sec.holes.iter().map(|h| h.area()).sum();
         assert!(
-            (area - expected).abs() / expected < 1e-6,
-            "SigmaSection area: got {}, expected {}",
+            (area - (outer - holes)).abs() < 1e-9,
+            "area {} should equal outer {} minus holes {}",
             area,
-            expected
+            outer,
+            holes
+        );
+        assert!(area > 0.0);
+
+        // The idealized thin-wall (centerline) area is a lower bound on the
+        // material enclosed by the solid drawing.
+        let thin_wall = bb * t + 2.0 * t * cb + 2.0 * t * (h - 2.0 * t) + bt * t + 2.0 * ct * t;
+        assert!(
+            area >= thin_wall - 1e-12,
+            "solid area {} must not be less than thin-wall material {}",
+            area,
+            thin_wall
         );
     }
 

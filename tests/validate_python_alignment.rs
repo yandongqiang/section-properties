@@ -323,11 +323,11 @@ fn skyline_2d_grid_matches_cg() {
 
     let mut k2 = k.clone();
     k2.compress();
-    let u_ref = solve_lagrange_sparse(&k2, &c, &f);
+    let u_ref = solve_lagrange_sparse(&k2, &c, &f).unwrap();
 
     // Plain-solve residual diagnostic
     let solver = SkylineLdlt::factor(&k.clone()).unwrap();
-    let x_plain = solver.solve(&f);
+    let x_plain = solver.solve(&f).unwrap();
     let mut k3 = k.clone();
     k3.compress();
     let prod = k3.matvec(&x_plain);
@@ -339,7 +339,7 @@ fn skyline_2d_grid_matches_cg() {
         .fold(0.0f64, f64::max);
     println!("plain-solve rel residual={:.3e}", res / fnorm);
 
-    let u_dir = solver.solve_lagrange(&c, &f);
+    let u_dir = solver.solve_lagrange(&c, &f).unwrap();
     let max_diff = u_ref
         .iter()
         .zip(u_dir.iter())
@@ -349,8 +349,8 @@ fn skyline_2d_grid_matches_cg() {
     let mut kc = k.clone();
     kc.compress();
     let lambda_dir: f64 = {
-        let w1 = solver.solve(&f);
-        let w2 = solver.solve(&c);
+        let w1 = solver.solve(&f).unwrap();
+        let w2 = solver.solve(&c).unwrap();
         let a: f64 = c.iter().zip(w2.iter()).map(|(&x, &y)| x * y).sum();
         let b: f64 = c.iter().zip(w1.iter()).map(|(&x, &y)| x * y).sum();
         a / b
@@ -362,7 +362,6 @@ fn skyline_2d_grid_matches_cg() {
     println!("max diff = {:.3e}", max_diff);
 }
 
-#[test]
 #[test]
 fn debug_surface_values() {
     let rect = RectangularSection::new(0.1, 0.2).build();
