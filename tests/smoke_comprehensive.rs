@@ -127,7 +127,7 @@ fn smoke_primitive_set_matches_python() {
 #[test]
 fn smoke_frame_properties_channel_shear_centre() {
     let ch = ChannelSection::new(0.2, 0.075, 0.005, 0.008, 0.0, 0.0).build();
-    let fp = ch.frame_properties_full();
+    let fp = ch.frame_properties_full(0.3);
     let c = ch.centroid();
     // Shear centre behind web: x_se < x_centroid (flanges point +x)
     assert!(

@@ -248,7 +248,7 @@ fn frame_properties_rectangle() {
     ]);
     let sec = Section::new(outer, Vec::new());
 
-    let (area, ixx, iyy, ixy, j, phi) = sec.frame_properties();
+    let (area, ixx, iyy, ixy, j, phi) = sec.frame_properties(0.3);
 
     assert!((area - 50.0).abs() < 1e-10);
     assert!((ixx - 104.16666666666667).abs() < 1e-10);
@@ -267,7 +267,7 @@ fn frame_properties_i_section() {
     let i = ISection::new(0.3, 0.15, 0.007, 0.01, 0.012);
     let section = i.build();
 
-    let (area, ixx, iyy, ixy, j, phi) = section.frame_properties();
+    let (area, ixx, iyy, ixy, j, phi) = section.frame_properties(0.3);
 
     assert!(area > 0.0);
     assert!(ixx > 0.0);
@@ -277,7 +277,7 @@ fn frame_properties_i_section() {
     assert!(phi.abs() < 1e-10); // Symmetric about both axes
 
     // Verify J matches WarpingProperties
-    let wp = WarpingProperties::from_section(&section);
+    let wp = WarpingProperties::from_section(&section, 0.3);
     assert!((j - wp.j).abs() < 1e-12);
 }
 

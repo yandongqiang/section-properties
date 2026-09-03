@@ -142,12 +142,12 @@ impl Section {
     /// - `j`: St. Venant torsion constant [m⁴]
     /// - `phi`: angle from centroidal x-axis to major principal axis (11),
     ///   CCW positive, radians.  `phi = ½ atan2(2·Ixy, Ixx − Iyy)`.
-    pub fn frame_properties(&self) -> (f64, f64, f64, f64, f64, f64) {
+    pub fn frame_properties(&self, nu: f64) -> (f64, f64, f64, f64, f64, f64) {
         use crate::plastic::warping::WarpingProperties;
         use crate::section_properties::SectionProperties;
 
         let props = SectionProperties::from_section(self);
-        let warping = WarpingProperties::from_section(self);
+        let warping = WarpingProperties::from_section(self, nu);
         let principal = props.principal_properties();
 
         (
@@ -188,7 +188,7 @@ impl Section {
             )));
         }
 
-        let fp = self.frame_properties_full();
+        let fp = self.frame_properties_full(material.poissons_ratio);
         let e = material.youngs_modulus;
         let g = e / (2.0 * (1.0 + material.poissons_ratio));
 
@@ -292,13 +292,13 @@ impl Section {
     ///
     /// Mirrors Python `Section.calculate_frame_properties()` (without the FEA
     /// shear areas, see `mesh` module for those).
-    pub fn frame_properties_full(&self) -> FrameProperties {
+    pub fn frame_properties_full(&self, nu: f64) -> FrameProperties {
         use crate::plastic::warping::WarpingProperties;
         use crate::section_properties::SectionProperties;
 
         let props = SectionProperties::from_section(self);
         let principal = props.principal_properties();
-        let warping = WarpingProperties::from_section(self);
+        let warping = WarpingProperties::from_section(self, nu);
 
         FrameProperties {
             area: props.area,
@@ -427,7 +427,7 @@ mod tests {
     fn frame_properties_full_i_section() {
         let i = crate::section_library::steel::ISection::from_designation("IPE300").unwrap();
         let sec = i.build();
-        let fp = sec.frame_properties_full();
+        let fp = sec.frame_properties_full(0.3);
         assert!(fp.area > 0.0);
         assert!(fp.iw.abs() > 0.0, "I-section must have warping constant");
         // Doubly symmetric: shear centre at centroid (mesh-level tolerance)
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn transformed_frame_properties_scale_with_e() {
         let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
-        let geo = sec.frame_properties_full();
+        let geo = sec.frame_properties_full(0.3);
 
         let steel = crate::material::presets::STEEL_S355;
         let t_steel = sec.frame_properties_with_material(&steel).unwrap();

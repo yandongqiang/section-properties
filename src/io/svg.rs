@@ -271,7 +271,7 @@ pub fn plot_centroids(section: &Section, options: SvgExportOptions) -> String {
     use crate::plastic::warping::WarpingProperties;
 
     let props = SectionProperties::from_section(section);
-    let warping = WarpingProperties::from_section(section);
+    let warping = WarpingProperties::from_section(section, 0.3);
     let bounds = section.bounds();
 
     let section_width = bounds.1 - bounds.0;

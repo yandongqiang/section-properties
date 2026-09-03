@@ -27,7 +27,7 @@ impl DsmParams {
     /// `span` is the unbraced length [m] for lateral-torsional buckling.
     pub fn from_section_with_span(section: &Section, material: &Material, span: f64) -> Self {
         let props = SectionProperties::from_section(section);
-        let warping = WarpingProperties::from_section(section);
+        let warping = WarpingProperties::from_section(section, material.poissons_ratio);
         let fy = material.yield_strength;
         let e = material.youngs_modulus;
         let g = material.shear_modulus;

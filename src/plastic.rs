@@ -39,7 +39,7 @@ impl PlasticAnalysis {
     pub fn new(section: Section, material: Material) -> Self {
         let plastic_section = PlasticSection::new(section.clone(), material);
         let interaction = InteractionDiagram::new(section.clone(), material);
-        let warping = WarpingProperties::from_section(&section);
+        let warping = WarpingProperties::from_section(&section, material.poissons_ratio);
 
         Self {
             section,

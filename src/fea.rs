@@ -529,7 +529,7 @@ impl Tri6 {
         (kappa_x, kappa_y, kappa_xy)
     }
 
-    /// Calculate monosymmetry integrals (int_x, int_y, int_11, int_22).
+/// Calculate monosymmetry integrals (int_x, int_y, int_11, int_22).
     ///
     /// `phi` is the principal axis angle in **radians**.
     pub fn monosymmetry_integrals(&self, phi: f64) -> (f64, f64, f64, f64) {
@@ -550,6 +550,47 @@ impl Tri6 {
         }
 
         (int_x, int_y, int_11, int_22)
+    }
+
+    /// Calculate the St. Venant shear-stress factor at Gauss points.
+    ///
+    /// For pure torsion with torque `T`, the stress is `T / J` times the
+    /// returned factor: `(∂ω/∂x - y, ∂ω/∂y + x)`.
+    ///
+    /// Returns (max_shear_stress_magnitude, max_shear_stress_vector)
+    /// where max_shear_stress_vector = (tau_x, tau_y) at the point of max magnitude.
+    pub fn torsion_shear_stress(
+        &self,
+        omega: &[f64; 6],
+    ) -> (f64, (f64, f64)) {
+        let mut max_tau = 0.0;
+        let mut max_tau_vec = (0.0, 0.0);
+
+        // `psi` and `phi` are shear-deformation auxiliary fields.  They do
+        // not describe St. Venant torsion; only the warping solution does.
+        let gps = gauss_points(6);
+        for &(_w, eta, xi, zeta) in &gps {
+            let sf = shape_function(&self.coords, (eta, xi, zeta));
+            
+            let mut b_omega = [0.0; 2];
+            for k in 0..6 {
+                b_omega[0] += sf.b[0][k] * omega[k];
+                b_omega[1] += sf.b[1][k] * omega[k];
+            }
+            
+            // St. Venant shear stress components
+            // τ_x = ∂ω/∂x - y (for unit twist)
+            // τ_y = ∂ω/∂y + x (for unit twist)
+            let tau_x = b_omega[0] - sf.y;
+            let tau_y = b_omega[1] + sf.x;
+            
+            let tau_mag = (tau_x * tau_x + tau_y * tau_y).sqrt();
+            if tau_mag > max_tau {
+                max_tau = tau_mag;
+                max_tau_vec = (tau_x, tau_y);
+            }
+        }
+        (max_tau, max_tau_vec)
     }
 
     /// Calculate element stresses at the 6 Gauss points, extrapolated to nodes.
@@ -2045,6 +2086,22 @@ mod tests {
         let tri = rect_tri6();
         let (area, _, _, _, _, _) = tri.geometric_properties();
         assert!((area - 0.5).abs() < 1e-10, "area = {area}");
+    }
+
+    #[test]
+    fn torsion_shear_stress_uses_warping_solution() {
+        let tri = rect_tri6();
+        let zero_warping = [0.0; 6];
+        // Nodal values of the linear field omega = x.
+        let linear_warping = [0.0, 1.0, 0.0, 0.5, 0.5, 0.0];
+
+        let (zero_factor, _) = tri.torsion_shear_stress(&zero_warping);
+        let (linear_factor, _) = tri.torsion_shear_stress(&linear_warping);
+
+        assert!(
+            (linear_factor - zero_factor).abs() > 1e-6,
+            "the torsion stress factor must vary with the warping solution"
+        );
     }
 
     #[test]

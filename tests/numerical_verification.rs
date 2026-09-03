@@ -39,7 +39,7 @@ fn verify_rectangle_properties() {
     let rect = RectangularSection::new(b, h);
     let sec = rect.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     let area_exact = b * h;
     let ix_exact = b * h.powi(3) / 12.0;  // about x (strong axis)
@@ -74,7 +74,7 @@ fn verify_circle_properties() {
     let circ = CircularSection::new(r);
     let sec = circ.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     let area_exact = PI * r * r;
     let ix_exact = PI * r.powi(4) / 4.0;
@@ -99,7 +99,7 @@ fn verify_circular_hollow_properties() {
     let chs = CircularHollowSection::from_dimensions(2.0*ro, 2.0*(ro-ri));
     let sec = chs.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     let area_exact = PI * (ro*ro - ri*ri);
     let ix_exact = PI * (ro.powi(4) - ri.powi(4)) / 4.0;
@@ -143,7 +143,7 @@ fn verify_hollow_rectangle_properties() {
     let rect = RectangularHollowSection::new(b, h, t, 0.0, 0.0);
     let sec = rect.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     let bi = b - 2.0 * t;
     let hi = h - 2.0 * t;
@@ -164,7 +164,7 @@ fn verify_i_section_properties() {
     let ipe = ISection::from_designation("IPE300").unwrap();
     let sec = ipe.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     // Known IPE300 values (from European standard tables, in m^4, m^3, etc.)
     // Approximate analytical (doubly symmetric I):
@@ -206,7 +206,7 @@ fn verify_channel_properties() {
     let ch = ChannelSection::new(d, bf, tw, tf, 0.0, 0.0);
     let sec = ch.build();
     let props = SectionProperties::from_section(&sec);
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     // Channel is open thin-walled section: web runs full height, flanges at ends
     let area_exact = d * tw + 2.0 * bf * tf;

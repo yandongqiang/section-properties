@@ -20,7 +20,7 @@ fn rel(a: f64, b: f64) -> f64 {
 fn report_i_section_warping_constant() {
     let ipe = ISection::from_designation("IPE300").unwrap();
     let sec = ipe.build();
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     // Analytical Iw for doubly-symmetric I: tf*bf^3/24 * hw^2
     let dims = ipe_dims();
@@ -42,7 +42,7 @@ fn ipe_dims() -> (f64, f64, f64, f64, f64) {
 fn report_chs_torsion_constant_bredt() {
     let chs = CircularHollowSection::from_dimensions(0.2191, 0.0082);
     let sec = chs.build();
-    let props = sec.frame_properties_full();
+    let props = sec.frame_properties_full(0.3);
 
     // Bredt: J = 4*Am^2*t/s (thin-walled closed tube)
     let ro = 0.10955;
@@ -109,7 +109,7 @@ fn report_circular_section_moments() {
 fn report_solid_circle_j() {
     let circ = CircularSection::new(0.1);
     let sec = circ.build();
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
     let ip = PI * 0.1_f64.powi(4) / 2.0;
     println!("solid circle J = {:.6e}, Ip exact = {:.6e}, rel err = {:.3e}", fp.j, ip, rel(fp.j, ip));
 }
@@ -123,7 +123,7 @@ fn report_channel_shear_centre() {
     let tf = 0.008_f64;
     let ch = section_properties::section_library::steel::ChannelSection::new(d, bf, tw, tf, 0.0, 0.0);
     let sec = ch.build();
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
 
     // Analytical (thin-walled, centroid measured from web face):
     // x_c = (3*t*bf^2*d... ) use standard formula:
@@ -153,7 +153,7 @@ fn report_rectangle_torsion_roark() {
     let b = 0.05_f64; // height
     let rect = RectangularSection::new(a, b);
     let sec = rect.build();
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
     let j_roark = a * b.powi(3) * (1.0 / 3.0 - 0.21 * (b / a) * (1.0 - b.powi(4) / (12.0 * a.powi(4))));
     println!("rect J computed = {:.6e}, Roark = {:.6e}, rel err = {:.3e}", fp.j, j_roark, rel(fp.j, j_roark));
 }

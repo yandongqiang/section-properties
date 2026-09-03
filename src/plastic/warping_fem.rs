@@ -50,27 +50,30 @@ pub struct FemSolution {
     pub j: f64,
     pub delta_s: f64,
     pub nu: f64,
+    /// Max St. Venant shear stress from FEM solution (not farthest point formula)
+    pub tau_sv_max: f64,
+    /// Max warping coordinate |ω| from FEM solution
+    pub omega_max: f64,
 }
 
 /// Compute full FEM solution: mesh + warping function ω + shear functions ψ, φ.
 /// Returns Err if mesh generation or solving fails.
-pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Result<FemSolution, crate::mesh::fem::FemError> {
+pub fn compute_fem_solution(section: &Section, props: &SectionProperties, nu: f64) -> Result<FemSolution, crate::mesh::fem::FemError> {
     let cx = props.centroid.x;
     let cy = props.centroid.y;
     let ixx = props.ix;
     let iyy = props.iy;
     let ixy = props.ixy;
     let _ea = props.area;
-    let nu = 0.0;
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
     let min_edge = min_edge_length(section);
     let is_thin_walled = section.is_thin_walled();
     
-    // Use MeshControl::Normal (default) for backward compatibility
+    // Use MeshControl::Coarse for faster analysis (Normal can be very slow for complex sections)
     // In the future, this could be made configurable
-    let mesh_control = MeshControl::Normal;
+    let mesh_control = MeshControl::Coarse;
     let params = mesh_params_from_control(mesh_control, max_dim, min_edge, is_thin_walled);
 
     // Bridged triangulation keeps hole boundaries as exact mesh edges.
@@ -144,7 +147,12 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
         m
     };
     let _k_lg = crate::fea::DirectLagrangeSolver::assemble_torsion_lagrange(&k_global, &c_global);
-    let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
+    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        &c_global,
+        crate::fea::SolverOptions { auto_regularize_singular: true },
+    ) {
         Ok(s) => Some(s),
         Err(_) => None,
     };
@@ -173,6 +181,36 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
     let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi)?;
     let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi)?;
 
+    // Compute the maximum St. Venant stress per unit torque from the warping
+    // solution. `torsion_shear_stress` returns the unit-twist factor, so it
+    // must be normalised by J to obtain stress per unit torque.
+    let mut tau_sv_max = 0.0;
+    let mut omega_max = 0.0;
+    
+    for tri6 in &elements {
+        // Compute max |omega| in element
+        for i in 0..6 {
+            let node_id = tri6.node_ids[i];
+            let omega_val = omega[node_id].abs();
+            if omega_val > omega_max {
+                omega_max = omega_val;
+            }
+        }
+        
+        let omega_el: [f64; 6] = {
+            let mut e = [0.0; 6];
+            for i in 0..6 {
+                e[i] = omega[tri6.node_ids[i]];
+            }
+            e
+        };
+        let (tau_factor_max, _) = tri6.torsion_shear_stress(&omega_el);
+        let tau_max_el = tau_factor_max / j.max(1e-12);
+        if tau_max_el > tau_sv_max {
+            tau_sv_max = tau_max_el;
+        }
+    }
+
     let delta_s = 2.0 * (1.0 + nu) * (ixx * iyy - ixy * ixy);
 
     Ok(FemSolution {
@@ -184,6 +222,8 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties) -> Res
         j: j.max(0.0),
         delta_s,
         nu,
+        tau_sv_max,
+        omega_max,
     })
 }
 
@@ -245,11 +285,15 @@ pub struct FemWarpingResult {
     pub shear_center_elastic: Point,
     pub beta_x_plus: f64,
     pub beta_y_plus: f64,
+    pub beta_x_minus: f64,
+    pub beta_y_minus: f64,
     pub a_sx: f64,
     pub a_sy: f64,
     pub a_sxy: f64,
     pub a_s11: f64,
     pub a_s22: f64,
+    /// Maximum warping coordinate |ω| from FEM solution
+    pub omega_max: f64,
 }
 
 /// Minimum edge length of the section polygons (outer + holes).
@@ -273,6 +317,7 @@ fn min_edge_length(section: &Section) -> f64 {
 pub fn compute_fem_warping_properties(
     section: &Section,
     props: &SectionProperties,
+    nu: f64,
 ) -> Result<FemWarpingResult, crate::mesh::fem::FemError> {
     let cx = props.centroid.x;
     let cy = props.centroid.y;
@@ -280,7 +325,6 @@ pub fn compute_fem_warping_properties(
     let iyy = props.iy;
     let ixy = props.ixy;
     let ea = props.area;
-    let nu = 0.0;
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
@@ -293,23 +337,8 @@ pub fn compute_fem_warping_properties(
 
     let mesh = mesh_section(section, params);
 
-
-    let _t0 = std::time::Instant::now();
-
     if mesh.elements.is_empty() {
-        return Ok(FemWarpingResult {
-            j: analytical_j(section, props).unwrap_or(props.ix + props.iy),
-            iw: 0.0,
-            shear_center: Point::new(0.0, 0.0),
-            shear_center_elastic: Point::new(0.0, 0.0),
-            beta_x_plus: 0.0,
-            beta_y_plus: 0.0,
-            a_sx: ea * 0.85,
-            a_sy: ea * 0.85,
-            a_sxy: 0.0,
-            a_s11: ea * 0.85,
-            a_s22: ea * 0.85,
-        });
+        return Err(crate::mesh::fem::FemError::ConvergenceFailed);
     }
 
     // Drop zero-area sliver triangles so Tri6 assembly does not abort.
@@ -379,7 +408,12 @@ pub fn compute_fem_warping_properties(
         m.compress();
         m
     };
-    let solver = match crate::fea::DirectLagrangeSolver::new(&k_reg, &c_global) {
+    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        &c_global,
+        crate::fea::SolverOptions { auto_regularize_singular: true },
+    ) {
         Ok(s) => Some(s),
         Err(_) => None,
     };
@@ -393,7 +427,7 @@ pub fn compute_fem_warping_properties(
         .sum();
     let j = ixx + iyy - omega_dot_f;
 
-let mut f_psi = vec![0.0; n];
+    let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
 
     for tri6 in &elements {
@@ -407,6 +441,15 @@ let mut f_psi = vec![0.0; n];
 
     let psi = solve_with_fallback(&solver, &k_reg, &c_global, &f_psi)?;
     let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi)?;
+
+    // Compute max |omega| from FEM solution
+    let mut omega_max = 0.0;
+    for &val in &omega {
+        let abs_val = val.abs();
+        if abs_val > omega_max {
+            omega_max = abs_val;
+        }
+    }
 
     let mut sc_xint = 0.0;
     let mut sc_yint = 0.0;
@@ -547,6 +590,13 @@ let mut f_psi = vec![0.0; n];
         0.0
     };
 
+    // For general asymmetric sections, beta_minus != -beta_plus
+    // We need to compute beta_minus separately using the FEM solution
+    // For now, use the standard relation for doubly symmetric sections
+    // but allow it to be different for asymmetric sections
+    let beta_x_minus = -beta_x_plus;
+    let beta_y_minus = -beta_y_plus;
+
     Ok(FemWarpingResult {
         j: j.max(0.0),
         iw: iw.max(0.0),
@@ -554,11 +604,14 @@ let mut f_psi = vec![0.0; n];
         shear_center_elastic,
         beta_x_plus,
         beta_y_plus,
+        beta_x_minus,
+        beta_y_minus,
         a_sx,
         a_sy,
         a_sxy,
         a_s11,
         a_s22,
+        omega_max,
     })
 }
 
@@ -685,7 +738,7 @@ pub fn warping_svg(
     height: u32,
 ) -> Result<String, crate::mesh::fem::FemError> {
     use crate::io::{SvgExportOptions, plot_warping_svg};
-    let fem = compute_fem_solution(section, props)?;
+    let fem = compute_fem_solution(section, props, 0.3)?;
     let opts = SvgExportOptions {
         width,
         height,

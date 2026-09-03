@@ -456,7 +456,7 @@ fn compute_fem_warping_properties(mesh: &Mesh, _material: &Material) -> FemWarpi
     // For now, delegate to existing analytical warping module
     use crate::plastic::warping::WarpingProperties;
     let section = section_from_mesh(mesh);
-    let wp = WarpingProperties::from_section(&section);
+    let wp = WarpingProperties::from_section(&section, 0.3);
 
     FemWarpingProperties {
         j: wp.j,

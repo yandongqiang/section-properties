@@ -17,7 +17,7 @@ pub fn calculate_stress_fem(
     props: &SectionProperties,
     loads: SectionLoads,
 ) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
-    let fem = compute_fem_solution(section, props)?;
+    let fem = compute_fem_solution(section, props, 0.3)?;
     compute_stress_from_fem(&fem, props, loads)
 }
 

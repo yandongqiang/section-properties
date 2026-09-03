@@ -165,7 +165,7 @@ struct WarpingResult {
 }
 
 fn compute_warping(sec: &Section) -> WarpingResult {
-    let fp = sec.frame_properties_full();
+    let fp = sec.frame_properties_full(0.3);
     WarpingResult {
         j: fp.j,
         iw: fp.iw,

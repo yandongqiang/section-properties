@@ -249,7 +249,7 @@ let area = self.props.area;
         let i11 = principal.i11;
         let i22 = principal.i22;
 
-        let warping = crate::plastic::warping::WarpingProperties::from_section(&self.section);
+        let warping = crate::plastic::warping::WarpingProperties::from_section(&self.section, self.material.poissons_ratio);
         let ay = warping.ay.max(1e-12);
         let az = warping.az.max(1e-12);
         let j = warping.j.max(1e-12);
