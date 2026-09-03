@@ -3,7 +3,7 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-use super::warping_fem::{compute_fem_warping_properties, compute_fem_solution, FemWarpingResult, FemSolution, analytical_shear_center, analytical_beta};
+use super::warping_fem::{compute_fem_warping_properties, compute_fem_solution, compute_fem_warping_solution, FemWarpingResult, FemSolution, FemWarpingSolution, analytical_shear_center, analytical_beta};
 use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;

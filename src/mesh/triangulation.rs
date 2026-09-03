@@ -317,9 +317,7 @@ pub fn triangulate_section_bridged(
     let mut nodes: Vec<Point> = Vec::new();
     let mut index_of: std::collections::HashMap<(u64, u64), usize> =
         std::collections::HashMap::new();
-    let key = |p: &Point| -> (u64, u64) {
-        (p.x.to_bits(), p.y.to_bits())
-    };
+    let key = |p: &Point| -> (u64, u64) { (p.x.to_bits(), p.y.to_bits()) };
     let mut elements = Vec::with_capacity(tris.len());
     for tri in &tris {
         let mut tri_idx = [0usize; 3];
@@ -466,11 +464,7 @@ pub fn triangulate_section(
             let idx: Vec<usize> = hole
                 .vertices
                 .iter()
-                .filter_map(|p| {
-                    nodes
-                        .iter()
-                        .position(|q| q == p)
-                })
+                .filter_map(|p| nodes.iter().position(|q| q == p))
                 .collect();
             hole_boundary_indices.push(idx);
         }
@@ -719,7 +713,7 @@ impl MeshControl {
             MeshControl::Custom(size) => size,
         }
     }
-    
+
     /// Compute target_size with thin-walled adjustment.
     pub fn compute_target_size_thin_walled(self, max_dim: f64, min_edge: f64) -> f64 {
         let base = self.compute_target_size(max_dim);
