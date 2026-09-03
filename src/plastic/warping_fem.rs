@@ -443,8 +443,15 @@ pub fn compute_fem_warping_solution(
         .map(|(&a, &b)| a * b)
         .sum();
     let j = ixx + iyy - omega_dot_f;
-    let j = if j <= 0.0 {
-        crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(j.max(0.0))
+    let j = if !j.is_finite() || j <= 0.0 {
+        // FEM produced non-positive J. For thin-walled open sections, use analytical formula
+        // as fallback with explicit logging. This indicates FEM numerical issues (mesh/regularization).
+        let analytical_j = crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(0.0);
+        eprintln!(
+            "[WARN] FEM J={:.6e} <= 0 (ixx+iyy={:.6e}, ω·f={:.6e}); using analytical J={:.6e}",
+            j, ixx + iyy, omega_dot_f, analytical_j
+        );
+        analytical_j
     } else {
         j
     };
@@ -588,11 +595,8 @@ pub fn compute_fem_warping_solution(
     } else {
         0.0
     };
-    let a_sxy = if rot_01.abs() > 1e-15 {
-        ea / rot_01
-    } else {
-        0.0
-    };
+    // a_sxy already correctly computed from kappa_xy above (delta_s²/kappa_xy).
+    // Do NOT overwrite with ea/rot_01 — that is a different quantity (rotated tensor off-diagonal).
 
     let mut int_x = 0.0;
     let mut int_y = 0.0;
