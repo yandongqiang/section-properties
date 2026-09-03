@@ -1053,3 +1053,121 @@ pub fn analytical_beta(props: &SectionProperties, shear_center: Point) -> (f64, 
     let beta_y = -props.ixy / props.iy + 2.0 * shear_center.x;
     (beta_x, beta_y)
 }
+
+/// Diagnostic: test FEM warping with custom regularization epsilon multiplier.
+/// Returns (j, iw, omega_norm, omega_dot_f)
+pub fn diag_test_eps(
+    section: &Section,
+    props: &SectionProperties,
+    nu: f64,
+    eps_multiplier: f64,
+) -> Result<(f64, f64, f64, f64), crate::mesh::fem::FemError> {
+    let cx = props.centroid.x;
+    let cy = props.centroid.y;
+    let ixx = props.ix;
+    let iyy = props.iy;
+    let ixy = props.ixy;
+    let ea = props.area;
+
+    let bounds = section.bounds();
+    let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
+    let min_edge = min_edge_length(section);
+    let is_thin_walled = section.is_thin_walled();
+
+    let params = mesh_params_from_control(MeshControl::Normal, max_dim, min_edge, is_thin_walled);
+
+    let mesh = mesh_section(section, params);
+    if mesh.elements.is_empty() {
+        return Err(crate::mesh::fem::FemError::ConvergenceFailed);
+    }
+
+    let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
+    let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
+    let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
+
+    let mut used_nodes = vec![false; mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(mesh.nodes[old_idx]);
+        }
+    }
+
+    let remapped_elements: Vec<[usize; 3]> = clean_elements
+        .iter()
+        .map(|tri| [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]])
+        .collect();
+
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
+    let n = tri6_mesh.nodes.len();
+
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+
+    let mut k_global = SparseMatrix::new(n);
+    let mut f_torsion = vec![0.0; n];
+    let mut c_global = vec![0.0; n];
+
+    for tri6 in &elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+
+    let k_reg = {
+        let mut m = k_global.clone();
+        m.compress();
+        let mut diag_avg = 0.0;
+        for i in 0..n {
+            diag_avg += m.matvec_diag(i);
+        }
+        // Use custom epsilon multiplier
+        let eps = if eps_multiplier > 0.0 {
+        diag_avg.max(1e-300) / n as f64 * eps_multiplier
+    } else {
+        0.0
+    };
+        for i in 0..n {
+            m.add(i, i, eps);
+        }
+        m.compress();
+        m
+    };
+
+    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        &c_global,
+        crate::fea::SolverOptions {
+            auto_regularize_singular: true,
+        },
+    ) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    };
+
+    let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
+
+    let omega_dot_f: f64 = omega
+        .iter()
+        .zip(f_torsion.iter())
+        .map(|(&a, &b)| a * b)
+        .sum();
+    let j = ixx + iyy - omega_dot_f;
+
+    let omega_norm = omega.iter().map(|v| v * v).sum::<f64>().sqrt();
+
+    Ok((j, 0.0, omega_norm, omega_dot_f))
+}
