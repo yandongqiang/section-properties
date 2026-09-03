@@ -800,9 +800,6 @@ mod tests {
     }
 }
 
-
-
-
 // ---------------------------------------------------------------------------
 // Warping function contour plot (mirrors Python plot_warping_function)
 // ---------------------------------------------------------------------------
@@ -889,8 +886,7 @@ pub fn plot_warping_svg(
 
     // Elements coloured by mean nodal ω.
     for elem in &mesh.elements {
-        let mean_omega: f64 =
-            elem.iter().map(|&ni| omega[ni]).sum::<f64>() / elem.len() as f64;
+        let mean_omega: f64 = elem.iter().map(|&ni| omega[ni]).sum::<f64>() / elem.len() as f64;
         let t = (mean_omega / omega_max).clamp(-1.0, 1.0);
         let fill = warp_colour(t);
 

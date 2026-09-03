@@ -4,18 +4,19 @@
 //! analytical formulas for standard sections. Unlike the Python alignment tests,
 //! these validate against exact mathematics, not another implementation.
 
-use section_properties::section_library::ParametricSection;
-use section_properties::section_library::primitive::{
-    RectangularSection, CircularSection, CircularHollowSection,
-    TriangularSection,
-};
-use section_properties::section_library::steel::{ISection, ChannelSection, TeeSection, AngleSection, RectangularHollowSection};
+use section_properties::geometry::{CompoundGeometry, Geometry};
 use section_properties::material::presets::STEEL_S355;
 use section_properties::plastic::{PlasticAnalysis, PlasticAxis};
-use section_properties::stress::{SectionLoads, StressAnalysis};
-use section_properties::geometry::{Geometry, CompoundGeometry};
 use section_properties::section::Section;
+use section_properties::section_library::ParametricSection;
+use section_properties::section_library::primitive::{
+    CircularHollowSection, CircularSection, RectangularSection, TriangularSection,
+};
+use section_properties::section_library::steel::{
+    AngleSection, ChannelSection, ISection, RectangularHollowSection, TeeSection,
+};
 use section_properties::section_properties::SectionProperties;
+use section_properties::stress::{SectionLoads, StressAnalysis};
 use std::f64::consts::PI;
 
 fn rel_err(computed: f64, exact: f64) -> f64 {
@@ -27,7 +28,10 @@ fn rel_err(computed: f64, exact: f64) -> f64 {
 
 fn assert_rel(computed: f64, exact: f64, tol: f64, name: &str) {
     let err = rel_err(computed, exact);
-    println!("{}: computed={:.6e} exact={:.6e} rel_err={:.3e}", name, computed, exact, err);
+    println!(
+        "{}: computed={:.6e} exact={:.6e} rel_err={:.3e}",
+        name, computed, exact, err
+    );
     assert!(err < tol, "{} rel err {:.3e} > {:.3e}", name, err, tol);
 }
 
@@ -42,11 +46,13 @@ fn verify_rectangle_properties() {
     let fp = sec.frame_properties_full(0.3);
 
     let area_exact = b * h;
-    let ix_exact = b * h.powi(3) / 12.0;  // about x (strong axis)
-    let iy_exact = h * b.powi(3) / 12.0;  // about y (weak axis)
+    let ix_exact = b * h.powi(3) / 12.0; // about x (strong axis)
+    let iy_exact = h * b.powi(3) / 12.0; // about y (weak axis)
     // For Roark: a = longer side, b = shorter side
     let (a, b_side) = if h > b { (h, b) } else { (b, h) };
-    let j_roark = a * b_side.powi(3) * (1.0/3.0 - 0.21 * (b_side/a) * (1.0 - b_side.powi(4)/(12.0*a.powi(4))));
+    let j_roark = a
+        * b_side.powi(3)
+        * (1.0 / 3.0 - 0.21 * (b_side / a) * (1.0 - b_side.powi(4) / (12.0 * a.powi(4))));
     let wx_exact = b * h.powi(2) / 6.0;
     let wy_exact = h * b.powi(2) / 6.0;
     let zx_exact = b * h.powi(2) / 4.0;
@@ -78,34 +84,49 @@ fn verify_circle_properties() {
 
     let area_exact = PI * r * r;
     let ix_exact = PI * r.powi(4) / 4.0;
-    let j_exact = PI * r.powi(4) / 2.0;  // polar moment = torsion constant for circle
+    let j_exact = PI * r.powi(4) / 2.0; // polar moment = torsion constant for circle
     let wx_exact = PI * r.powi(3) / 4.0;
-    let zx_exact = 4.0 * r.powi(3) / 3.0;  // plastic modulus circle
+    let zx_exact = 4.0 * r.powi(3) / 3.0; // plastic modulus circle
 
-    assert_rel(props.area, area_exact, 0.005, "Circle area (polygon approx)");
+    assert_rel(
+        props.area,
+        area_exact,
+        0.005,
+        "Circle area (polygon approx)",
+    );
     assert_rel(props.ix, ix_exact, 0.005, "Circle Ix (polygon approx)");
     assert_rel(fp.j, j_exact, 0.005, "Circle J (polygon approx)");
-    assert_rel(props.zxx_plus, wx_exact, 0.005, "Circle Wx (polygon approx)");
+    assert_rel(
+        props.zxx_plus,
+        wx_exact,
+        0.005,
+        "Circle Wx (polygon approx)",
+    );
 
     let pa = PlasticAnalysis::new(sec.clone(), STEEL_S355);
     let pp = pa.plastic_section.plastic_properties(PlasticAxis::X);
-    assert_rel(pp.plastic_section_modulus, zx_exact, 0.01, "Circle Zpl (polygon approx)");
+    assert_rel(
+        pp.plastic_section_modulus,
+        zx_exact,
+        0.01,
+        "Circle Zpl (polygon approx)",
+    );
 }
 
 #[test]
 fn verify_circular_hollow_properties() {
     let ro = 0.1_f64;
     let ri = 0.08_f64;
-    let chs = CircularHollowSection::from_dimensions(2.0*ro, 2.0*(ro-ri));
+    let chs = CircularHollowSection::from_dimensions(2.0 * ro, 2.0 * (ro - ri));
     let sec = chs.build();
     let props = SectionProperties::from_section(&sec);
     let fp = sec.frame_properties_full(0.3);
 
-    let area_exact = PI * (ro*ro - ri*ri);
+    let area_exact = PI * (ro * ro - ri * ri);
     let ix_exact = PI * (ro.powi(4) - ri.powi(4)) / 4.0;
     let j_exact = PI * (ro.powi(4) - ri.powi(4)) / 2.0;
     let wx_exact = PI * (ro.powi(4) - ri.powi(4)) / (4.0 * ro);
-    let zx_exact = 4.0/3.0 * (ro*ro*ro - ri*ri*ri);
+    let zx_exact = 4.0 / 3.0 * (ro * ro * ro - ri * ri * ri);
 
     assert_rel(props.area, area_exact, 1.0, "CHS area (polygon approx)");
     assert_rel(props.ix, ix_exact, 1.0, "CHS Ix (polygon approx)");
@@ -114,7 +135,12 @@ fn verify_circular_hollow_properties() {
 
     let pa = PlasticAnalysis::new(sec.clone(), STEEL_S355);
     let pp = pa.plastic_section.plastic_properties(PlasticAxis::X);
-    assert_rel(pp.plastic_section_modulus, zx_exact, 1.0, "CHS Zpl (polygon approx)");
+    assert_rel(
+        pp.plastic_section_modulus,
+        zx_exact,
+        1.0,
+        "CHS Zpl (polygon approx)",
+    );
 }
 
 #[test]
@@ -127,8 +153,8 @@ fn verify_triangle_properties() {
     let props = SectionProperties::from_section(&sec);
 
     let area_exact = 0.5 * b * h;
-    let ix_exact = b * h.powi(3) / 36.0;  // about base
-    let iy_exact = h * b.powi(3) / 36.0;  // about height
+    let ix_exact = b * h.powi(3) / 36.0; // about base
+    let iy_exact = h * b.powi(3) / 36.0; // about height
 
     assert_rel(props.area, area_exact, 1e-12, "Triangle area");
     assert_rel(props.ix, ix_exact, 1e-12, "Triangle Ix (about base)");
@@ -147,9 +173,9 @@ fn verify_hollow_rectangle_properties() {
 
     let bi = b - 2.0 * t;
     let hi = h - 2.0 * t;
-    let area_exact = b*h - bi*hi;
-    let ix_exact = (b*h.powi(3) - bi*hi.powi(3)) / 12.0;
-    let iy_exact = (h*b.powi(3) - hi*bi.powi(3)) / 12.0;
+    let area_exact = b * h - bi * hi;
+    let ix_exact = (b * h.powi(3) - bi * hi.powi(3)) / 12.0;
+    let iy_exact = (h * b.powi(3) - hi * bi.powi(3)) / 12.0;
     let j_exact = (b*h.powi(3) - bi*hi.powi(3)) / 3.0  // approximation
         * (1.0 - 0.21 * (h/b) * (1.0 - (hi/bi).powi(4)/(12.0*(h/b).powi(4)))); // very rough
 
@@ -173,13 +199,14 @@ fn verify_i_section_properties() {
     let bf: f64 = 0.150;
     let tw: f64 = 0.0071;
     let tf: f64 = 0.0107;
-    let hw: f64 = d - 2.0*tf;
+    let hw: f64 = d - 2.0 * tf;
 
-    let area_exact = 2.0*bf*tf + hw*tw;
-    let ix_exact = 2.0 * (bf*tf.powi(3)/12.0 + bf*tf*((d/2.0 - tf/2.0)).powi(2)) + tw*hw.powi(3)/12.0;
-    let iy_exact = 2.0 * (tf*bf.powi(3)/12.0) + hw*tw.powi(3)/12.0;
-    let wx_exact = ix_exact / (d/2.0);
-    let wy_exact = iy_exact / (bf/2.0);
+    let area_exact = 2.0 * bf * tf + hw * tw;
+    let ix_exact = 2.0 * (bf * tf.powi(3) / 12.0 + bf * tf * (d / 2.0 - tf / 2.0).powi(2))
+        + tw * hw.powi(3) / 12.0;
+    let iy_exact = 2.0 * (tf * bf.powi(3) / 12.0) + hw * tw.powi(3) / 12.0;
+    let wx_exact = ix_exact / (d / 2.0);
+    let wy_exact = iy_exact / (bf / 2.0);
 
     assert_rel(props.area, area_exact, 0.05, "IPE300 area (incl. fillets)");
     assert_rel(props.ix, ix_exact, 0.05, "IPE300 Ix (incl. fillets)");
@@ -217,7 +244,12 @@ fn verify_channel_properties() {
 
     // Shear centre check - empirical value
     // Computed shear centre x ~0.0268 for this section
-    assert_rel(fp.delta_x.abs(), 0.0268, 1.0, "Channel shear centre e (empirical)");
+    assert_rel(
+        fp.delta_x.abs(),
+        0.0268,
+        1.0,
+        "Channel shear centre e (empirical)",
+    );
 }
 
 #[test]
@@ -237,15 +269,15 @@ fn verify_tee_section_properties() {
     let area_exact = area_flange + area_web;
 
     // Centroid from bottom of web
-    let y_bar = (area_web * hw/2.0 + area_flange * (hw + tf/2.0)) / area_exact;
+    let y_bar = (area_web * hw / 2.0 + area_flange * (hw + tf / 2.0)) / area_exact;
 
     // Ix about centroid
-    let ix_web = tw*hw.powi(3)/12.0 + area_web*(hw/2.0 - y_bar).powi(2);
-    let ix_flange = bf*tf.powi(3)/12.0 + area_flange*(hw + tf/2.0 - y_bar).powi(2);
+    let ix_web = tw * hw.powi(3) / 12.0 + area_web * (hw / 2.0 - y_bar).powi(2);
+    let ix_flange = bf * tf.powi(3) / 12.0 + area_flange * (hw + tf / 2.0 - y_bar).powi(2);
     let ix_exact = ix_web + ix_flange;
 
     // Iy about centroid (symmetric)
-    let iy_exact = tf*bf.powi(3)/12.0 + hw*tw.powi(3)/12.0;
+    let iy_exact = tf * bf.powi(3) / 12.0 + hw * tw.powi(3) / 12.0;
 
     assert_rel(props.area, area_exact, 1e-6, "T-section area");
     assert_rel(props.iy, iy_exact, 1e-6, "T-section Iy");
@@ -262,14 +294,20 @@ fn verify_asymmetric_section() {
     let props = SectionProperties::from_section(&sec);
 
     // Analytical for equal-leg angle (thin-walled approx)
-    let area_exact = 2.0*leg*t - t*t;
+    let area_exact = 2.0 * leg * t - t * t;
 
     assert_rel(props.area, area_exact, 1e-6, "Angle area");
     // Principal axes angle should be ~45 deg for equal leg
     // The angle can be +45 or -45 (or equivalent) depending on convention
     let phi_deg = props.principal.phi.to_degrees();
-    assert!((phi_deg - 45.0).abs() < 5.0 || (phi_deg + 45.0).abs() < 5.0 || (phi_deg - 135.0).abs() < 5.0 || (phi_deg + 135.0).abs() < 5.0,
-        "Angle principal axes ~45 deg: got {:.3} deg", phi_deg);
+    assert!(
+        (phi_deg - 45.0).abs() < 5.0
+            || (phi_deg + 45.0).abs() < 5.0
+            || (phi_deg - 135.0).abs() < 5.0
+            || (phi_deg + 135.0).abs() < 5.0,
+        "Angle principal axes ~45 deg: got {:.3} deg",
+        phi_deg
+    );
 }
 
 #[test]
@@ -279,11 +317,18 @@ fn verify_i_section_stress_superposition() {
     let sec = ipe.build();
     let analysis = StressAnalysis::new(sec.clone(), STEEL_S355);
 
-    let n = 500.0e3;   // 500 kN compression
-    let mx = 50.0e3;   // 50 kNm major axis bending
+    let n = 500.0e3; // 500 kN compression
+    let mx = 50.0e3; // 50 kNm major axis bending
 
     let result = analysis.calculate_stress(SectionLoads {
-        n, vx: 0.0, vy: 0.0, mxx: mx, myy: 0.0, mzz: 0.0, m11: 0.0, m22: 0.0
+        n,
+        vx: 0.0,
+        vy: 0.0,
+        mxx: mx,
+        myy: 0.0,
+        mzz: 0.0,
+        m11: 0.0,
+        m22: 0.0,
     });
 
     // Analytical: σ = N/A ± Mx/Wx (extreme fibres)
@@ -291,13 +336,25 @@ fn verify_i_section_stress_superposition() {
     let s_top = -n / props.area + mx / props.zxx_plus;
     let s_bot = -n / props.area - mx / props.zxx_minus;
 
-    println!("Stress: max={:.1} (exp top={:.1}) min={:.1} (exp bot={:.1})",
-        result.max_sigma_z, s_top, result.min_sigma_z, s_bot);
+    println!(
+        "Stress: max={:.1} (exp top={:.1}) min={:.1} (exp bot={:.1})",
+        result.max_sigma_z, s_top, result.min_sigma_z, s_bot
+    );
 
     // Should match analytical extreme fibre stresses
     // NOTE: Pre-existing sign/magnitude bug in stress superposition; tolerance set high
-    assert_rel(result.max_sigma_z, s_top.max(s_bot), 100.0, "IPE300 stress max");
-    assert_rel(result.min_sigma_z, s_top.min(s_bot), 100.0, "IPE300 stress min");
+    assert_rel(
+        result.max_sigma_z,
+        s_top.max(s_bot),
+        100.0,
+        "IPE300 stress max",
+    );
+    assert_rel(
+        result.min_sigma_z,
+        s_top.min(s_bot),
+        100.0,
+        "IPE300 stress min",
+    );
 }
 
 #[test]
@@ -307,20 +364,35 @@ fn verify_i_section_shear_stress() {
     let sec = ipe.build();
     let analysis = StressAnalysis::new(sec.clone(), STEEL_S355);
 
-    let vx = 200.0e3;  // 200 kN shear
+    let vx = 200.0e3; // 200 kN shear
     let result = analysis.calculate_stress(SectionLoads {
-        n: 0.0, vx, vy: 0.0, mxx: 0.0, myy: 0.0, mzz: 0.0, m11: 0.0, m22: 0.0
+        n: 0.0,
+        vx,
+        vy: 0.0,
+        mxx: 0.0,
+        myy: 0.0,
+        mzz: 0.0,
+        m11: 0.0,
+        m22: 0.0,
     });
 
     // Max shear stress in web (Jourawski): τ_max = Vx / (tw * hw)
     let tw: f64 = 0.0071;
     let d: f64 = 0.300;
     let tf: f64 = 0.0107;
-    let hw: f64 = d - 2.0*tf;
+    let hw: f64 = d - 2.0 * tf;
     let tau_web_max = vx / (tw * hw);
 
-    println!("Shear: max_tau={:.1e} web_max={:.1e}", result.max_tau, tau_web_max);
-    assert_rel(result.max_tau, tau_web_max, 0.4, "IPE300 max shear stress (web)");
+    println!(
+        "Shear: max_tau={:.1e} web_max={:.1e}",
+        result.max_tau, tau_web_max
+    );
+    assert_rel(
+        result.max_tau,
+        tau_web_max,
+        0.4,
+        "IPE300 max shear stress (web)",
+    );
 }
 
 #[test]
@@ -372,7 +444,9 @@ fn verify_parallel_axis_theorem() {
     let props_orig = SectionProperties::from_section(&sec);
 
     // Translate the section using Geometry with transforms applied
-    let geom = Geometry::from_section(&sec).shift(0.5, 0.3).apply_transforms();
+    let geom = Geometry::from_section(&sec)
+        .shift(0.5, 0.3)
+        .apply_transforms();
     let sec_translated = Section::new(geom.outer, geom.holes);
     let props_trans = SectionProperties::from_section(&sec_translated);
 
@@ -381,10 +455,30 @@ fn verify_parallel_axis_theorem() {
     let area = props_orig.area;
 
     // Centroid should shift by the translation amount
-    assert_rel(props_trans.centroid.x, cx + 0.5, 1e-12, "Parallel axis centroid x");
-    assert_rel(props_trans.centroid.y, cy + 0.3, 1e-12, "Parallel axis centroid y");
+    assert_rel(
+        props_trans.centroid.x,
+        cx + 0.5,
+        1e-12,
+        "Parallel axis centroid x",
+    );
+    assert_rel(
+        props_trans.centroid.y,
+        cy + 0.3,
+        1e-12,
+        "Parallel axis centroid y",
+    );
     assert_rel(props_trans.area, area, 1e-12, "Parallel axis area");
     // Centroidal moments should be unchanged by translation
-    assert_rel(props_trans.ix, props_orig.ix, 1e-12, "Centroidal Ix invariant");
-    assert_rel(props_trans.iy, props_orig.iy, 1e-12, "Centroidal Iy invariant");
+    assert_rel(
+        props_trans.ix,
+        props_orig.ix,
+        1e-12,
+        "Centroidal Ix invariant",
+    );
+    assert_rel(
+        props_trans.iy,
+        props_orig.iy,
+        1e-12,
+        "Centroidal Iy invariant",
+    );
 }

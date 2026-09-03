@@ -5,7 +5,7 @@
 //! feeds nonlinear beam-column analysis programs.
 
 use crate::geometry::Point;
-use crate::mesh::{MeshParams, Mesh, mesh_section};
+use crate::mesh::{Mesh, MeshParams, mesh_section};
 use crate::section::Section;
 
 /// A single uniaxial fibre.
@@ -30,10 +30,7 @@ impl Fiber {
 ///
 /// Mirrors Python `to_fibre_section`, which converts the FE mesh into fibres
 /// grouped by element.
-pub fn to_fibre_section(
-    section: &Section,
-    params: MeshParams,
-) -> Vec<Fiber> {
+pub fn to_fibre_section(section: &Section, params: MeshParams) -> Vec<Fiber> {
     let mesh: Mesh = mesh_section(section, params);
     to_fibre_from_mesh(&mesh)
 }
@@ -130,7 +127,13 @@ mod tests {
     #[test]
     fn fibre_total_area_matches() {
         let sec = rect_section(0.1, 0.2);
-        let fibres = to_fibre_section(&sec, MeshParams { target_size: 0.02, ..Default::default() });
+        let fibres = to_fibre_section(
+            &sec,
+            MeshParams {
+                target_size: 0.02,
+                ..Default::default()
+            },
+        );
         assert!(rel_err(total_area(&fibres), 0.02) < 1e-3);
     }
 
@@ -138,7 +141,13 @@ mod tests {
     fn fibre_plastic_moment_rectangle() {
         let sec = rect_section(0.1, 0.2);
         let fy = 355.0e6;
-        let fibres = to_fibre_section(&sec, MeshParams { target_size: 0.01, ..Default::default() });
+        let fibres = to_fibre_section(
+            &sec,
+            MeshParams {
+                target_size: 0.01,
+                ..Default::default()
+            },
+        );
         let m_pl = plastic_moment_x(&fibres, fy);
         let expected = 0.1 * 0.04 / 4.0 * fy; // b*h^2/4 * fy
         assert!(

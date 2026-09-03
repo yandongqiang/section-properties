@@ -98,17 +98,25 @@ impl Geometry {
     ///
     /// Mirrors `Geometry.rotate(angle_degrees, rot_point)`.
     pub fn rotate(mut self, angle_degrees: f64) -> Self {
-        self.transforms
-            .push(Transform::Rotate { angle: angle_degrees.to_radians() });
+        self.transforms.push(Transform::Rotate {
+            angle: angle_degrees.to_radians(),
+        });
         self
     }
 
     /// Rotate about an explicit point.
     pub fn rotate_about(mut self, angle_degrees: f64, point: Point) -> Self {
-        self.transforms.push(Transform::Translate { dx: -point.x, dy: -point.y });
-        self.transforms
-            .push(Transform::Rotate { angle: angle_degrees.to_radians() });
-        self.transforms.push(Transform::Translate { dx: point.x, dy: point.y });
+        self.transforms.push(Transform::Translate {
+            dx: -point.x,
+            dy: -point.y,
+        });
+        self.transforms.push(Transform::Rotate {
+            angle: angle_degrees.to_radians(),
+        });
+        self.transforms.push(Transform::Translate {
+            dx: point.x,
+            dy: point.y,
+        });
         self
     }
 
@@ -138,7 +146,8 @@ impl Geometry {
     pub fn align_center(&self) -> Self {
         let c = self.centroid();
         let mut g = self.clone();
-        g.transforms.push(Transform::Translate { dx: -c.x, dy: -c.y });
+        g.transforms
+            .push(Transform::Translate { dx: -c.x, dy: -c.y });
         g
     }
 
@@ -151,8 +160,16 @@ impl Geometry {
         let (l1, r1, b1, t1) = self.bounds();
         let (l2, r2, b2, t2) = other.bounds();
 
-        let dx = if (l1 - l2).abs() < (r1 - r2).abs() { l2 - l1 } else { r2 - r1 };
-        let dy = if (b1 - b2).abs() < (t1 - t2).abs() { b2 - b1 } else { t2 - t1 };
+        let dx = if (l1 - l2).abs() < (r1 - r2).abs() {
+            l2 - l1
+        } else {
+            r2 - r1
+        };
+        let dy = if (b1 - b2).abs() < (t1 - t2).abs() {
+            b2 - b1
+        } else {
+            t2 - t1
+        };
 
         if dx == 0.0 && dy == 0.0 {
             return self.clone();
@@ -175,7 +192,11 @@ impl Geometry {
         for h in &self.holes {
             holes.push(h.offset(-amount)?);
         }
-        Some(Self { outer, holes, transforms: Vec::new() })
+        Some(Self {
+            outer,
+            holes,
+            transforms: Vec::new(),
+        })
     }
 
     /// Split the geometry into two halves either side of the line through
@@ -183,11 +204,7 @@ impl Geometry {
     ///
     /// Mirrors `Geometry.split_section(point_a, point_b)`. Returns
     /// `(below, above)`; each side is `None` when empty.
-    pub fn split_section(
-        &self,
-        a: Point,
-        b: Point,
-    ) -> (Option<Geometry>, Option<Geometry>) {
+    pub fn split_section(&self, a: Point, b: Point) -> (Option<Geometry>, Option<Geometry>) {
         let g = self.apply_transforms();
         let (below_outer, above_outer) = g.outer.split_by_line(a, b);
 
@@ -204,10 +221,16 @@ impl Geometry {
             }
         }
 
-        let below = below_outer
-            .map(|o| Geometry { outer: o, holes: below_holes, transforms: Vec::new() });
-        let above = above_outer
-            .map(|o| Geometry { outer: o, holes: above_holes, transforms: Vec::new() });
+        let below = below_outer.map(|o| Geometry {
+            outer: o,
+            holes: below_holes,
+            transforms: Vec::new(),
+        });
+        let above = above_outer.map(|o| Geometry {
+            outer: o,
+            holes: above_holes,
+            transforms: Vec::new(),
+        });
         (below, above)
     }
     /// Boolean union with `other`.
@@ -222,7 +245,10 @@ impl Geometry {
     ///
     /// Mirrors `Geometry & other` (shapely `intersection`). Returns a
     /// `CompoundGeometry` that can represent multiple disconnected regions.
-    pub fn intersection(&self, other: &Self) -> Result<CompoundGeometry, super::boolean::BooleanError> {
+    pub fn intersection(
+        &self,
+        other: &Self,
+    ) -> Result<CompoundGeometry, super::boolean::BooleanError> {
         self.boolean_op(other, super::boolean::BoolOp::Intersection)
     }
 
@@ -366,8 +392,8 @@ impl Geometry {
 /// under this assumption.
 ///
 /// Use [`CompoundGeometry::validate`] to check the invariant, and
-    /// [`CompoundGeometry::dissolved_outer_only`] to merge overlapping inputs into a valid
-    /// compound.
+/// [`CompoundGeometry::dissolved_outer_only`] to merge overlapping inputs into a valid
+/// compound.
 #[derive(Debug, Clone)]
 pub struct CompoundGeometry {
     /// The individual regions that make up the compound section.
@@ -395,10 +421,16 @@ impl std::fmt::Display for CompoundError {
                 write!(f, "regions {a} and {b} have overlapping material")
             }
             CompoundError::HoleNotInsideOuter { region, hole } => {
-                write!(f, "hole {hole} of region {region} is not fully inside its outer boundary")
+                write!(
+                    f,
+                    "hole {hole} of region {region} is not fully inside its outer boundary"
+                )
             }
             CompoundError::NestedHoles { region, a, b } => {
-                write!(f, "region {region} has hole {b} nested inside hole {a} (holes cannot nest)")
+                write!(
+                    f,
+                    "region {region} has hole {b} nested inside hole {a} (holes cannot nest)"
+                )
             }
         }
     }
@@ -423,7 +455,12 @@ enum BBoxRelation {
 fn outer_bbox_relation(a: &Polygon, b: &Polygon) -> BBoxRelation {
     let bbox = |pts: &[Point]| {
         pts.iter().fold(
-            (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+            (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ),
             |(l, r, b, t), p| (l.min(p.x), r.max(p.x), b.min(p.y), t.max(p.y)),
         )
     };
@@ -473,7 +510,10 @@ impl CompoundGeometry {
     /// if required). This is a union of outer boundaries only.
     ///
     /// Prefer [`Self::dissolved_outer_only`] for explicit naming.
-    #[deprecated(since = "0.1.0", note = "Use dissolved_outer_only() for explicit naming; holes are dropped")]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use dissolved_outer_only() for explicit naming; holes are dropped"
+    )]
     pub fn dissolved(geometries: Vec<Geometry>) -> Self {
         Self::dissolved_outer_only(geometries)
     }
@@ -483,16 +523,21 @@ impl CompoundGeometry {
     /// only outer boundaries are united. This is a union of outer boundaries
     /// only; holes must be re-derived afterwards if required.
     pub fn dissolved_outer_only(geometries: Vec<Geometry>) -> Self {
-        use super::boolean::{polygon_boolean, BoolOp};
+        use super::boolean::{BoolOp, polygon_boolean};
 
-        let mut acc: Vec<Polygon> =
-            geometries.iter().map(|g| g.apply_transforms().outer).collect();
+        let mut acc: Vec<Polygon> = geometries
+            .iter()
+            .map(|g| g.apply_transforms().outer)
+            .collect();
 
         loop {
             let mut merged: Option<(usize, usize, Vec<Polygon>)> = None;
             'outer: for i in 0..acc.len() {
                 for j in (i + 1)..acc.len() {
-                    if matches!(outer_bbox_relation(&acc[i], &acc[j]), BBoxRelation::Disjoint) {
+                    if matches!(
+                        outer_bbox_relation(&acc[i], &acc[j]),
+                        BBoxRelation::Disjoint
+                    ) {
                         continue;
                     }
                     let u = polygon_boolean(&acc[i], &acc[j], BoolOp::Union);
@@ -517,7 +562,11 @@ impl CompoundGeometry {
 
         let geometries = acc
             .into_iter()
-            .map(|p| Geometry { outer: p, holes: Vec::new(), transforms: Vec::new() })
+            .map(|p| Geometry {
+                outer: p,
+                holes: Vec::new(),
+                transforms: Vec::new(),
+            })
             .collect();
         Self { geometries }
     }
@@ -535,7 +584,10 @@ impl CompoundGeometry {
                 // 1. All hole vertices must be inside outer.
                 let vertices_inside = hole.vertices.iter().all(|v| g.outer.contains_point(*v));
                 if !vertices_inside {
-                    return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
+                    return Err(CompoundError::HoleNotInsideOuter {
+                        region: ri,
+                        hole: hi,
+                    });
                 }
                 // 2. No hole edge may cross outer boundary edge.
                 for i in 0..hole.vertices.len() {
@@ -545,7 +597,10 @@ impl CompoundGeometry {
                         let o1 = g.outer.vertices[j];
                         let o2 = g.outer.vertices[(j + 1) % g.outer.vertices.len()];
                         if segments_interact(h1, h2, o1, o2) {
-                            return Err(CompoundError::HoleNotInsideOuter { region: ri, hole: hi });
+                            return Err(CompoundError::HoleNotInsideOuter {
+                                region: ri,
+                                hole: hi,
+                            });
                         }
                     }
                 }
@@ -581,8 +636,11 @@ impl CompoundGeometry {
             return Ok(());
         }
 
-        let applied: Vec<Geometry> =
-            self.geometries.iter().map(|g| g.apply_transforms()).collect();
+        let applied: Vec<Geometry> = self
+            .geometries
+            .iter()
+            .map(|g| g.apply_transforms())
+            .collect();
 
         for i in 0..n {
             for j in (i + 1)..n {
@@ -608,11 +666,15 @@ impl CompoundGeometry {
     /// Mirrors `CompoundGeometry.combine(other, operation)`:
     /// - Union: all regions of both compounds unioned pairwise into one
     ///   accumulated set (dissolves internal overlaps).
-/// - Intersection: every region pair intersected, keeping non-empty
+    /// - Intersection: every region pair intersected, keeping non-empty
     ///   results.
     /// - Difference: each region of `self` reduced by every region of
     ///   `other` in sequence.
-    pub fn boolean(&self, other: &Self, op: super::boolean::BoolOp) -> Result<Self, super::boolean::BooleanError> {
+    pub fn boolean(
+        &self,
+        other: &Self,
+        op: super::boolean::BoolOp,
+    ) -> Result<Self, super::boolean::BooleanError> {
         match op {
             super::boolean::BoolOp::Intersection => {
                 // Intersection: pairwise intersection of all region pairs
@@ -630,7 +692,7 @@ impl CompoundGeometry {
             super::boolean::BoolOp::Difference => {
                 // Start with all self regions
                 let mut current: Vec<Geometry> = self.geometries.clone();
-                
+
                 // Subtract each other region from all current regions
                 for gb in &other.geometries {
                     let mut next = Vec::new();
@@ -645,7 +707,11 @@ impl CompoundGeometry {
                 }
                 let geometries = current
                     .into_iter()
-                    .map(|g| Geometry { outer: g.outer, holes: g.holes, transforms: Vec::new() })
+                    .map(|g| Geometry {
+                        outer: g.outer,
+                        holes: g.holes,
+                        transforms: Vec::new(),
+                    })
                     .collect();
                 Ok(Self { geometries })
             }
@@ -663,11 +729,14 @@ impl CompoundGeometry {
                     let mut merged: Option<(usize, usize, Vec<Geometry>)> = None;
                     'outer: for i in 0..acc.len() {
                         for j in (i + 1)..acc.len() {
-                            if matches!(outer_bbox_relation(&acc[i].outer, &acc[j].outer), BBoxRelation::Disjoint) {
+                            if matches!(
+                                outer_bbox_relation(&acc[i].outer, &acc[j].outer),
+                                BBoxRelation::Disjoint
+                            ) {
                                 continue;
                             }
-                            let union_result = acc[i]
-                                .boolean_op(&acc[j], super::boolean::BoolOp::Union)?;
+                            let union_result =
+                                acc[i].boolean_op(&acc[j], super::boolean::BoolOp::Union)?;
                             // Only merge if the union actually produced a SINGLE region.
                             // If it returns 2+ regions, the inputs were material-disjoint
                             // (e.g. same outer bbox but holes isolate materials) and
@@ -836,26 +905,28 @@ fn regions_overlap_deterministic(a: &Geometry, b: &Geometry) -> bool {
     // 1. Edge–edge intersection between the two outer boundaries.
     //    Only counts if the intersection point is in the MATERIAL
     //    of both regions (not inside any hole).
-for i in 0..a_outer.vertices.len() {
-            let a1 = a_outer.vertices[i];
-            let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
-            for j in 0..b_outer.vertices.len() {
-                let b1 = b_outer.vertices[j];
-                let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
-                if segments_overlap(a1, a2, b1, b2) {
-                    // Compute a representative point on the overlap.
-                    // Use the midpoint of the overlapping segment or the
-                    // intersection point itself.
-                    let pt = intersection_point(a1, a2, b1, b2);
-                    // Check if this point is in material of BOTH regions
-                    let in_a_material = a_outer.contains_point(pt) && !a.holes.iter().any(|h| h.contains_point(pt));
-                    let in_b_material = b_outer.contains_point(pt) && !b.holes.iter().any(|h| h.contains_point(pt));
-                    if in_a_material && in_b_material {
-                        return true;
-                    }
+    for i in 0..a_outer.vertices.len() {
+        let a1 = a_outer.vertices[i];
+        let a2 = a_outer.vertices[(i + 1) % a_outer.vertices.len()];
+        for j in 0..b_outer.vertices.len() {
+            let b1 = b_outer.vertices[j];
+            let b2 = b_outer.vertices[(j + 1) % b_outer.vertices.len()];
+            if segments_overlap(a1, a2, b1, b2) {
+                // Compute a representative point on the overlap.
+                // Use the midpoint of the overlapping segment or the
+                // intersection point itself.
+                let pt = intersection_point(a1, a2, b1, b2);
+                // Check if this point is in material of BOTH regions
+                let in_a_material =
+                    a_outer.contains_point(pt) && !a.holes.iter().any(|h| h.contains_point(pt));
+                let in_b_material =
+                    b_outer.contains_point(pt) && !b.holes.iter().any(|h| h.contains_point(pt));
+                if in_a_material && in_b_material {
+                    return true;
                 }
             }
         }
+    }
 
     // 2. Vertex containment: any vertex of `a` inside `b`'s material?
     for v in &a_outer.vertices {
@@ -879,7 +950,8 @@ for i in 0..a_outer.vertices.len() {
 
     if a_in_b || b_in_a {
         // Compute the boolean intersection of the two outer polygons.
-        let inter = super::boolean::polygon_boolean(a_outer, b_outer, super::boolean::BoolOp::Intersection);
+        let inter =
+            super::boolean::polygon_boolean(a_outer, b_outer, super::boolean::BoolOp::Intersection);
         if inter.is_empty() {
             return false;
         }
@@ -889,7 +961,8 @@ for i in 0..a_outer.vertices.len() {
         for hole in a.holes.iter().chain(b.holes.iter()) {
             let mut next = Vec::new();
             for p in &remaining {
-                let diff = super::boolean::polygon_boolean(p, hole, super::boolean::BoolOp::Difference);
+                let diff =
+                    super::boolean::polygon_boolean(p, hole, super::boolean::BoolOp::Difference);
                 next.extend(diff);
             }
             remaining = next;
@@ -927,8 +1000,10 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
 
     fn on_segment(p: Point, q: Point, r: Point) -> bool {
         // q lies on segment pr (assuming collinear)
-        q.x >= p.x.min(r.x) - EPS && q.x <= p.x.max(r.x) + EPS &&
-        q.y >= p.y.min(r.y) - EPS && q.y <= p.y.max(r.y) + EPS
+        q.x >= p.x.min(r.x) - EPS
+            && q.x <= p.x.max(r.x) + EPS
+            && q.y >= p.y.min(r.y) - EPS
+            && q.y <= p.y.max(r.y) + EPS
     }
 
     fn points_equal(p: Point, q: Point) -> bool {
@@ -950,8 +1025,7 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
     let o4_pos = o4 > EPS;
     let o4_neg = o4 < -EPS;
 
-    if (o1_pos != o2_pos || o1_neg != o2_neg) &&
-       (o3_pos != o4_pos || o3_neg != o4_neg) {
+    if (o1_pos != o2_pos || o1_neg != o2_neg) && (o3_pos != o4_pos || o3_neg != o4_neg) {
         return SegmentRelation::ProperCross;
     }
 
@@ -979,22 +1053,26 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
             // If the overlap is just a single point, it's Touch.
             let len_a2 = (a2.x - a1.x).powi(2) + (a2.y - a1.y).powi(2);
             let len_b2 = (b2.x - b1.x).powi(2) + (b2.y - b1.y).powi(2);
-            
+
             // Project b1, b2 onto segment a's line (parameter t in [0,1])
             let t_b1 = if len_a2 > EPS {
                 ((b1.x - a1.x) * (a2.x - a1.x) + (b1.y - a1.y) * (a2.y - a1.y)) / len_a2
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             let t_b2 = if len_a2 > EPS {
                 ((b2.x - a1.x) * (a2.x - a1.x) + (b2.y - a1.y) * (a2.y - a1.y)) / len_a2
-            } else { 0.0 };
-            
+            } else {
+                0.0
+            };
+
             let b_lo = t_b1.min(t_b2);
             let b_hi = t_b1.max(t_b2);
-            
+
             // Overlap interval on segment a's parameter space
             let lo = 0.0f64.max(b_lo);
             let hi = 1.0f64.min(b_hi);
-            
+
             if lo <= hi {
                 let overlap_len = (hi - lo) * len_a2.sqrt();
                 if overlap_len > EPS {
@@ -1055,7 +1133,10 @@ fn points_equal(p: Point, q: Point) -> bool {
 /// the line through the other. Touching at a single endpoint is **not**
 /// considered a cross (shared-vertex configurations are allowed).
 fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
-    matches!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross)
+    matches!(
+        segment_relation(a1, a2, b1, b2),
+        SegmentRelation::ProperCross
+    )
 }
 
 /// Check if two segments have any topological interaction (crossing, touching, or collinear overlap).
@@ -1085,7 +1166,10 @@ mod tests {
         let a2 = Point::new(10.0, 10.0);
         let b1 = Point::new(0.0, 10.0);
         let b2 = Point::new(10.0, 0.0);
-        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross);
+        assert_eq!(
+            segment_relation(a1, a2, b1, b2),
+            SegmentRelation::ProperCross
+        );
         assert!(segments_overlap(a1, a2, b1, b2));
         assert!(segments_interact(a1, a2, b1, b2));
     }
@@ -1109,7 +1193,10 @@ mod tests {
         let a2 = Point::new(10.0, 0.0);
         let b1 = Point::new(5.0, 0.0);
         let b2 = Point::new(15.0, 0.0);
-        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::CollinearOverlap);
+        assert_eq!(
+            segment_relation(a1, a2, b1, b2),
+            SegmentRelation::CollinearOverlap
+        );
         assert!(segments_overlap(a1, a2, b1, b2));
         assert!(segments_interact(a1, a2, b1, b2));
     }
@@ -1146,7 +1233,10 @@ mod tests {
         let a2 = Point::new(10.0, 10.0);
         let b1 = Point::new(0.0, 10.0);
         let b2 = Point::new(10.0, 0.0);
-        assert_eq!(segment_relation(a1, a2, b1, b2), SegmentRelation::ProperCross);
+        assert_eq!(
+            segment_relation(a1, a2, b1, b2),
+            SegmentRelation::ProperCross
+        );
         assert!(segments_overlap(a1, a2, b1, b2));
     }
 }

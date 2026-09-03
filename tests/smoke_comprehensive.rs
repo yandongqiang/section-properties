@@ -3,18 +3,16 @@
 //! Each test targets one module cluster; failures indicate regressions or
 //! misalignment with Python sectionproperties behaviour.
 
-use section_properties::fea::{solvers, SkylineLdlt};
+use section_properties::fea::{SkylineLdlt, solvers};
 use section_properties::io::*;
-use section_properties::to_html;
 use section_properties::material::presets::STEEL_S355;
 use section_properties::mesh::FemSectionAnalysis;
-use section_properties::plastic::{
-    InteractionDiagram, LoadCase3D, PlasticAnalysis, PlasticAxis,
-};
+use section_properties::plastic::{InteractionDiagram, LoadCase3D, PlasticAnalysis, PlasticAxis};
 use section_properties::section_library::primitive::*;
 use section_properties::section_library::steel::{AngleSection, ChannelSection, ISection};
 use section_properties::section_library::{CompositeSection, ParametricSection};
 use section_properties::stress::{SectionLoads, StressAnalysis};
+use section_properties::to_html;
 use section_properties::{Point, SectionProperties};
 
 fn rel(a: f64, b: f64) -> f64 {
@@ -36,7 +34,7 @@ fn smoke_geometry_transforms_and_boolean() {
     assert!(c.x.abs() < 1e-12);
 
     // boolean union of two overlapping squares keeps area identity
-    use section_properties::geometry::{polygon_boolean, BoolOp};
+    use section_properties::geometry::{BoolOp, polygon_boolean};
     let sq = |x0| {
         section_properties::Polygon::new(vec![
             Point::new(x0, 0.0),
@@ -73,12 +71,15 @@ fn smoke_offset_hollow() {
 fn smoke_section_libraries_build() {
     // Every parametric section must build and produce positive area.
     let secs: Vec<(&str, section_properties::Section)> = vec![
-        ("IPE300", ISection::from_designation("IPE300").unwrap().build()),
-        ("UPN200", ChannelSection::from_designation("UPN200").unwrap().build()),
         (
-            "L100x10",
-            AngleSection::equal_leg(0.1, 0.01).build(),
+            "IPE300",
+            ISection::from_designation("IPE300").unwrap().build(),
         ),
+        (
+            "UPN200",
+            ChannelSection::from_designation("UPN200").unwrap().build(),
+        ),
+        ("L100x10", AngleSection::equal_leg(0.1, 0.01).build()),
     ];
     for (name, sec) in &secs {
         let props = SectionProperties::from_section(sec);
@@ -165,10 +166,8 @@ fn smoke_interaction_capacity_ordering() {
     // Increasing axial load reduces bending capacity (monotone surface).
     let mut prev_m = m_rd;
     for frac in [0.25f64, 0.5, 0.75] {
-        let chk = diagram.check_capacity_exact(
-            LoadCase3D::new(frac * n_rd * 0.9, m_rd * 0.95, 0.0),
-            1.0,
-        );
+        let chk =
+            diagram.check_capacity_exact(LoadCase3D::new(frac * n_rd * 0.9, m_rd * 0.95, 0.0), 1.0);
         let _ = prev_m;
         assert!(
             chk.utilization.is_finite(),
@@ -201,7 +200,12 @@ fn smoke_stress_axial_plus_bending() {
     let wel = 0.1 * 0.04 / 6.0;
     let top = 50e3 / area + 5e3 / wel;
     let bot = 50e3 / area - 5e3 / wel;
-    assert!(rel(result.max_sigma_z.max(result.min_sigma_z.abs()), top.max(bot.abs())) < 0.01);
+    assert!(
+        rel(
+            result.max_sigma_z.max(result.min_sigma_z.abs()),
+            top.max(bot.abs())
+        ) < 0.01
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +217,11 @@ fn smoke_fem_analysis_validation() {
     let rect = RectangularSection::new(0.1, 0.2).build();
     let mut fem = FemSectionAnalysis::new(rect, STEEL_S355);
     let cmp = fem.validate_properties();
-    assert!(cmp.area_diff_pct < 0.5, "FEM area diff {}%", cmp.area_diff_pct);
+    assert!(
+        cmp.area_diff_pct < 0.5,
+        "FEM area diff {}%",
+        cmp.area_diff_pct
+    );
     assert!(cmp.ix_diff_pct < 1.0, "FEM Ix diff {}%", cmp.ix_diff_pct);
     assert!(cmp.iy_diff_pct < 1.0, "FEM Iy diff {}%", cmp.iy_diff_pct);
 }
@@ -292,7 +300,7 @@ fn smoke_solver_backends_agree() {
             k.add(i + 1, i, -1.0);
         }
     }
-let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
+    let f: Vec<f64> = (0..n).map(|i| ((i % 4) as f64 - 1.5)).collect();
 
     let mut k2 = k.clone();
     k2.compress();
@@ -341,10 +349,16 @@ fn smoke_split_section() {
 
 #[test]
 fn smoke_fibre_section() {
-    use section_properties::post::{to_fibre_section, total_area};
     use section_properties::MeshParams;
+    use section_properties::post::{to_fibre_section, total_area};
     let sec = ISection::from_designation("IPE300").unwrap().build();
-    let fibres = to_fibre_section(&sec, MeshParams { target_size: 0.03, ..Default::default() });
+    let fibres = to_fibre_section(
+        &sec,
+        MeshParams {
+            target_size: 0.03,
+            ..Default::default()
+        },
+    );
     let total = total_area(&fibres);
     assert!(rel(total, 5.38e-3) < 0.01, "fibre area {}", total);
 }
@@ -386,7 +400,11 @@ fn smoke_compound_boolean() {
     // A area=2, B=1, overlap with A = 2*0.25=0.5 -> union = 2+1-0.5=2.5
     let u = a.union(&b).unwrap();
     let expected_union = 2.0 + 1.0 - 0.5;
-    assert!((u.area() - expected_union).abs() < 5e-2, "union {}", u.area());
+    assert!(
+        (u.area() - expected_union).abs() < 5e-2,
+        "union {}",
+        u.area()
+    );
 
     // Intersection: b ∩ a = 0.5
     let i = a.intersection(&b).unwrap();
@@ -397,8 +415,7 @@ fn smoke_compound_boolean() {
 fn smoke_warping_svg() {
     let sec = ChannelSection::new(0.2, 0.075, 0.005, 0.008, 0.0, 0.0).build();
     let props = SectionProperties::from_section(&sec);
-    let svg = section_properties::warping_svg(&sec, &props, 800, 600, 0.3)
-        .expect("warping svg");
+    let svg = section_properties::warping_svg(&sec, &props, 800, 600, 0.3).expect("warping svg");
     assert!(svg.contains("<svg"));
     assert!(svg.contains("wleg")); // legend gradient id
     assert!(svg.contains("rgb(")); // coloured elements
@@ -431,7 +448,7 @@ fn smoke_compound_validate_and_dissolve() {
         other => panic!("expected overlap error, got {:?}", other.map(|_| ())),
     }
 
-// Naive area double-counts; dissolved does not.
+    // Naive area double-counts; dissolved does not.
     // overlap = [−0.25,0.25]×[−0.5,0.5] = 0.5 → naive sums
     // both areas fully (2.0); true union = 1.5.
     assert!((overlapping.area() - 2.0).abs() < 1e-9);

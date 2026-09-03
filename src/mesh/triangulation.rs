@@ -726,7 +726,9 @@ impl MeshControl {
                 //   which is intended for very thin walls — but a tiny discretisation edge
                 //   (e.g. a root-radius arc segment) must not blow the mesh up, so never go
                 //   finer than max_dim/40.
-                base.max(max_dim / 20.0).min(min_edge / 2.0).max(max_dim / 40.0)
+                base.max(max_dim / 20.0)
+                    .min(min_edge / 2.0)
+                    .max(max_dim / 40.0)
             }
             MeshControl::Fine | MeshControl::VeryFine => {
                 // For fine meshes, use min edge length but cap at base

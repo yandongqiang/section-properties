@@ -816,7 +816,6 @@ mod tests {
     use crate::section_library::ParametricSection;
     use crate::section_library::concrete::RectangularConcreteSection;
     use crate::section_library::steel::ISection;
-    
 
     #[test]
     fn composite_single_material() {

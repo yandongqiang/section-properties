@@ -276,10 +276,8 @@ impl SectionProperties {
         // Maximum fiber distances measure from the centroid to the extreme
         // boundary of the section (used for elastic section modulus).
         // Track positive and negative extremes separately (Python convention).
-        let all_boundary: Vec<&dyn BoundaryExtrema> = polygons
-            .iter()
-            .map(|p| p as &dyn BoundaryExtrema)
-            .collect();
+        let all_boundary: Vec<&dyn BoundaryExtrema> =
+            polygons.iter().map(|p| p as &dyn BoundaryExtrema).collect();
         let (y_min, y_max) = all_boundary
             .iter()
             .map(|b| b.extreme_y(centroid))
@@ -1371,4 +1369,3 @@ mod tests {
         );
     }
 }
-

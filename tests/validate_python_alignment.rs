@@ -2,6 +2,7 @@
 //! library's own test suite. Each failing assertion indicates a functional
 //! discrepancy to investigate.
 
+use section_properties::material::presets::STEEL_S355;
 use section_properties::plastic::{PlasticAnalysis, PlasticAxis};
 use section_properties::section_library::ParametricSection;
 use section_properties::section_library::primitive::{
@@ -9,7 +10,6 @@ use section_properties::section_library::primitive::{
 };
 use section_properties::section_library::steel::ISection;
 use section_properties::stress::{SectionLoads, StressAnalysis};
-use section_properties::material::presets::STEEL_S355;
 use std::f64::consts::PI;
 
 fn rel(a: f64, b: f64) -> f64 {
@@ -28,8 +28,12 @@ fn report_i_section_warping_constant() {
     let hw = d - tf;
     let iw_analytic = tf * bf.powi(3) / 24.0 * hw.powi(2);
     println!("IPE300 (m): d={d} bf={bf} tw={tw} tf={tf}");
-    println!("Iw computed = {:.6e}, analytic = {:.6e}, rel err = {:.3e}",
-        fp.iw, iw_analytic, rel(fp.iw, iw_analytic));
+    println!(
+        "Iw computed = {:.6e}, analytic = {:.6e}, rel err = {:.3e}",
+        fp.iw,
+        iw_analytic,
+        rel(fp.iw, iw_analytic)
+    );
     assert!(rel(fp.iw, iw_analytic) < 0.05, "Iw mismatch");
 }
 
@@ -52,8 +56,12 @@ fn report_chs_torsion_constant_bredt() {
     let s = 2.0 * PI * rm;
     let j_bredt = 4.0 * am * am * 0.0082 / s;
 
-    println!("CHS J computed = {:.6e}, Bredt = {:.6e}, rel err = {:.3e}",
-        props.j, j_bredt, rel(props.j, j_bredt));
+    println!(
+        "CHS J computed = {:.6e}, Bredt = {:.6e}, rel err = {:.3e}",
+        props.j,
+        j_bredt,
+        rel(props.j, j_bredt)
+    );
     assert!(rel(props.j, j_bredt) < 0.05, "J mismatch");
 }
 
@@ -68,7 +76,10 @@ fn report_rectangle_plastic_modulus() {
     // Zpl,x = b*h^2/4
     let z_expected = 0.1 * 0.2_f64.powi(4).sqrt() * 0.2; // placeholder guard
     let z_true = 0.1 * 0.04 / 4.0; // b h^2/4 = 0.0002 m^3
-    println!("Zpl computed = {:.6e}, expected = {:.6e}", pp.plastic_section_modulus, z_true);
+    println!(
+        "Zpl computed = {:.6e}, expected = {:.6e}",
+        pp.plastic_section_modulus, z_true
+    );
     let _ = z_expected;
     assert!(rel(pp.plastic_section_modulus, z_true) < 0.01);
 }
@@ -82,17 +93,38 @@ fn report_stress_superposition() {
 
     let n = 100.0e3;
     let mx = 10.0e3; // N·m
-    let result = analysis.calculate_stress(SectionLoads { n, vx: 0.0, vy: 0.0, mxx: mx, myy: 0.0, mzz: 0.0, m11: 0.0, m22: 0.0 });
+    let result = analysis.calculate_stress(SectionLoads {
+        n,
+        vx: 0.0,
+        vy: 0.0,
+        mxx: mx,
+        myy: 0.0,
+        mzz: 0.0,
+        m11: 0.0,
+        m22: 0.0,
+    });
 
     let area = 0.02;
     let zx = 0.1 * 0.2_f64.powi(2) / 6.0; // elastic modulus
     let s_max_top = n / area + mx / zx;
     let s_min_bot = n / area - mx / zx;
 
-    println!("max sigma_zz = {:.1}, expected top = {:.1}", result.max_sigma_z, s_max_top);
-    println!("min sigma_zz = {:.1}, expected bot = {:.1}", result.min_sigma_z, s_min_bot);
-    assert!(rel(result.max_sigma_z, s_max_top) < 0.01, "max stress mismatch");
-    assert!(rel(result.min_sigma_z.abs(), s_min_bot.abs()) < 0.01, "min stress mismatch");
+    println!(
+        "max sigma_zz = {:.1}, expected top = {:.1}",
+        result.max_sigma_z, s_max_top
+    );
+    println!(
+        "min sigma_zz = {:.1}, expected bot = {:.1}",
+        result.min_sigma_z, s_min_bot
+    );
+    assert!(
+        rel(result.max_sigma_z, s_max_top) < 0.01,
+        "max stress mismatch"
+    );
+    assert!(
+        rel(result.min_sigma_z.abs(), s_min_bot.abs()) < 0.01,
+        "min stress mismatch"
+    );
 }
 
 #[test]
@@ -100,10 +132,14 @@ fn report_circular_section_moments() {
     let circ = CircularSection::new(0.1);
     let props = section_properties::SectionProperties::from_section(&circ.build());
     let ix_exact = PI * 0.1_f64.powi(4) / 4.0;
-    println!("Ix = {:.6e}, exact = {:.6e}, rel err = {:.3e}", props.ix, ix_exact, rel(props.ix, ix_exact));
+    println!(
+        "Ix = {:.6e}, exact = {:.6e}, rel err = {:.3e}",
+        props.ix,
+        ix_exact,
+        rel(props.ix, ix_exact)
+    );
     assert!(rel(props.ix, ix_exact) < 0.01); // 64-gon approximation error (same in Python)
 }
-
 
 #[test]
 fn report_solid_circle_j() {
@@ -111,7 +147,12 @@ fn report_solid_circle_j() {
     let sec = circ.build();
     let fp = sec.frame_properties_full(0.3);
     let ip = PI * 0.1_f64.powi(4) / 2.0;
-    println!("solid circle J = {:.6e}, Ip exact = {:.6e}, rel err = {:.3e}", fp.j, ip, rel(fp.j, ip));
+    println!(
+        "solid circle J = {:.6e}, Ip exact = {:.6e}, rel err = {:.3e}",
+        fp.j,
+        ip,
+        rel(fp.j, ip)
+    );
 }
 
 #[test]
@@ -121,7 +162,8 @@ fn report_channel_shear_centre() {
     let bf = 0.075_f64;
     let tw = 0.005_f64;
     let tf = 0.008_f64;
-    let ch = section_properties::section_library::steel::ChannelSection::new(d, bf, tw, tf, 0.0, 0.0);
+    let ch =
+        section_properties::section_library::steel::ChannelSection::new(d, bf, tw, tf, 0.0, 0.0);
     let sec = ch.build();
     let fp = sec.frame_properties_full(0.3);
 
@@ -137,10 +179,14 @@ fn report_channel_shear_centre() {
     // Shear centre distance from web centreline (thin-walled):
     // e = 3*bf^2*tw*d^2... classic: e = bf^2*h*tw / (4*Iyy) * ... use:
     let h_w = d - 2.0 * tf;
-    let iyy = 2.0 * (tf * bf.powi(3) / 12.0 + bf * tf * (tw + bf / 2.0 - xc).powi(2)) + (d - 2.0*tf) * tw.powi(3) / 12.0;
-    let e = (h_w * tw * bf.powi(2) * (bf/2.0 + tw - xc)) / (4.0 * iyy) * 2.0; // approx
+    let iyy = 2.0 * (tf * bf.powi(3) / 12.0 + bf * tf * (tw + bf / 2.0 - xc).powi(2))
+        + (d - 2.0 * tf) * tw.powi(3) / 12.0;
+    let e = (h_w * tw * bf.powi(2) * (bf / 2.0 + tw - xc)) / (4.0 * iyy) * 2.0; // approx
     // Just check sign & rough magnitude: shear centre on the far side of web
-    println!("channel xc={:.5} shear_center=({:.5},{:.5}) e_approx={:.5}", xc, fp.delta_x, fp.delta_y, e);
+    println!(
+        "channel xc={:.5} shear_center=({:.5},{:.5}) e_approx={:.5}",
+        xc, fp.delta_x, fp.delta_y, e
+    );
 
     // Direction check depends on orientation; verify it is NOT at the web.
     assert!((fp.delta_y - d / 2.0).abs() < 1e-6 || true);
@@ -154,8 +200,14 @@ fn report_rectangle_torsion_roark() {
     let rect = RectangularSection::new(a, b);
     let sec = rect.build();
     let fp = sec.frame_properties_full(0.3);
-    let j_roark = a * b.powi(3) * (1.0 / 3.0 - 0.21 * (b / a) * (1.0 - b.powi(4) / (12.0 * a.powi(4))));
-    println!("rect J computed = {:.6e}, Roark = {:.6e}, rel err = {:.3e}", fp.j, j_roark, rel(fp.j, j_roark));
+    let j_roark =
+        a * b.powi(3) * (1.0 / 3.0 - 0.21 * (b / a) * (1.0 - b.powi(4) / (12.0 * a.powi(4))));
+    println!(
+        "rect J computed = {:.6e}, Roark = {:.6e}, rel err = {:.3e}",
+        fp.j,
+        j_roark,
+        rel(fp.j, j_roark)
+    );
 }
 
 #[test]
@@ -167,8 +219,12 @@ fn report_i_section_plastic_modulus() {
     let pa = PlasticAnalysis::new(sec, mat);
     let pp = pa.plastic_section.plastic_properties(PlasticAxis::X);
     let wpl_table = 628.4e-6; // m3
-    println!("IPE300 Zpl,x computed = {:.4e}, table = {:.4e}, rel err = {:.3e}",
-        pp.plastic_section_modulus, wpl_table, rel(pp.plastic_section_modulus, wpl_table));
+    println!(
+        "IPE300 Zpl,x computed = {:.4e}, table = {:.4e}, rel err = {:.3e}",
+        pp.plastic_section_modulus,
+        wpl_table,
+        rel(pp.plastic_section_modulus, wpl_table)
+    );
 }
 
 #[test]
@@ -179,10 +235,11 @@ fn report_angle_principal_axes() {
     let props = section_properties::SectionProperties::from_section(&sec);
     println!("angle phi = {:.2} deg", props.principal.phi.to_degrees());
     // For equal-leg angle, principal axes at exactly 45 deg from x/y legs.
-    assert!((props.principal.phi.to_degrees().abs() - 45.0).abs() < 1.0,
-        "equal-leg angle principal angle should be ~45deg");
+    assert!(
+        (props.principal.phi.to_degrees().abs() - 45.0).abs() < 1.0,
+        "equal-leg angle principal angle should be ~45deg"
+    );
 }
-
 
 #[test]
 fn report_i_section_shape_factor() {
@@ -192,9 +249,13 @@ fn report_i_section_shape_factor() {
     let mat = STEEL_S355;
     let pa = PlasticAnalysis::new(sec.clone(), mat);
     let px = pa.plastic_section.plastic_properties(PlasticAxis::X);
-    println!("zxx+={:.4e} zxx-={:.4e} Zpl_x={:.4e} SF_x={:.4}",
-        props.zxx_plus, props.zxx_minus, px.plastic_section_modulus,
-        px.plastic_section_modulus / props.section_modulus_x());
+    println!(
+        "zxx+={:.4e} zxx-={:.4e} Zpl_x={:.4e} SF_x={:.4}",
+        props.zxx_plus,
+        props.zxx_minus,
+        px.plastic_section_modulus,
+        px.plastic_section_modulus / props.section_modulus_x()
+    );
     // Shape factor for rolled I-sections ~ 1.10-1.15
     let sf = px.plastic_section_modulus / props.section_modulus_x();
     assert!(sf > 1.05 && sf < 1.25, "shape factor out of range: {}", sf);
@@ -216,45 +277,76 @@ fn report_interaction_diagram_rectangle() {
     let diagram = section_properties::plastic::InteractionDiagram::new(rect.build(), STEEL_S355);
     // pure compression capacity
     let chk_n = diagram.check_capacity(
-        section_properties::plastic::LoadCase3D::pure_compression(n_c), 1.0);
-    println!("pure N: util={:.4} passed={}", chk_n.utilization, chk_n.passed);
-    println!("diagram caps: Nrd={:.1} Mxrd={:.1} Myrd={:.1} npts={}", diagram.n_rd, diagram.m_x_rd, diagram.m_y_rd, diagram.surface_points.len());
-    for (i,pt) in diagram.surface_points.iter().enumerate().take(8) {
-        println!("  pt[{}] n={:.3e} mx={:.3e} my={:.3e}", i, pt.n, pt.mx, pt.my);
+        section_properties::plastic::LoadCase3D::pure_compression(n_c),
+        1.0,
+    );
+    println!(
+        "pure N: util={:.4} passed={}",
+        chk_n.utilization, chk_n.passed
+    );
+    println!(
+        "diagram caps: Nrd={:.1} Mxrd={:.1} Myrd={:.1} npts={}",
+        diagram.n_rd,
+        diagram.m_x_rd,
+        diagram.m_y_rd,
+        diagram.surface_points.len()
+    );
+    for (i, pt) in diagram.surface_points.iter().enumerate().take(8) {
+        println!(
+            "  pt[{}] n={:.3e} mx={:.3e} my={:.3e}",
+            i, pt.n, pt.mx, pt.my
+        );
     }
     println!("expected: Nc={:.1} Mc={:.1}", n_c, m_c);
-    assert!(chk_n.utilization < 1.01, "pure compression should be at capacity");
+    assert!(
+        chk_n.utilization < 1.01,
+        "pure compression should be at capacity"
+    );
 
     // pure bending
     let chk_m = diagram.check_capacity(
-        section_properties::plastic::LoadCase3D::pure_bending_x(m_c), 1.0);
+        section_properties::plastic::LoadCase3D::pure_bending_x(m_c),
+        1.0,
+    );
     println!("pure M: util={:.4}", chk_m.utilization);
 
     // half-N + bending should have remaining capacity < pure-bending case
     let chk_mix = diagram.check_capacity(
-        section_properties::plastic::LoadCase3D::new(0.5 * n_c, m_c, 0.0), 1.0);
+        section_properties::plastic::LoadCase3D::new(0.5 * n_c, m_c, 0.0),
+        1.0,
+    );
     println!("halfN+M: util={:.4}", chk_mix.utilization);
-    assert!(chk_mix.utilization > chk_m.utilization,
-        "half axial + full bending must exceed pure-bending utilization");
+    assert!(
+        chk_mix.utilization > chk_m.utilization,
+        "half axial + full bending must exceed pure-bending utilization"
+    );
     // Exact surface check should accept pure bending at capacity
     let exact = diagram.check_capacity_exact(
-        section_properties::plastic::LoadCase3D::pure_bending_x(m_c * 0.9), 1.0);
-    println!("exact 90% M: util={:.4} passed={}", exact.utilization, exact.passed);
+        section_properties::plastic::LoadCase3D::pure_bending_x(m_c * 0.9),
+        1.0,
+    );
+    println!(
+        "exact 90% M: util={:.4} passed={}",
+        exact.utilization, exact.passed
+    );
     assert!(exact.passed);
 }
 
 #[test]
 fn report_fem_bending_stress() {
     // FEM path: rectangle under My about strong axis; compare extreme fibre.
-    use section_properties::mesh::{FemSectionAnalysis};
+    use section_properties::mesh::FemSectionAnalysis;
     let rect = RectangularSection::new(0.1, 0.2);
-    let mut analysis = FemSectionAnalysis::new(rect.build(), STEEL_S355)
-        .with_mesh_params(section_properties::MeshParams {
+    let mut analysis = FemSectionAnalysis::new(rect.build(), STEEL_S355).with_mesh_params(
+        section_properties::MeshParams {
             target_size: 0.02,
             ..Default::default()
-        });
+        },
+    );
     let m = 10e3; // 10 kNm about x (strong)
-    let stress = analysis.calculate_stress(0.0, 0.0, 0.0, m, 0.0, 0.0).unwrap();
+    let stress = analysis
+        .calculate_stress(0.0, 0.0, 0.0, m, 0.0, 0.0)
+        .unwrap();
     let wel = 0.1 * 0.2_f64.powi(2) / 6.0;
     let expected = m / wel;
     // sigma_zz from bending: sig_zz_mxx component of nodal stresses
@@ -278,22 +370,38 @@ fn debug_fem_props() {
     let rect = RectangularSection::new(0.1, 0.2);
     let mut analysis = FemSectionAnalysis::new(rect.build(), STEEL_S355);
     let cmp = analysis.validate_properties();
-    println!("fem vs analytic: area%={:.3} ix%={:.3} iy%={:.3}", cmp.area_diff_pct, cmp.ix_diff_pct, cmp.iy_diff_pct);
+    println!(
+        "fem vs analytic: area%={:.3} ix%={:.3} iy%={:.3}",
+        cmp.area_diff_pct, cmp.ix_diff_pct, cmp.iy_diff_pct
+    );
     let fem = analysis.calculate_geometric_properties();
-    println!("fem ix={:.6e} iy={:.6e} area={:.6e}", fem.ix, fem.iy, fem.area);
+    println!(
+        "fem ix={:.6e} iy={:.6e} area={:.6e}",
+        fem.ix, fem.iy, fem.area
+    );
 
-    let stress = analysis.calculate_stress(0.0,0.0,0.0,1e4,0.0,0.0).unwrap();
-    let mut ns: Vec<_> = stress.nodal_stresses.iter().map(|s| (s.sigma_x, s.sigma_y, s.tau_xy)).collect();
-    ns.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap());
-    for (sx,sy,tx) in ns.iter().take(3) { println!("nodal sx={:.3e} sy={:.3e} t={:.3e}", sx, sy, tx); }
+    let stress = analysis
+        .calculate_stress(0.0, 0.0, 0.0, 1e4, 0.0, 0.0)
+        .unwrap();
+    let mut ns: Vec<_> = stress
+        .nodal_stresses
+        .iter()
+        .map(|s| (s.sigma_x, s.sigma_y, s.tau_xy))
+        .collect();
+    ns.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    for (sx, sy, tx) in ns.iter().take(3) {
+        println!("nodal sx={:.3e} sy={:.3e} t={:.3e}", sx, sy, tx);
+    }
     let mut es: Vec<_> = stress.element_stresses.iter().map(|s| s.sigma_x).collect();
-    es.sort_by(|a,b| b.partial_cmp(a).unwrap());
-    for s in es.iter().take(3) { println!("elem sx={:.3e}", s); }
+    es.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    for s in es.iter().take(3) {
+        println!("elem sx={:.3e}", s);
+    }
 }
 
 #[test]
 fn skyline_2d_grid_matches_cg() {
-    use section_properties::fea::{solve_lagrange_sparse, SkylineLdlt, SparseMatrix};
+    use section_properties::fea::{SkylineLdlt, SparseMatrix, solve_lagrange_sparse};
     let nx = 12usize;
     let ny = 12usize;
     let n = nx * ny;
@@ -303,10 +411,18 @@ fn skyline_2d_grid_matches_cg() {
         for i in 0..nx {
             let p = idx(i, j);
             let mut deg = 0usize;
-            if i > 0 { deg += 1; }
-            if i + 1 < nx { deg += 1; }
-            if j > 0 { deg += 1; }
-            if j + 1 < ny { deg += 1; }
+            if i > 0 {
+                deg += 1;
+            }
+            if i + 1 < nx {
+                deg += 1;
+            }
+            if j > 0 {
+                deg += 1;
+            }
+            if j + 1 < ny {
+                deg += 1;
+            }
             k.add(p, p, deg as f64 + 0.1);
             if i + 1 < nx {
                 k.add(p, idx(i + 1, j), -1.0);
@@ -355,10 +471,37 @@ fn skyline_2d_grid_matches_cg() {
         let b: f64 = c.iter().zip(w1.iter()).map(|(&x, &y)| x * y).sum();
         a / b
     };
-    let r_dir = { let prod = kc.matvec(&u_dir); let mut m = 0.0f64; for idx in 0..prod.len() { let v = (prod[idx] - f[idx] + c[idx]*lambda_dir).abs(); if v > m { m = v; } } m };
-    let r_ref = { let prod = kc.matvec(&u_ref); let mut m = 0.0f64; for idx in 0..prod.len() { let v = (prod[idx] - f[idx] + c[idx]*lambda_dir).abs(); if v > m { m = v; } } m };
-    println!("constraint eq residual: dir={:.3e} ref={:.3e}", r_dir, r_ref);
-    println!("sum(u_dir)={:.6e} sum(u_ref)={:.6e}", u_dir.iter().sum::<f64>(), u_ref.iter().sum::<f64>());
+    let r_dir = {
+        let prod = kc.matvec(&u_dir);
+        let mut m = 0.0f64;
+        for idx in 0..prod.len() {
+            let v = (prod[idx] - f[idx] + c[idx] * lambda_dir).abs();
+            if v > m {
+                m = v;
+            }
+        }
+        m
+    };
+    let r_ref = {
+        let prod = kc.matvec(&u_ref);
+        let mut m = 0.0f64;
+        for idx in 0..prod.len() {
+            let v = (prod[idx] - f[idx] + c[idx] * lambda_dir).abs();
+            if v > m {
+                m = v;
+            }
+        }
+        m
+    };
+    println!(
+        "constraint eq residual: dir={:.3e} ref={:.3e}",
+        r_dir, r_ref
+    );
+    println!(
+        "sum(u_dir)={:.6e} sum(u_ref)={:.6e}",
+        u_dir.iter().sum::<f64>(),
+        u_ref.iter().sum::<f64>()
+    );
     println!("max diff = {:.3e}", max_diff);
 }
 
@@ -366,12 +509,24 @@ fn skyline_2d_grid_matches_cg() {
 fn debug_surface_values() {
     let rect = RectangularSection::new(0.1, 0.2).build();
     let diagram = section_properties::plastic::InteractionDiagram::new(rect, STEEL_S355);
-    println!("m_x_rd={:.4e} npts={}", diagram.m_x_rd, diagram.surface_points.len());
-    let mxmax = diagram.surface_points.iter().map(|p| p.mx.abs()).fold(0.0f64, f64::max);
-    let mymax = diagram.surface_points.iter().map(|p| p.my.abs()).fold(0.0f64, f64::max);
+    println!(
+        "m_x_rd={:.4e} npts={}",
+        diagram.m_x_rd,
+        diagram.surface_points.len()
+    );
+    let mxmax = diagram
+        .surface_points
+        .iter()
+        .map(|p| p.mx.abs())
+        .fold(0.0f64, f64::max);
+    let mymax = diagram
+        .surface_points
+        .iter()
+        .map(|p| p.my.abs())
+        .fold(0.0f64, f64::max);
     println!("max|mx|={:.4e} max|my|={:.4e}", mxmax, mymax);
     // n=0 slice extremes
-    for (i,p) in diagram.surface_points.iter().enumerate() {
+    for (i, p) in diagram.surface_points.iter().enumerate() {
         if p.n.abs() < 1e-12 && p.mx.abs() > 3.0e5 {
             println!("big-mx pt[{}] mx={:+.4e}", i, p.mx);
         }
@@ -379,18 +534,27 @@ fn debug_surface_values() {
 }
 #[test]
 fn debug_clip_halves() {
-    use section_properties::{Polygon, Point};
+    use section_properties::{Point, Polygon};
     let poly = Polygon::new(vec![
-        Point::new(-0.05,-0.1), Point::new(0.05,-0.1),
-        Point::new(0.05,0.1), Point::new(-0.05,0.1),
+        Point::new(-0.05, -0.1),
+        Point::new(0.05, -0.1),
+        Point::new(0.05, 0.1),
+        Point::new(-0.05, 0.1),
     ]);
     // horizontal line y=0 -> nx=0, ny=-1, c=0
     let below = poly.clip_halfspace(0.0, -1.0, 0.0, true);
     let above = poly.clip_halfspace(0.0, -1.0, 0.0, false);
-    println!("below area={:?} above area={:?}",
-        below.map(|p| p.area()), above.map(|p| p.area()));
+    println!(
+        "below area={:?} above area={:?}",
+        below.map(|p| p.area()),
+        above.map(|p| p.area())
+    );
     // vertical line x=0 -> nx=1, ny=0
     let l = poly.clip_halfspace(1.0, 0.0, 0.0, true);
     let r = poly.clip_halfspace(1.0, 0.0, 0.0, false);
-    println!("left={:?} right={:?}", l.map(|p|p.area()), r.map(|p|p.area()));
+    println!(
+        "left={:?} right={:?}",
+        l.map(|p| p.area()),
+        r.map(|p| p.area())
+    );
 }

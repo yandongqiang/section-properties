@@ -224,7 +224,6 @@ pub fn mesh_composite_section(composite: &CompositeSection, params: MeshParams) 
 mod tests {
     use super::*;
     use crate::geometry::Point;
-    
 
     #[test]
     fn mesh_quality_metrics() {

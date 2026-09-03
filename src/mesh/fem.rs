@@ -857,8 +857,13 @@ impl std::fmt::Display for FemError {
             FemError::InvalidMesh => write!(f, "Invalid mesh"),
             FemError::MaterialNotFound => write!(f, "Material not found"),
             FemError::ConvergenceFailed => write!(f, "Solver did not converge"),
-            FemError::DegenerateElement => write!(f, "Degenerate element (zero or negative Jacobian)"),
-            FemError::InvalidElementOrientation => write!(f, "Invalid element orientation (negative Jacobian, CW winding)"),
+            FemError::DegenerateElement => {
+                write!(f, "Degenerate element (zero or negative Jacobian)")
+            }
+            FemError::InvalidElementOrientation => write!(
+                f,
+                "Invalid element orientation (negative Jacobian, CW winding)"
+            ),
         }
     }
 }
@@ -870,7 +875,6 @@ mod tests {
     use super::*;
     use crate::geometry::Point;
     use crate::material::presets::STEEL_S355;
-    
 
     #[test]
     fn material_props_d_matrix() {

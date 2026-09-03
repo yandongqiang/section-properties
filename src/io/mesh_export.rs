@@ -36,10 +36,7 @@ pub fn to_nastran(mesh: &Mesh, material: Option<&Material>, units: &str) -> Stri
         Some(m) => (m.youngs_modulus, m.poissons_ratio, m.density),
         None => (2.1e11, 0.3, 7850.0),
     };
-    out.push_str(&format!(
-        "MAT1*   {:>16}{:.4E}{:.4E}\n",
-        "1", e, nu
-    ));
+    out.push_str(&format!("MAT1*   {:>16}{:.4E}{:.4E}\n", "1", e, nu));
     out.push_str(&format!("*       {:.4E}\n", rho));
     out.push_str("PSHELL* 1               1.0E-03\n");
 
@@ -75,7 +72,11 @@ pub fn to_vtk(mesh: &Mesh) -> String {
         out.push_str(&format!("{:.10} {:.10} {:.10}\n", n.x, n.y, 0.0));
     }
 
-    out.push_str(&format!("CELLS {} {}\n", mesh.elements.len(), mesh.elements.len() * 4));
+    out.push_str(&format!(
+        "CELLS {} {}\n",
+        mesh.elements.len(),
+        mesh.elements.len() * 4
+    ));
     for tri in &mesh.elements {
         out.push_str(&format!("3 {} {} {}\n", tri[0], tri[1], tri[2]));
     }

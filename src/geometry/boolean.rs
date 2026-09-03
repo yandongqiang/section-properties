@@ -272,7 +272,6 @@ fn signed_area_pts(pts: &[Point]) -> f64 {
         / 2.0
 }
 
-
 /// Approximate scale of a polygon (bounding-box diagonal).
 fn bbox_diag(pts: &[Point]) -> f64 {
     let (mut mn_x, mut mn_y) = (f64::INFINITY, f64::INFINITY);
@@ -283,7 +282,9 @@ fn bbox_diag(pts: &[Point]) -> f64 {
         mx_x = mx_x.max(p.x);
         mx_y = mx_y.max(p.y);
     }
-    ((mx_x - mn_x).powi(2) + (mx_y - mn_y).powi(2)).sqrt().max(1e-12)
+    ((mx_x - mn_x).powi(2) + (mx_y - mn_y).powi(2))
+        .sqrt()
+        .max(1e-12)
 }
 
 /// Distance from point `p` to segment `a`-`b`.
@@ -328,7 +329,11 @@ fn has_vertex_on_boundary(a: &[Point], b: &Polygon, tol: f64) -> bool {
 /// The result is validated against the area inclusion-exclusion identity:
 /// `|A| + |B| = |A∩B| + |A∪B|`, which is a strict mathematical invariant.
 /// Compute boolean operation on two polygons.
-fn polygon_boolean_internal(a: &Polygon, b: &Polygon, op: BoolOp) -> Result<Vec<Polygon>, BooleanError> {
+fn polygon_boolean_internal(
+    a: &Polygon,
+    b: &Polygon,
+    op: BoolOp,
+) -> Result<Vec<Polygon>, BooleanError> {
     // Identical boundaries: exact fast path.
     if a.vertices.len() == b.vertices.len()
         && a.vertices.iter().zip(&b.vertices).all(|(p, q)| p == q)
@@ -650,11 +655,11 @@ fn validate_boolean_sampling(
     if mismatches > 0 && checked > 0 {
         return Err(BooleanError::Validation {
             op,
-                message: format!(
-                    "point-sampling mismatch: {mismatches}/{checked} of the checked samples disagree \
+            message: format!(
+                "point-sampling mismatch: {mismatches}/{checked} of the checked samples disagree \
                      with the expected {:?} of A and B",
-                    op
-                ),
+                op
+            ),
         });
     }
     Ok(())
@@ -781,12 +786,18 @@ fn boolean_generic(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
 
     let mut ring_a = build_ring(
         &a.vertices,
-        &raw.iter().enumerate().map(|(id, r)| (r.ea, r.ta, id)).collect::<Vec<_>>(),
+        &raw.iter()
+            .enumerate()
+            .map(|(id, r)| (r.ea, r.ta, id))
+            .collect::<Vec<_>>(),
         &raw,
     );
     let mut ring_b = build_ring(
         &b_eff,
-        &raw.iter().enumerate().map(|(id, r)| (r.eb, r.tb, id)).collect::<Vec<_>>(),
+        &raw.iter()
+            .enumerate()
+            .map(|(id, r)| (r.eb, r.tb, id))
+            .collect::<Vec<_>>(),
         &raw,
     );
 
@@ -840,10 +851,7 @@ fn boolean_generic(a: &Polygon, b: &Polygon, op: BoolOp) -> Vec<Polygon> {
 /// cut out. Each operation used here (`intersection` and `difference`) acts on
 /// simple polygons and, crucially, never needs to represent a polygon-with-a-
 /// nested-hole, so the results are always plain regions.
-fn material_inside(
-    p: &Polygon,
-    s: &crate::section::Section,
-) -> Result<Vec<Polygon>, BooleanError> {
+fn material_inside(p: &Polygon, s: &crate::section::Section) -> Result<Vec<Polygon>, BooleanError> {
     // p ∩ outer
     let mut acc = polygon_boolean_checked(p, &s.outer, BoolOp::Intersection)?;
     // subtract every hole (in CCW orientation, as the boolean expects)
@@ -886,7 +894,11 @@ fn hole_minus_material(
     let mut res = Vec::new();
     res.extend(polygon_boolean_checked(&hole, outer, BoolOp::Difference)?);
     for oh in holes {
-        res.extend(polygon_boolean_checked(&hole, &ccw(oh), BoolOp::Intersection)?);
+        res.extend(polygon_boolean_checked(
+            &hole,
+            &ccw(oh),
+            BoolOp::Intersection,
+        )?);
     }
     Ok(res)
 }
@@ -1077,7 +1089,7 @@ enum PieceKind {
 }
 
 /// Difference of two sections with proper hole handling.
-/// 
+///
 /// Material = material(A) \ material(B) = (A.outer \ A.holes) \ (B.outer \ B.holes)
 /// = (A.outer \ B.outer) ∪ (A.outer ∩ B.holes) minus holes appropriately.
 fn section_difference_impl(
@@ -1179,8 +1191,10 @@ mod tests {
                     let b = piece.vertices[(i + 1) % piece.vertices.len()];
                     point_segment_dist(*v, *a, b) <= tol
                 });
-                assert!(piece.contains_point(*v) || on_boundary,
-                    "hole must not extend outside the piece");
+                assert!(
+                    piece.contains_point(*v) || on_boundary,
+                    "hole must not extend outside the piece"
+                );
             }
         }
     }
@@ -1276,10 +1290,7 @@ mod tests {
     fn section_difference_with_existing_holes() {
         use crate::section::Section;
         // Square with existing hole, minus an offset square.
-        let a = Section::new(
-            square(0.0, 0.0, 4.0),
-            vec![square(0.5, 0.5, 1.0)],
-        );
+        let a = Section::new(square(0.0, 0.0, 4.0), vec![square(0.5, 0.5, 1.0)]);
         let b = Section::new(square(2.5, 2.5, 1.0), vec![]);
         let result = section_difference(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
@@ -1290,8 +1301,14 @@ mod tests {
     #[test]
     fn identical_polygons() {
         let a = square(0.0, 0.0, 2.0);
-        assert_eq!(polygon_boolean(&a, &a.clone(), BoolOp::Intersection)[0].area() , 4.0);
-        assert_eq!(polygon_boolean(&a, &a.clone(), BoolOp::Union)[0].area(), 4.0);
+        assert_eq!(
+            polygon_boolean(&a, &a.clone(), BoolOp::Intersection)[0].area(),
+            4.0
+        );
+        assert_eq!(
+            polygon_boolean(&a, &a.clone(), BoolOp::Union)[0].area(),
+            4.0
+        );
         assert!(polygon_boolean(&a, &a.clone(), BoolOp::Difference).is_empty());
     }
 
@@ -1310,7 +1327,11 @@ mod tests {
         assert_eq!(result[0].holes.len(), 2, "union must preserve both holes");
         // Material a (1.44-0.09) + material b (1.44-0.09) - overlap [1.0,1.2]x[0,1.2] (0.24).
         let expected = (1.44 - 0.09) + (1.44 - 0.09) - 0.24;
-        assert!((result[0].area() - expected).abs() < 1e-6, "union area {}", result[0].area());
+        assert!(
+            (result[0].area() - expected).abs() < 1e-6,
+            "union area {}",
+            result[0].area()
+        );
     }
 
     #[test]
@@ -1325,8 +1346,17 @@ mod tests {
         let result = section_union(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         // The hole is filled by B -> union is the full 2x2 square, no border hole.
-        assert_eq!(result[0].holes.len(), 0, "filled hole must disappear: {:?}", result[0].holes.len());
-        assert!((result[0].area() - 4.0).abs() < 1e-9, "union area {}", result[0].area());
+        assert_eq!(
+            result[0].holes.len(),
+            0,
+            "filled hole must disappear: {:?}",
+            result[0].holes.len()
+        );
+        assert!(
+            (result[0].area() - 4.0).abs() < 1e-9,
+            "union area {}",
+            result[0].area()
+        );
     }
 
     #[test]
@@ -1371,14 +1401,26 @@ mod tests {
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,1.5]x[0,4], area 6.
-        assert!((sec.outer.area() - 6.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 6.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // A's hole clipped to [1,1.5]x[1,3] (0.5x2) and B's hole [0.5,1.0]x[1,3]
         // (already inside the piece). Total void = 1 + 1 = 2.
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
-        assert!((hole_area - 2.0).abs() < 1e-4, "clipped holes total area {}", hole_area);
+        assert!(
+            (hole_area - 2.0).abs() < 1e-4,
+            "clipped holes total area {}",
+            hole_area
+        );
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 6 - 2 = 4.
-        assert!((sec.area() - 4.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 4.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1397,15 +1439,32 @@ mod tests {
         let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
         let sec = &result[0];
-        assert!((sec.outer.area() - 16.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 16.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // Overlapping holes must fold into a single void of area 6.
-        assert_eq!(sec.holes.len(), 1, "overlapping holes must merge: {}", sec.holes.len());
+        assert_eq!(
+            sec.holes.len(),
+            1,
+            "overlapping holes must merge: {}",
+            sec.holes.len()
+        );
         let hole_area = sec.holes[0].area();
-        assert!((hole_area - 6.0).abs() < 1e-4, "merged hole area {}", hole_area);
+        assert!(
+            (hole_area - 6.0).abs() < 1e-4,
+            "merged hole area {}",
+            hole_area
+        );
         // The merged hole must lie within the piece (allowing perturbation tol).
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 16 - 6 = 10 (overlap counted once).
-        assert!((sec.area() - 10.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 10.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1428,13 +1487,25 @@ mod tests {
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,2]x[0,10], area 20.
-        assert!((sec.outer.area() - 20.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 20.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // Hole clipped to [1,2]x[1,9], area 8, and it must lie inside the piece.
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
-        assert!((hole_area - 8.0).abs() < 1e-4, "clipped hole area {}", hole_area);
+        assert!(
+            (hole_area - 8.0).abs() < 1e-4,
+            "clipped hole area {}",
+            hole_area
+        );
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 20 - 8 = 12 (and not negative).
-        assert!((sec.area() - 12.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 12.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1457,13 +1528,25 @@ mod tests {
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [5,10]x[0,10], area 50.
-        assert!((sec.outer.area() - 50.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 50.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // Hole clipped to [5,9]x[1,9], area 32, inside the piece.
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
-        assert!((hole_area - 32.0).abs() < 1e-4, "clipped hole area {}", hole_area);
+        assert!(
+            (hole_area - 32.0).abs() < 1e-4,
+            "clipped hole area {}",
+            hole_area
+        );
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 50 - 32 = 18.
-        assert!((sec.area() - 18.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 18.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1487,7 +1570,11 @@ mod tests {
             hole_area
         );
         // Union outer is the full 2x2; material = 4 - 0.75 = 3.25.
-        assert!((sec.area() - 3.25).abs() < 1e-3, "union area {}", sec.area());
+        assert!(
+            (sec.area() - 3.25).abs() < 1e-3,
+            "union area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1575,7 +1662,10 @@ mod tests {
             .iter()
             .flat_map(|p| &p.vertices)
             .any(|v| (v.x - 1.0).abs() < 1e-12 && (v.y - 1.0).abs() < 1e-12);
-        assert!(found_corner, "shared corner (1,1) not restored after perturbation");
+        assert!(
+            found_corner,
+            "shared corner (1,1) not restored after perturbation"
+        );
     }
 
     #[test]
@@ -1748,7 +1838,11 @@ mod tests {
         assert!(area > 0.0, "intersection must have positive area");
         // Triangle area=2. Cut beyond x=2 removes a small triangle (area ~0.5).
         // Expected intersection ~1.5.
-        assert!((area - 1.5).abs() < 0.01, "near-vertex intersection area: {}", area);
+        assert!(
+            (area - 1.5).abs() < 0.01,
+            "near-vertex intersection area: {}",
+            area
+        );
     }
 
     #[test]
@@ -1757,10 +1851,17 @@ mod tests {
         let a = square(0.0, 0.0, 1.0);
         let b = square(1.0, 1.0, 1.0);
         let i = polygon_boolean(&a, &b, BoolOp::Intersection);
-        assert!(i.is_empty(), "intersection of touching-at-vertex squares should be empty");
+        assert!(
+            i.is_empty(),
+            "intersection of touching-at-vertex squares should be empty"
+        );
         let u = polygon_boolean(&a, &b, BoolOp::Union);
         let total: f64 = u.iter().map(|p| p.area()).sum();
-        assert!((total - 2.0).abs() < 1e-9, "union area of touching squares: {}", total);
+        assert!(
+            (total - 2.0).abs() < 1e-9,
+            "union area of touching squares: {}",
+            total
+        );
     }
 
     #[test]
@@ -1783,7 +1884,11 @@ mod tests {
         let total: f64 = r.iter().map(|p| p.area()).sum();
         // fill is fully inside U (cavity is interior for a simple polygon),
         // so intersection = fill area = 4.
-        assert!((total - 4.0).abs() < 1e-6, "U-shape intersection: {}", total);
+        assert!(
+            (total - 4.0).abs() < 1e-6,
+            "U-shape intersection: {}",
+            total
+        );
 
         // Now test with a truly disconnected region: two disjoint parts.
         let left = Polygon::new(vec![
@@ -1803,9 +1908,17 @@ mod tests {
         let area_left: f64 = r_left.iter().map(|p| p.area()).sum();
         let area_right: f64 = r_right.iter().map(|p| p.area()).sum();
         // left ∩ fill = [0.5,1]×[0.5,2.5] = 0.5×2 = 1.0
-        assert!((area_left - 1.0).abs() < 1e-6, "left intersection: {}", area_left);
+        assert!(
+            (area_left - 1.0).abs() < 1e-6,
+            "left intersection: {}",
+            area_left
+        );
         // right ∩ fill = [2,2.5]×[0.5,2.5] = 0.5×2 = 1.0
-        assert!((area_right - 1.0).abs() < 1e-6, "right intersection: {}", area_right);
+        assert!(
+            (area_right - 1.0).abs() < 1e-6,
+            "right intersection: {}",
+            area_right
+        );
     }
 
     #[test]
@@ -1825,7 +1938,11 @@ mod tests {
         ]);
         let d = polygon_boolean(&a, &b, BoolOp::Difference);
         let total: f64 = d.iter().map(|p| p.area()).sum();
-        assert!((total - 2.0).abs() < 1e-9, "collinear difference: {}", total);
+        assert!(
+            (total - 2.0).abs() < 1e-9,
+            "collinear difference: {}",
+            total
+        );
     }
 
     #[test]
@@ -1852,12 +1969,24 @@ mod tests {
 
         let result = section_intersection(&a, &b).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].holes.len(), 2, "touching holes must stay separate");
+        assert_eq!(
+            result[0].holes.len(),
+            2,
+            "touching holes must stay separate"
+        );
         let hole_area: f64 = result[0].holes.iter().map(|h| h.area()).sum();
         // Two 0.5 wide x 1 tall holes = 1.0 total void; they must not be
         // double-counted (which would give 1.0) nor merged+larger.
-        assert!((hole_area - 1.0).abs() < 1e-4, "touching holes total area {}", hole_area);
-        assert!((result[0].area() - (4.0 - 1.0)).abs() < 1e-4, "section area {}", result[0].area());
+        assert!(
+            (hole_area - 1.0).abs() < 1e-4,
+            "touching holes total area {}",
+            hole_area
+        );
+        assert!(
+            (result[0].area() - (4.0 - 1.0)).abs() < 1e-4,
+            "section area {}",
+            result[0].area()
+        );
     }
 
     #[test]
@@ -1884,9 +2013,17 @@ mod tests {
         assert_eq!(result.len(), 1);
         // Both holes are filled by the other section's material in a union, so
         // the touching holes do NOT survive -- union material is the full outer.
-        assert_eq!(result[0].holes.len(), 0,
-            "union fills both touching holes, got {} holes", result[0].holes.len());
-        assert!((result[0].area() - 4.0).abs() < 1e-4, "union section area {}", result[0].area());
+        assert_eq!(
+            result[0].holes.len(),
+            0,
+            "union fills both touching holes, got {} holes",
+            result[0].holes.len()
+        );
+        assert!(
+            (result[0].area() - 4.0).abs() < 1e-4,
+            "union section area {}",
+            result[0].area()
+        );
     }
 
     #[test]
@@ -1895,8 +2032,14 @@ mod tests {
         // merely touch (share an edge) must NOT be merged into one by the
         // `u.len() == 1` check, because touching polygons have zero overlap and
         // are already disjoint for area purposes.
-        let rect = |x0: f64, x1: f64, y0: f64, y1: f64| Polygon::new(vec![
-            Point::new(x0, y0), Point::new(x1, y0), Point::new(x1, y1), Point::new(x0, y1)]);
+        let rect = |x0: f64, x1: f64, y0: f64, y1: f64| {
+            Polygon::new(vec![
+                Point::new(x0, y0),
+                Point::new(x1, y0),
+                Point::new(x1, y1),
+                Point::new(x0, y1),
+            ])
+        };
         let a = rect(0.0, 1.0, 0.0, 1.0);
         let b = rect(1.0, 2.0, 0.0, 1.0); // touches a at x=1
         let mut voids = vec![a, b];
@@ -1927,13 +2070,25 @@ mod tests {
         assert_eq!(result.len(), 1);
         let sec = &result[0];
         // Piece = [0,2]x[0,4], area 8.
-        assert!((sec.outer.area() - 8.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 8.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // Existing hole clipped to [1,2]x[1,3], area 2.
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
-        assert!((hole_area - 2.0).abs() < 1e-4, "clipped existing hole area {}", hole_area);
+        assert!(
+            (hole_area - 2.0).abs() < 1e-4,
+            "clipped existing hole area {}",
+            hole_area
+        );
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 8 - 2 = 6.
-        assert!((sec.area() - 6.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 6.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1948,20 +2103,26 @@ mod tests {
         let s = Section::new(square(0.0, 0.0, 4.0), vec![hole_outer, hole_inner]);
         let compound = CompoundGeometry::from_sections(&[s]);
         assert!(
-            matches!(compound.validate(), Err(crate::geometry::compound::CompoundError::NestedHoles { .. })),
+            matches!(
+                compound.validate(),
+                Err(crate::geometry::compound::CompoundError::NestedHoles { .. })
+            ),
             "nested holes must be rejected by geometry validation"
         );
 
         // A control: two non-nested, non-overlapping holes are valid.
-        let ok = Section::new(square(0.0, 0.0, 4.0), vec![
-            square(0.5, 0.5, 0.5),
-            square(3.0, 3.0, 0.5),
-        ]);
+        let ok = Section::new(
+            square(0.0, 0.0, 4.0),
+            vec![square(0.5, 0.5, 0.5), square(3.0, 3.0, 0.5)],
+        );
         let compound_ok = CompoundGeometry::from_sections(&[ok]);
-        assert!(compound_ok.validate().is_ok(), "non-nested holes must validate");
+        assert!(
+            compound_ok.validate().is_ok(),
+            "non-nested holes must validate"
+        );
     }
 
-#[test]
+    #[test]
     fn section_difference_a_inside_b_hole_survives() {
         use crate::section::Section;
         // B = 10x10 with a 4x4 hole in the center
@@ -1971,12 +2132,24 @@ mod tests {
         let a = Section::new(square(4.0, 4.0, 2.0), vec![]);
 
         let result = section_difference(&a, &b).unwrap();
-        assert_eq!(result.len(), 1, "A should survive completely inside B's hole");
+        assert_eq!(
+            result.len(),
+            1,
+            "A should survive completely inside B's hole"
+        );
         let sec = &result[0];
         // A is 2x2 = 4 area, no holes
-        assert!((sec.outer.area() - 4.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 4.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         assert_eq!(sec.holes.len(), 0, "A has no holes");
-        assert!((sec.area() - 4.0).abs() < 1e-6, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 4.0).abs() < 1e-6,
+            "section area {}",
+            sec.area()
+        );
     }
 
     #[test]
@@ -1989,10 +2162,14 @@ mod tests {
         let a = Section::new(square(1.0, 1.0, 2.0), vec![]); // [1,3]^2, inside B's material
 
         let result = section_difference(&a, &b).unwrap();
-        assert_eq!(result.len(), 0, "A should be removed when inside B's material");
+        assert_eq!(
+            result.len(),
+            0,
+            "A should be removed when inside B's material"
+        );
     }
 
-#[test]
+    #[test]
     fn section_difference_a_partial_b_hole_clipped() {
         use crate::section::Section;
         // B = 10x10 with a 4x4 hole [3,7]^2
@@ -2009,16 +2186,24 @@ mod tests {
         assert_eq!(result.len(), 1, "one piece from A ∩ B.hole");
         let sec = &result[0];
         // Piece = A ∩ B.hole = [3,7]x[3,7], area 16
-        assert!((sec.outer.area() - 16.0).abs() < 1e-6, "piece area {}", sec.outer.area());
+        assert!(
+            (sec.outer.area() - 16.0).abs() < 1e-6,
+            "piece area {}",
+            sec.outer.area()
+        );
         // A's hole [3,5]^2 is inside the piece, so survives fully
         let hole_area: f64 = sec.holes.iter().map(|h| h.area()).sum();
-        assert!((hole_area - 4.0).abs() < 1e-4, "clipped hole area {}", hole_area);
+        assert!(
+            (hole_area - 4.0).abs() < 1e-4,
+            "clipped hole area {}",
+            hole_area
+        );
         assert_holes_within_piece(&sec.outer, &sec.holes);
         // Net material = 16 - 4 = 12
-        assert!((sec.area() - 12.0).abs() < 1e-4, "section area {}", sec.area());
+        assert!(
+            (sec.area() - 12.0).abs() < 1e-4,
+            "section area {}",
+            sec.area()
+        );
     }
 }
-
-
-
-

@@ -200,9 +200,9 @@ pub fn section_from_composite(composite: &CompositeSection) -> SectionExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::material::presets::STEEL_S355;
-    
+
     use crate::section_library::steel::ISection;
 
     #[test]

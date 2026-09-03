@@ -184,7 +184,6 @@ pub fn rotate_point(point: Point, angle: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn rectangle_polygon_area() {

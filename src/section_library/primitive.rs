@@ -696,125 +696,128 @@ impl ParametricSection for OctagonSection {
     }
 }
 
-    #[test]
-    fn pentagon_section() {
-        let p = PentagonSection::new(0.1);
-        let sec = p.build();
-        // Area of regular pentagon with circumradius R: (5/2) R^2 sin(72°)
-        let r = 0.05_f64;
-        let expected = 2.5 * r * r * (2.0 * PI * 0.2).sin();
-        assert!((sec.area() - expected).abs() < 1e-8);
-    }
+#[test]
+fn pentagon_section() {
+    let p = PentagonSection::new(0.1);
+    let sec = p.build();
+    // Area of regular pentagon with circumradius R: (5/2) R^2 sin(72°)
+    let r = 0.05_f64;
+    let expected = 2.5 * r * r * (2.0 * PI * 0.2).sin();
+    assert!((sec.area() - expected).abs() < 1e-8);
+}
 
-    #[test]
-    fn hexagon_section() {
-        let h = HexagonSection::new(0.12);
-        let sec = h.build();
-        let expected = 3.0 * 3.0_f64.sqrt() / 2.0 * 0.06_f64.powi(2);
-        assert!((sec.area() - expected).abs() < 1e-10);
-    }
+#[test]
+fn hexagon_section() {
+    let h = HexagonSection::new(0.12);
+    let sec = h.build();
+    let expected = 3.0 * 3.0_f64.sqrt() / 2.0 * 0.06_f64.powi(2);
+    assert!((sec.area() - expected).abs() < 1e-10);
+}
 
-    #[test]
-    fn octagon_section() {
-        let o = OctagonSection::new(0.2);
-        let sec = o.build();
-        let r = 0.1_f64;
-        let expected = 2.0 * 2.0_f64.sqrt() * r * r;
-        assert!((sec.area() - expected).abs() < 1e-8);
-    }
+#[test]
+fn octagon_section() {
+    let o = OctagonSection::new(0.2);
+    let sec = o.build();
+    let r = 0.1_f64;
+    let expected = 2.0 * 2.0_f64.sqrt() * r * r;
+    assert!((sec.area() - expected).abs() < 1e-8);
+}
 
-    #[test]
-    fn geometry_align_center_and_mirror() {
-        use crate::geometry::{Axis, Geometry};
-        let rect = Geometry::new(
-            Polygon::new(vec![
-                Point::new(0.0, 0.0),
-                Point::new(2.0, 0.0),
-                Point::new(2.0, 1.0),
-                Point::new(0.0, 1.0),
-            ]),
-            vec![],
-        );
-        let c = rect.align_center().apply_transforms();
-        assert!((c.centroid().x - 0.0).abs() < 1e-12);
-        assert!((c.centroid().y - 0.0).abs() < 1e-12);
+#[test]
+fn geometry_align_center_and_mirror() {
+    use crate::geometry::{Axis, Geometry};
+    let rect = Geometry::new(
+        Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]),
+        vec![],
+    );
+    let c = rect.align_center().apply_transforms();
+    assert!((c.centroid().x - 0.0).abs() < 1e-12);
+    assert!((c.centroid().y - 0.0).abs() < 1e-12);
 
-        let m = rect.clone().mirror(Axis::Y).apply_transforms();
-        assert!((m.centroid().x + 1.0).abs() < 1e-12);
+    let m = rect.clone().mirror(Axis::Y).apply_transforms();
+    assert!((m.centroid().x + 1.0).abs() < 1e-12);
 
-        let s = rect.clone().shift(1.0, -3.0).apply_transforms();
-        assert!((s.centroid().x - 2.0).abs() < 1e-12);
-        assert!((s.centroid().y + 2.5).abs() < 1e-12);
+    let s = rect.clone().shift(1.0, -3.0).apply_transforms();
+    assert!((s.centroid().x - 2.0).abs() < 1e-12);
+    assert!((s.centroid().y + 2.5).abs() < 1e-12);
 
-        // Rotate about origin by 90 degrees: area preserved, centroid moved
-        let r = rect.clone().rotate_about(90.0, Point::new(0.0, 0.0)).apply_transforms();
-        assert!((r.area() - rect.area()).abs() < 1e-12);
-        assert!((r.centroid().x + 0.5).abs() < 1e-9);
-        assert!((r.centroid().y - 1.0).abs() < 1e-9);
-    }
+    // Rotate about origin by 90 degrees: area preserved, centroid moved
+    let r = rect
+        .clone()
+        .rotate_about(90.0, Point::new(0.0, 0.0))
+        .apply_transforms();
+    assert!((r.area() - rect.area()).abs() < 1e-12);
+    assert!((r.centroid().x + 0.5).abs() < 1e-9);
+    assert!((r.centroid().y - 1.0).abs() < 1e-9);
+}
 
-    #[test]
-    fn geometry_align_to() {
-        use crate::geometry::Geometry;
-        let a = Geometry::new(
-            Polygon::new(vec![
-                Point::new(0.0, 0.0),
-                Point::new(1.0, 0.0),
-                Point::new(1.0, 1.0),
-                Point::new(0.0, 1.0),
-            ]),
-            vec![],
-        );
-        let b = Geometry::new(
-            Polygon::new(vec![
-                Point::new(10.0, 10.0),
-                Point::new(11.5, 10.0),
-                Point::new(11.5, 11.0),
-                Point::new(10.0, 11.0),
-            ]),
-            vec![],
-        );
-        let aligned = a.align_to(&b).apply_transforms();
-        assert!((aligned.centroid().y - 10.5).abs() < 1e-12);
-    }
+#[test]
+fn geometry_align_to() {
+    use crate::geometry::Geometry;
+    let a = Geometry::new(
+        Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]),
+        vec![],
+    );
+    let b = Geometry::new(
+        Polygon::new(vec![
+            Point::new(10.0, 10.0),
+            Point::new(11.5, 10.0),
+            Point::new(11.5, 11.0),
+            Point::new(10.0, 11.0),
+        ]),
+        vec![],
+    );
+    let aligned = a.align_to(&b).apply_transforms();
+    assert!((aligned.centroid().y - 10.5).abs() < 1e-12);
+}
 
-    #[test]
-    fn geometry_offset_rectangle() {
-        use crate::geometry::Geometry;
-        let rect = Geometry::new(
-            Polygon::new(vec![
-                Point::new(0.0, 0.0),
-                Point::new(2.0, 0.0),
-                Point::new(2.0, 1.0),
-                Point::new(0.0, 1.0),
-            ]),
-            vec![],
-        );
-        // Grow by 0.1: area = 2.2 * 1.2
-        let grown = rect.offset(0.1).unwrap().apply_transforms();
-        assert!((grown.area() - 2.64).abs() < 1e-9);
-        // Shrink by 0.2: area = 1.6 * 0.6
-        let shrunk = rect.offset(-0.2).unwrap().apply_transforms();
-        assert!((shrunk.area() - 0.96).abs() < 1e-9);
-        // Over-shrink degenerates -> None
-        assert!(rect.offset(-0.6).is_none());
-    }
+#[test]
+fn geometry_offset_rectangle() {
+    use crate::geometry::Geometry;
+    let rect = Geometry::new(
+        Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(2.0, 1.0),
+            Point::new(0.0, 1.0),
+        ]),
+        vec![],
+    );
+    // Grow by 0.1: area = 2.2 * 1.2
+    let grown = rect.offset(0.1).unwrap().apply_transforms();
+    assert!((grown.area() - 2.64).abs() < 1e-9);
+    // Shrink by 0.2: area = 1.6 * 0.6
+    let shrunk = rect.offset(-0.2).unwrap().apply_transforms();
+    assert!((shrunk.area() - 0.96).abs() < 1e-9);
+    // Over-shrink degenerates -> None
+    assert!(rect.offset(-0.6).is_none());
+}
 
-    #[test]
-    fn geometry_offset_circle() {
-        use crate::geometry::Geometry;
-        use std::f64::consts::PI;
-        let r = 0.5_f64;
-        let circ = Geometry::from_section(&CircularSection::new(r).build());
-        let grown = circ.offset(0.05).unwrap();
-        let expected = PI * (r + 0.05_f64).powi(2);
-        assert!((grown.area() - expected).abs() / expected < 5e-3);
-    }
+#[test]
+fn geometry_offset_circle() {
+    use crate::geometry::Geometry;
+    use std::f64::consts::PI;
+    let r = 0.5_f64;
+    let circ = Geometry::from_section(&CircularSection::new(r).build());
+    let grown = circ.offset(0.05).unwrap();
+    let expected = PI * (r + 0.05_f64).powi(2);
+    assert!((grown.area() - expected).abs() / expected < 5e-3);
+}
 
-    #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use std::f64::consts::PI;
 
     #[test]

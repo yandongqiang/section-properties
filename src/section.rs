@@ -330,7 +330,10 @@ impl Section {
         for (hi, hole) in self.holes.iter().enumerate() {
             for v in &hole.vertices {
                 if !self.outer.contains_point(*v) {
-                    return Err(format!("Hole {} vertex {:?} lies outside outer boundary", hi, v));
+                    return Err(format!(
+                        "Hole {} vertex {:?} lies outside outer boundary",
+                        hi, v
+                    ));
                 }
             }
 
@@ -342,7 +345,10 @@ impl Section {
                     let o1 = self.outer.vertices[j];
                     let o2 = self.outer.vertices[(j + 1) % self.outer.vertices.len()];
                     if segments_interact(h1, h2, o1, o2) {
-                        return Err(format!("Hole {} edge ({:?}-{:?}) intersects outer boundary", hi, h1, h2));
+                        return Err(format!(
+                            "Hole {} edge ({:?}-{:?}) intersects outer boundary",
+                            hi, h1, h2
+                        ));
                     }
                 }
             }
@@ -360,7 +366,10 @@ impl Section {
                 let j_contains_i = hi.vertices.iter().all(|v| hj.contains_point(*v));
 
                 if i_contains_j || j_contains_i {
-                    return Err(format!("Holes {} and {} are nested (one contains the other)", i, j));
+                    return Err(format!(
+                        "Holes {} and {} are nested (one contains the other)",
+                        i, j
+                    ));
                 }
 
                 // Check area overlap: if both contain each other's vertices partially,
@@ -497,12 +506,16 @@ mod tests {
     #[test]
     fn section_new_validated_rejects_hole_outside_outer() {
         let outer = crate::geometry::Polygon::new(vec![
-            Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-            Point::new(10.0, 10.0), Point::new(0.0, 10.0),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
         ]);
         let hole = crate::geometry::Polygon::new(vec![
-            Point::new(11.0, 11.0), Point::new(12.0, 11.0),
-            Point::new(12.0, 12.0), Point::new(11.0, 12.0),
+            Point::new(11.0, 11.0),
+            Point::new(12.0, 11.0),
+            Point::new(12.0, 12.0),
+            Point::new(11.0, 12.0),
         ]);
         let err = Section::new_validated(outer, vec![hole]).unwrap_err();
         assert!(err.contains("outside outer boundary"));
@@ -511,16 +524,22 @@ mod tests {
     #[test]
     fn section_new_validated_rejects_nested_holes() {
         let outer = crate::geometry::Polygon::new(vec![
-            Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-            Point::new(10.0, 10.0), Point::new(0.0, 10.0),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
         ]);
         let hole_outer = crate::geometry::Polygon::new(vec![
-            Point::new(1.0, 1.0), Point::new(9.0, 1.0),
-            Point::new(9.0, 9.0), Point::new(1.0, 9.0),
+            Point::new(1.0, 1.0),
+            Point::new(9.0, 1.0),
+            Point::new(9.0, 9.0),
+            Point::new(1.0, 9.0),
         ]);
         let hole_inner = crate::geometry::Polygon::new(vec![
-            Point::new(3.0, 3.0), Point::new(5.0, 3.0),
-            Point::new(5.0, 5.0), Point::new(3.0, 5.0),
+            Point::new(3.0, 3.0),
+            Point::new(5.0, 3.0),
+            Point::new(5.0, 5.0),
+            Point::new(3.0, 5.0),
         ]);
         let err = Section::new_validated(outer, vec![hole_outer, hole_inner]).unwrap_err();
         assert!(err.contains("nested"));
@@ -529,16 +548,22 @@ mod tests {
     #[test]
     fn section_new_validated_rejects_overlapping_holes() {
         let outer = crate::geometry::Polygon::new(vec![
-            Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-            Point::new(10.0, 10.0), Point::new(0.0, 10.0),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
         ]);
         let hole_a = crate::geometry::Polygon::new(vec![
-            Point::new(1.0, 1.0), Point::new(5.0, 1.0),
-            Point::new(5.0, 5.0), Point::new(1.0, 5.0),
+            Point::new(1.0, 1.0),
+            Point::new(5.0, 1.0),
+            Point::new(5.0, 5.0),
+            Point::new(1.0, 5.0),
         ]);
         let hole_b = crate::geometry::Polygon::new(vec![
-            Point::new(3.0, 3.0), Point::new(7.0, 3.0),
-            Point::new(7.0, 7.0), Point::new(3.0, 7.0),
+            Point::new(3.0, 3.0),
+            Point::new(7.0, 3.0),
+            Point::new(7.0, 7.0),
+            Point::new(3.0, 7.0),
         ]);
         let err = Section::new_validated(outer, vec![hole_a, hole_b]).unwrap_err();
         assert!(err.contains("intersecting edges") || err.contains("nested"));
@@ -547,16 +572,22 @@ mod tests {
     #[test]
     fn section_new_validated_accepts_valid_section() {
         let outer = crate::geometry::Polygon::new(vec![
-            Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-            Point::new(10.0, 10.0), Point::new(0.0, 10.0),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
         ]);
         let hole_a = crate::geometry::Polygon::new(vec![
-            Point::new(1.0, 1.0), Point::new(4.0, 1.0),
-            Point::new(4.0, 4.0), Point::new(1.0, 4.0),
+            Point::new(1.0, 1.0),
+            Point::new(4.0, 1.0),
+            Point::new(4.0, 4.0),
+            Point::new(1.0, 4.0),
         ]);
         let hole_b = crate::geometry::Polygon::new(vec![
-            Point::new(6.0, 6.0), Point::new(9.0, 6.0),
-            Point::new(9.0, 9.0), Point::new(6.0, 9.0),
+            Point::new(6.0, 6.0),
+            Point::new(9.0, 6.0),
+            Point::new(9.0, 9.0),
+            Point::new(6.0, 9.0),
         ]);
         let section = Section::new_validated(outer, vec![hole_a, hole_b]).unwrap();
         assert_eq!(section.holes.len(), 2);

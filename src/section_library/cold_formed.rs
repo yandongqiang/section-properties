@@ -605,10 +605,10 @@ impl ParametricSection for DeckProfile {
 
         // Outer polygon: full perimeter of one corrugation wave (CCW)
         let outer = vec![
-            Point::new(x0, -hh),                // bottom flange left
-            Point::new(x1, -hh),                // bottom flange right
-            Point::new(x2r, hh),                // top flange right (via right web)
-            Point::new(x2l, hh),                // top flange left (via left web)
+            Point::new(x0, -hh), // bottom flange left
+            Point::new(x1, -hh), // bottom flange right
+            Point::new(x2r, hh), // top flange right (via right web)
+            Point::new(x2l, hh), // top flange left (via left web)
         ];
 
         Section::new(Polygon::new(outer), Vec::new())

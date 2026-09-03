@@ -3,11 +3,14 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-use super::warping_fem::{compute_fem_warping_properties, compute_fem_solution, compute_fem_warping_solution, FemWarpingResult, FemSolution, FemWarpingSolution, analytical_shear_center, analytical_beta};
+use super::warping_fem::{
+    FemSolution, FemWarpingResult, FemWarpingSolution, analytical_beta, analytical_shear_center,
+    compute_fem_solution, compute_fem_warping_properties, compute_fem_warping_solution,
+};
 use crate::geometry::Point;
+use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
-use crate::material::Material;
 
 /// Warping torsion properties for open and closed sections.
 #[derive(Debug, Clone)]
@@ -103,13 +106,13 @@ impl WarpingProperties {
         // This matches Python sectionproperties which uses FEM as the core method
         let fem = compute_fem_warping_properties(section, &props, nu).expect(
             "FEM warping analysis failed. This should not happen for valid sections. \
-             Check mesh generation and section validity."
+             Check mesh generation and section validity.",
         );
 
         // Also compute the full FEM solution to get tau_sv_max for unit torque
         let fem_solution = compute_fem_solution(section, &props, nu).expect(
             "FEM stress recovery failed after warping analysis succeeded. \
-             Check mesh generation and section validity."
+             Check mesh generation and section validity.",
         );
 
         // FEM solves in centroidal coordinates; report in global axes
@@ -159,12 +162,12 @@ impl WarpingProperties {
             let alpha_xx = area / ay;
             let alpha_yy = area / az;
             let alpha_xy = 0.0; // Cross-coupling in centroidal axes
-            
+
             let rot_00 = cos_phi * (cos_phi * alpha_xx + sin_phi * alpha_xy)
                 + sin_phi * (cos_phi * alpha_xy + sin_phi * alpha_yy);
             let rot_11 = (-sin_phi) * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
                 + cos_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
-            
+
             let a_s11 = if rot_00.abs() > 1e-15 {
                 area / rot_00
             } else {

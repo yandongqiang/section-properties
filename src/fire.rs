@@ -658,9 +658,9 @@ impl SectionFireProps for Section {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::material::presets::STEEL_S355;
-    
+
     use crate::section_library::ParametricSection;
 
     #[test]

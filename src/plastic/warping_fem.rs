@@ -449,7 +449,10 @@ pub fn compute_fem_warping_solution(
         let analytical_j = crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(0.0);
         eprintln!(
             "[WARN] FEM J={:.6e} <= 0 (ixx+iyy={:.6e}, ω·f={:.6e}); using analytical J={:.6e}",
-            j, ixx + iyy, omega_dot_f, analytical_j
+            j,
+            ixx + iyy,
+            omega_dot_f,
+            analytical_j
         );
         analytical_j
     } else {
@@ -1135,10 +1138,10 @@ pub fn diag_test_eps(
         }
         // Use custom epsilon multiplier
         let eps = if eps_multiplier > 0.0 {
-        diag_avg.max(1e-300) / n as f64 * eps_multiplier
-    } else {
-        0.0
-    };
+            diag_avg.max(1e-300) / n as f64 * eps_multiplier
+        } else {
+            0.0
+        };
         for i in 0..n {
             m.add(i, i, eps);
         }

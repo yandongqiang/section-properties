@@ -1,6 +1,6 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
-use super::{SkylineLdlt, SparseMatrix, PIVOT_TOL, CgResult, CgStatus, cg_solve};
+use super::{CgResult, CgStatus, PIVOT_TOL, SkylineLdlt, SparseMatrix, cg_solve};
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,13 +75,17 @@ impl FactoredDirectSolver {
         match kind {
             DirectSolver::SparseLu => Ok(FactoredDirectSolver::Lu(SparseLu::factor(matrix)?)),
             DirectSolver::SkylineLdlt => Ok(FactoredDirectSolver::Ldlt(
-                SkylineLdlt::factor(matrix).map_err(|e| SolverError::FactorizationFailed(e.to_string()))?
+                SkylineLdlt::factor(matrix)
+                    .map_err(|e| SolverError::FactorizationFailed(e.to_string()))?,
             )),
             #[cfg(feature = "pardiso")]
             DirectSolver::Pardiso => {
                 // PARDISO requires the constraint vector for the augmented system
                 // This is a limitation - we'll need to handle this separately
-                Err(SolverError::NotImplemented("PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead.".to_string()))
+                Err(SolverError::NotImplemented(
+                    "PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead."
+                        .to_string(),
+                ))
             }
         }
     }
@@ -90,7 +94,9 @@ impl FactoredDirectSolver {
     pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, SolverError> {
         match self {
             FactoredDirectSolver::Lu(lu) => Ok(lu.solve(b)),
-            FactoredDirectSolver::Ldlt(l) => l.solve(b).map_err(|e| SolverError::SolveFailed(e.to_string())),
+            FactoredDirectSolver::Ldlt(l) => l
+                .solve(b)
+                .map_err(|e| SolverError::SolveFailed(e.to_string())),
         }
     }
 }
@@ -121,20 +127,36 @@ impl IterativeSolverInstance {
                 let result = cg_solve(&self.matrix, b, self.max_iter, self.tol);
                 match result.status {
                     CgStatus::Converged => Ok(result.x),
-                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
-                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
-                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
-                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed(
+                        "matrix not positive definite".to_string(),
+                    )),
+                    CgStatus::Breakdown => {
+                        Err(SolverError::SolveFailed("solver breakdown".to_string()))
+                    }
+                    CgStatus::InvalidInput => {
+                        Err(SolverError::InvalidInput("invalid input".to_string()))
+                    }
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed(
+                        "max iterations reached".to_string(),
+                    )),
                 }
             }
             IterativeSolver::Iccg => {
                 let result = iccg_solve(&self.matrix, b, self.max_iter, self.tol);
                 match result.status {
                     CgStatus::Converged => Ok(result.x),
-                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
-                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
-                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
-                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed(
+                        "matrix not positive definite".to_string(),
+                    )),
+                    CgStatus::Breakdown => {
+                        Err(SolverError::SolveFailed("solver breakdown".to_string()))
+                    }
+                    CgStatus::InvalidInput => {
+                        Err(SolverError::InvalidInput("invalid input".to_string()))
+                    }
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed(
+                        "max iterations reached".to_string(),
+                    )),
                 }
             }
         }
@@ -175,23 +197,41 @@ impl SparseSolver {
                 let result = cg_solve(matrix, b, max_iter, tol);
                 match result.status {
                     CgStatus::Converged => Ok(result.x),
-                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
-                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
-                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
-                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed(
+                        "matrix not positive definite".to_string(),
+                    )),
+                    CgStatus::Breakdown => {
+                        Err(SolverError::SolveFailed("solver breakdown".to_string()))
+                    }
+                    CgStatus::InvalidInput => {
+                        Err(SolverError::InvalidInput("invalid input".to_string()))
+                    }
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed(
+                        "max iterations reached".to_string(),
+                    )),
                 }
             }
             SolverKind::Iccg => {
                 let result = iccg_solve(matrix, b, max_iter, tol);
                 match result.status {
                     CgStatus::Converged => Ok(result.x),
-                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed("matrix not positive definite".to_string())),
-                    CgStatus::Breakdown => Err(SolverError::SolveFailed("solver breakdown".to_string())),
-                    CgStatus::InvalidInput => Err(SolverError::InvalidInput("invalid input".to_string())),
-                    CgStatus::MaxIterations => Err(SolverError::SolveFailed("max iterations reached".to_string())),
+                    CgStatus::NotPositiveDefinite => Err(SolverError::SolveFailed(
+                        "matrix not positive definite".to_string(),
+                    )),
+                    CgStatus::Breakdown => {
+                        Err(SolverError::SolveFailed("solver breakdown".to_string()))
+                    }
+                    CgStatus::InvalidInput => {
+                        Err(SolverError::InvalidInput("invalid input".to_string()))
+                    }
+                    CgStatus::MaxIterations => Err(SolverError::SolveFailed(
+                        "max iterations reached".to_string(),
+                    )),
                 }
             }
-            _ => Err(SolverError::NotImplemented("solver kind not supported for iterative solve".to_string())),
+            _ => Err(SolverError::NotImplemented(
+                "solver kind not supported for iterative solve".to_string(),
+            )),
         }
     }
 }
@@ -216,7 +256,13 @@ pub struct SparseLu {
 impl SparseLu {
     pub fn factor(a: &SparseMatrix) -> Result<SparseLu, String> {
         let n = a.n;
-        let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+        let mut ac = if a.compressed {
+            None
+        } else {
+            let mut m = a.clone();
+            m.compress();
+            Some(m)
+        };
         let a_ref = ac.as_ref().unwrap_or(a);
         let (row_ptr, cols, vals) = a_ref.csr_data();
 
@@ -302,10 +348,7 @@ impl SparseLu {
             l_rows[i].sort_unstable_by_key(|e| e.0);
 
             // Pivot: max |U(i..)| in this row from column i onward.
-            let pivot_val = u_rows[i]
-                .first()
-                .map(|(_, v)| v.abs())
-                .unwrap_or(0.0);
+            let pivot_val = u_rows[i].first().map(|(_, v)| v.abs()).unwrap_or(0.0);
             let tol_pivot = PIVOT_TOL * row_scale[i].max(1e-300);
             if u_rows[i].is_empty() || u_rows[i][0].0 != i || pivot_val <= tol_pivot {
                 // Static pivoting fallback: perturb the diagonal so the
@@ -328,7 +371,12 @@ impl SparseLu {
             perm[i] = i;
         }
 
-        Ok(SparseLu { n, l_rows, u_rows, perm })
+        Ok(SparseLu {
+            n,
+            l_rows,
+            u_rows,
+            perm,
+        })
     }
 
     /// Solve A x = b via forward/back substitution using P A = L U.
@@ -382,7 +430,13 @@ pub struct Ic0Factor {
 impl Ic0Factor {
     pub fn factor(a: &SparseMatrix) -> Result<Ic0Factor, String> {
         let n = a.n;
-        let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+        let mut ac = if a.compressed {
+            None
+        } else {
+            let mut m = a.clone();
+            m.compress();
+            Some(m)
+        };
         let a_ref = ac.as_ref().unwrap_or(a);
         let (row_ptr, cols, vals) = a_ref.csr_data();
 
@@ -452,7 +506,12 @@ impl Ic0Factor {
             }
         }
 
-        Ok(Ic0Factor { n, ptr, flat_cols, flat_vals })
+        Ok(Ic0Factor {
+            n,
+            ptr,
+            flat_cols,
+            flat_vals,
+        })
     }
 
     /// Solve (L L^T) x = b.
@@ -494,7 +553,13 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
     };
 
     let n = b.len();
-    let mut ac = if a.compressed { None } else { let mut m = a.clone(); m.compress(); Some(m) };
+    let mut ac = if a.compressed {
+        None
+    } else {
+        let mut m = a.clone();
+        m.compress();
+        Some(m)
+    };
     let a_ref = ac.as_ref().unwrap_or(a);
     let (rptr, ccols, cvals) = a_ref.csr_data();
     let matvec = |p: &[f64], out: &mut [f64]| {
@@ -601,8 +666,8 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
 pub mod pardiso {
     //! Direct solve via Intel MKL PARDISO (`mkl_rt`). Enable with
     //! `--features pardiso`; requires `mkl_rt.3.dll` (or equivalent) on PATH.
+    use super::super::{CscMatrix, NEAR_ZERO_TOL, SkylineLdlt, SparseMatrix};
     use std::os::raw::c_void;
-    use super::super::{NEAR_ZERO_TOL, CscMatrix, SkylineLdlt, SparseMatrix};
 
     #[link(name = "mkl_rt.2", kind = "raw-dylib")]
     unsafe extern "C" {
@@ -671,8 +736,11 @@ pub mod pardiso {
                 let msglvl: i32 = 0;
                 pardisoinit(
                     s.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT, &MNUM,
-                    s.iparm.as_mut_ptr(), &msglvl, &mut err,
+                    &MAXFCT,
+                    &MNUM,
+                    s.iparm.as_mut_ptr(),
+                    &msglvl,
+                    &mut err,
                 );
                 if err != 0 {
                     return Err(format!("pardisoinit failed: {err}"));
@@ -701,10 +769,21 @@ pub mod pardiso {
                 let mut dummy_x: f64 = 0.0;
                 pardiso(
                     self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT, &MNUM, &MTYPE, &phase, &n,
-                    self.vals.as_ptr(), self.ia.as_ptr(), self.ja.as_ptr(),
-                    std::ptr::null(), &nrhs, self.iparm.as_mut_ptr(), &msglvl,
-                    &dummy_b, &mut dummy_x, &mut err,
+                    &MAXFCT,
+                    &MNUM,
+                    &MTYPE,
+                    &phase,
+                    &n,
+                    self.vals.as_ptr(),
+                    self.ia.as_ptr(),
+                    self.ja.as_ptr(),
+                    std::ptr::null(),
+                    &nrhs,
+                    self.iparm.as_mut_ptr(),
+                    &msglvl,
+                    &dummy_b,
+                    &mut dummy_x,
+                    &mut err,
                 );
                 if err != 0 {
                     return Err(format!("pardiso factorisation failed: {err}"));
@@ -730,10 +809,21 @@ pub mod pardiso {
                 let msglvl: i32 = 0;
                 pardiso(
                     self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT, &MNUM, &MTYPE, &phase, &nn,
-                    self.vals.as_ptr(), self.ia.as_ptr(), self.ja.as_ptr(),
-                    std::ptr::null(), &nrhs, self.iparm.as_mut_ptr(), &msglvl,
-                    b.as_ptr(), x.as_mut_ptr(), &mut err,
+                    &MAXFCT,
+                    &MNUM,
+                    &MTYPE,
+                    &phase,
+                    &nn,
+                    self.vals.as_ptr(),
+                    self.ia.as_ptr(),
+                    self.ja.as_ptr(),
+                    std::ptr::null(),
+                    &nrhs,
+                    self.iparm.as_mut_ptr(),
+                    &msglvl,
+                    b.as_ptr(),
+                    x.as_mut_ptr(),
+                    &mut err,
                 );
                 if err != 0 {
                     return Err(format!("pardiso solve failed: {err}"));
@@ -760,10 +850,21 @@ pub mod pardiso {
                 let msglvl: i32 = 0;
                 pardiso(
                     self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT, &MNUM, &MTYPE, &phase, &nn,
-                    self.vals.as_ptr(), self.ia.as_ptr(), self.ja.as_ptr(),
-                    std::ptr::null(), &nrhs, self.iparm.as_mut_ptr(), &msglvl,
-                    b.as_ptr(), x.as_mut_ptr(), &mut err,
+                    &MAXFCT,
+                    &MNUM,
+                    &MTYPE,
+                    &phase,
+                    &nn,
+                    self.vals.as_ptr(),
+                    self.ia.as_ptr(),
+                    self.ja.as_ptr(),
+                    std::ptr::null(),
+                    &nrhs,
+                    self.iparm.as_mut_ptr(),
+                    &msglvl,
+                    b.as_ptr(),
+                    x.as_mut_ptr(),
+                    &mut err,
                 );
                 if err != 0 {
                     return Err(format!("pardiso solve failed: {err}"));
@@ -804,12 +905,19 @@ pub mod pardiso {
             let w2 = ldlt.solve(c);
             let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
             let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-            let lambda = if ct_w1.abs() > NEAR_ZERO_TOL { ct_w2 / ct_w1 } else { 0.0 };
+            let lambda = if ct_w1.abs() > NEAR_ZERO_TOL {
+                ct_w2 / ct_w1
+            } else {
+                0.0
+            };
             let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-            if max_u > 0.0 { lambda.abs() / max_u } else { f64::INFINITY }
+            if max_u > 0.0 {
+                lambda.abs() / max_u
+            } else {
+                f64::INFINITY
+            }
         }
     }
-
 
     impl Drop for PardisoSolver {
         fn drop(&mut self) {
@@ -826,10 +934,21 @@ pub mod pardiso {
                 let mut x_dummy: f64 = 0.0;
                 pardiso(
                     self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT, &MNUM, &MTYPE, &phase, &n,
-                    self.vals.as_ptr(), self.ia.as_ptr(), self.ja.as_ptr(),
-                    std::ptr::null(), &nrhs, self.iparm.as_mut_ptr(), &msglvl,
-                    &dummy, &mut x_dummy, &mut err,
+                    &MAXFCT,
+                    &MNUM,
+                    &MTYPE,
+                    &phase,
+                    &n,
+                    self.vals.as_ptr(),
+                    self.ia.as_ptr(),
+                    self.ja.as_ptr(),
+                    std::ptr::null(),
+                    &nrhs,
+                    self.iparm.as_mut_ptr(),
+                    &msglvl,
+                    &dummy,
+                    &mut x_dummy,
+                    &mut err,
                 );
             }
         }
@@ -859,13 +978,18 @@ mod pardiso_tests {
         let u = s.solve_direct_lagrange(&f).expect("pardiso solve");
         assert_eq!(u.len(), n);
         // residual check
-        let mut kmat = SparseMatrix { n, rows: vec![], cols: vec![], vals: vec![] };
+        let mut kmat = SparseMatrix {
+            n,
+            rows: vec![],
+            cols: vec![],
+            vals: vec![],
+        };
         kmat.rows = k.rows.clone();
         kmat.cols = k.cols.clone();
         kmat.vals = k.vals.clone();
         let mut kmat2 = kmat;
-kmat2.compress();
-let prod = kmat2.matvec(&u);
+        kmat2.compress();
+        let prod = kmat2.matvec(&u);
         for i in 0..n {
             assert!(
                 (prod[i] - f[i] + c[i]).abs() < 1e-6 || (prod[i] - f[i]).abs() < 1e-6,

@@ -194,13 +194,14 @@ impl StressAnalysis {
     /// Uses FEM Tri6 element stress analysis (mirroring Python `stress_post.py`).
     /// Falls back to analytical formulas if FEM mesh generation fails.
     pub fn calculate_stress(&self, loads: SectionLoads) -> StressAnalysisResult {
-let area = self.props.area;
+        let area = self.props.area;
 
         // Try FEM Tri6 stress analysis first
-        let fem_points = match crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads) {
-            Ok(points) => Some(points),
-            Err(_) => None,
-        };
+        let fem_points =
+            match crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads) {
+                Ok(points) => Some(points),
+                Err(_) => None,
+            };
 
         if let Some(fem_points) = fem_points {
             let mut max_sigma_z = f64::NEG_INFINITY;
@@ -249,7 +250,10 @@ let area = self.props.area;
         let i11 = principal.i11;
         let i22 = principal.i22;
 
-        let warping = crate::plastic::warping::WarpingProperties::from_section(&self.section, self.material.poissons_ratio);
+        let warping = crate::plastic::warping::WarpingProperties::from_section(
+            &self.section,
+            self.material.poissons_ratio,
+        );
         let ay = warping.ay.max(1e-12);
         let az = warping.az.max(1e-12);
         let j = warping.j.max(1e-12);

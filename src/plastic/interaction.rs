@@ -398,11 +398,7 @@ impl InteractionDiagram {
         for pt in &self.surface_points {
             let mut scale = 0.0f64;
             let mut covers = true;
-            for (load_c, cap_c) in [
-                (ln, pt.n),
-                (lmx, pt.mx),
-                (lmy, pt.my),
-            ] {
+            for (load_c, cap_c) in [(ln, pt.n), (lmx, pt.mx), (lmy, pt.my)] {
                 // Compare magnitudes: the surface orientation (sign) depends
                 // on the PNA sweep angle and is irrelevant for capacity.
                 let cap_abs = cap_c.abs() / gamma_m0;
@@ -419,7 +415,11 @@ impl InteractionDiagram {
             }
         }
 
-        let utilization = if min_scale.is_finite() { min_scale } else { f64::INFINITY };
+        let utilization = if min_scale.is_finite() {
+            min_scale
+        } else {
+            f64::INFINITY
+        };
 
         let safe = |a: f64, b: f64| if b > 0.0 { a / b } else { 0.0 };
         CapacityCheck {

@@ -6,8 +6,8 @@ pub mod geometry;
 pub mod io;
 pub mod material;
 pub mod mesh;
-pub mod post;
 pub mod plastic;
+pub mod post;
 pub mod section;
 pub mod section_library;
 pub mod section_properties;
@@ -25,24 +25,27 @@ pub use crate::fire::{
     FireAnalysis, FireExposure, FireProtection, FireResistanceResult, MaterialPropertiesAtTemp,
     ProtectionType, SectionFactor, TemperatureProfile, composite,
 };
-pub use crate::geometry::{Axis, BoundaryExtrema, CompoundError, CompoundGeometry, Geometry, JoinStyle, Point, Polygon, Transform};
+pub use crate::geometry::{
+    Axis, BoundaryExtrema, CompoundError, CompoundGeometry, Geometry, JoinStyle, Point, Polygon,
+    Transform,
+};
 pub use crate::io::{
     CsvExportOptions, DxfColor, DxfExportOptions, ExportFormat, JsonMaterial, JsonSection,
     SectionExporter, SectionImporter, SvgExportOptions, export_section_library, from_csv,
-    from_json, plot_centroids, section_from_composite, section_from_parametric,
-    to_csv, to_dxf, to_json, to_nastran, to_svg, to_vtk,
+    from_json, plot_centroids, section_from_composite, section_from_parametric, to_csv, to_dxf,
+    to_json, to_nastran, to_svg, to_vtk,
 };
 
+pub use crate::fea::{LagrangeKernel, SkylineLdlt, solvers};
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
-pub use crate::fea::{solvers, LagrangeKernel, SkylineLdlt};
-pub use crate::plastic::warping_fem::warping_svg;
 pub use crate::mesh::{
     AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
     FemSectionAnalysis, FemSolver, FemWarpingProperties, LoadCase, MaterialProps, Mesh, MeshParams,
     PropertyComparison, StressPlotData, StressPost, StressResult, analyze_section,
 };
+pub use crate::plastic::warping_fem::warping_svg;
 pub use crate::plastic::{
     CapacityCheck, ClassLimit, InteractionDiagram, InteractionPoint, LoadCase3D, PlasticAnalysis,
     PlasticProperties, PlasticSection, SectionClass, SectionClassification, StressDistribution,
@@ -52,6 +55,7 @@ pub use crate::section::{FrameProperties, MaterialError, Section, TransformedFra
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{
     GeometricProperties, GyrationProperties, PrincipalProperties, SectionProperties,
-};pub use crate::stress::{
+};
+pub use crate::stress::{
     SectionLoads, StressAnalysis, StressAnalysisResult, StressAtPoint, YieldCheckResult,
 };

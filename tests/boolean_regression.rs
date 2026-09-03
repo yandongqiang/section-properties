@@ -9,12 +9,9 @@
 //! - Ensure determinism and floating-point stability
 
 use section_properties::geometry::{
-    Polygon, Point, BoolOp, BooleanError, PolygonError,
-    polygon_boolean, polygon_boolean_checked,
-    section_union, section_intersection, section_difference,
-    Section, check_boolean_bounds,
-    CompoundGeometry, Geometry, union_voids,
-    CompoundError,
+    BoolOp, BooleanError, CompoundError, CompoundGeometry, Geometry, Point, Polygon, PolygonError,
+    Section, check_boolean_bounds, polygon_boolean, polygon_boolean_checked, section_difference,
+    section_intersection, section_union, union_voids,
 };
 
 /// Convenience: create a rectangle polygon.
@@ -231,7 +228,10 @@ fn regression_large_coordinates() {
     let expected = 500.0 * 500.0 * scale * scale;
     let actual = i[0].area();
     let rel_error = (actual - expected).abs() / expected;
-    eprintln!("large_coords: expected={}, actual={}, rel_error={}", expected, actual, rel_error);
+    eprintln!(
+        "large_coords: expected={}, actual={}, rel_error={}",
+        expected, actual, rel_error
+    );
     assert!(rel_error < 1e-6, "rel_error={}", rel_error);
 }
 
@@ -245,7 +245,12 @@ fn regression_small_coordinates() {
     assert_eq!(i.len(), 1);
     let expected = 0.25e-12;
     let actual = i[0].area();
-    eprintln!("small_coords: expected={}, actual={}, diff={}", expected, actual, (actual - expected).abs());
+    eprintln!(
+        "small_coords: expected={}, actual={}, diff={}",
+        expected,
+        actual,
+        (actual - expected).abs()
+    );
     // At very small coordinates, precision degrades significantly
     assert!((actual - expected).abs() < 1e-12);
 }
@@ -254,9 +259,14 @@ fn regression_small_coordinates() {
 fn regression_u_shape() {
     // U-shape (concave) intersection
     let u = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(3.0, 0.0), Point::new(3.0, 3.0),
-        Point::new(2.0, 3.0), Point::new(2.0, 1.0), Point::new(1.0, 1.0),
-        Point::new(1.0, 3.0), Point::new(0.0, 3.0),
+        Point::new(0.0, 0.0),
+        Point::new(3.0, 0.0),
+        Point::new(3.0, 3.0),
+        Point::new(2.0, 3.0),
+        Point::new(2.0, 1.0),
+        Point::new(1.0, 1.0),
+        Point::new(1.0, 3.0),
+        Point::new(0.0, 3.0),
     ]);
     let fill = square(0.5, 0.5, 2.0);
 
@@ -268,8 +278,12 @@ fn regression_u_shape() {
 #[test]
 fn regression_non_convex_l_shape() {
     let l = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(2.0, 0.0), Point::new(2.0, 1.0),
-        Point::new(1.0, 1.0), Point::new(1.0, 2.0), Point::new(0.0, 2.0),
+        Point::new(0.0, 0.0),
+        Point::new(2.0, 0.0),
+        Point::new(2.0, 1.0),
+        Point::new(1.0, 1.0),
+        Point::new(1.0, 2.0),
+        Point::new(0.0, 2.0),
     ]);
     let b = square(0.5, 0.5, 1.0);
 
@@ -280,8 +294,6 @@ fn regression_non_convex_l_shape() {
 
 #[test]
 fn regression_section_hole_operations() {
-    
-
     // Section difference creates hole
     let outer = square(0.0, 0.0, 4.0);
     let a = Section::new(outer, vec![]);
@@ -305,14 +317,14 @@ fn regression_section_hole_operations() {
 
 #[test]
 fn regression_hole_clipping() {
-    
-
     // A with large hole, B is narrow strip - hole must be clipped
     let hole = square(1.0, 1.0, 8.0); // [1,9]^2
     let a = Section::new(square(0.0, 0.0, 10.0), vec![hole]);
     let b_outer = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(2.0, 0.0),
-        Point::new(2.0, 10.0), Point::new(0.0, 10.0),
+        Point::new(0.0, 0.0),
+        Point::new(2.0, 0.0),
+        Point::new(2.0, 10.0),
+        Point::new(0.0, 10.0),
     ]);
     let b = Section::new(b_outer, vec![]);
 
@@ -328,18 +340,20 @@ fn regression_hole_clipping() {
 
 #[test]
 fn regression_touching_holes() {
-    
-
     // Two holes touching at an edge
     let hole_a = Polygon::new(vec![
-        Point::new(0.5, 0.5), Point::new(1.0, 0.5),
-        Point::new(1.0, 1.5), Point::new(0.5, 1.5),
+        Point::new(0.5, 0.5),
+        Point::new(1.0, 0.5),
+        Point::new(1.0, 1.5),
+        Point::new(0.5, 1.5),
     ]);
     let a = Section::new(square(0.0, 0.0, 2.0), vec![hole_a]);
 
     let hole_b = Polygon::new(vec![
-        Point::new(1.0, 0.5), Point::new(1.5, 0.5),
-        Point::new(1.5, 1.5), Point::new(1.0, 1.5),
+        Point::new(1.0, 0.5),
+        Point::new(1.5, 0.5),
+        Point::new(1.5, 1.5),
+        Point::new(1.0, 1.5),
     ]);
     let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
 
@@ -351,18 +365,20 @@ fn regression_touching_holes() {
 
 #[test]
 fn regression_union_fills_touching_holes() {
-    
-
     // In union, touching holes get filled by other's material
     let hole_a = Polygon::new(vec![
-        Point::new(0.5, 0.5), Point::new(1.0, 0.5),
-        Point::new(1.0, 1.5), Point::new(0.5, 1.5),
+        Point::new(0.5, 0.5),
+        Point::new(1.0, 0.5),
+        Point::new(1.0, 1.5),
+        Point::new(0.5, 1.5),
     ]);
     let a = Section::new(square(0.0, 0.0, 2.0), vec![hole_a]);
 
     let hole_b = Polygon::new(vec![
-        Point::new(1.0, 0.5), Point::new(1.5, 0.5),
-        Point::new(1.5, 1.5), Point::new(1.0, 1.5),
+        Point::new(1.0, 0.5),
+        Point::new(1.5, 0.5),
+        Point::new(1.5, 1.5),
+        Point::new(1.0, 1.5),
     ]);
     let b = Section::new(square(0.0, 0.0, 2.0), vec![hole_b]);
 
@@ -375,9 +391,12 @@ fn regression_union_fills_touching_holes() {
 fn regression_offset_self_intersection() {
     // Test offset on a shape that produces self-intersections
     let l_shape = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(3.0, 0.0),
-        Point::new(3.0, 1.0), Point::new(1.0, 1.0),
-        Point::new(1.0, 3.0), Point::new(0.0, 3.0),
+        Point::new(0.0, 0.0),
+        Point::new(3.0, 0.0),
+        Point::new(3.0, 1.0),
+        Point::new(1.0, 1.0),
+        Point::new(1.0, 3.0),
+        Point::new(0.0, 3.0),
     ]);
 
     // Small outward offset should not self-intersect
@@ -414,8 +433,10 @@ fn regression_bounds_validation() {
 
     // Union area 300 > |A|+|B| = 200 -> reject
     let bad_union = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(30.0, 0.0),
-        Point::new(30.0, 10.0), Point::new(0.0, 10.0),
+        Point::new(0.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(0.0, 10.0),
     ]);
     assert!(check_boolean_bounds(&[bad_union], &a, &b, BoolOp::Union).is_err());
 
@@ -439,8 +460,10 @@ fn regression_compound_union_voids() {
 fn regression_polygon_self_intersection_detection() {
     // Bow-tie self-intersecting
     let bowtie = Polygon::new(vec![
-        Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-        Point::new(0.0, 10.0), Point::new(8.0, 8.0),
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(0.0, 10.0),
+        Point::new(8.0, 8.0),
     ]);
     assert!(bowtie.has_self_intersections());
 
@@ -450,8 +473,10 @@ fn regression_polygon_self_intersection_detection() {
 
     // try_new rejects self-intersecting
     let verts = vec![
-        Point::new(0.0, 0.0), Point::new(10.0, 0.0),
-        Point::new(0.0, 10.0), Point::new(8.0, 8.0),
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(0.0, 10.0),
+        Point::new(8.0, 8.0),
     ];
     let err = Polygon::try_new(verts).unwrap_err();
     assert!(matches!(err, PolygonError::SelfIntersection));
@@ -459,15 +484,11 @@ fn regression_polygon_self_intersection_detection() {
 
 #[test]
 fn regression_compound_operations() {
-    
-
     let a = CompoundGeometry::new(vec![
         Geometry::new(square(0.0, 0.0, 1.0), vec![]),
         Geometry::new(square(3.0, 0.0, 1.0), vec![]),
     ]);
-    let b = CompoundGeometry::new(vec![
-        Geometry::new(square(1.0, 0.0, 1.0), vec![]),
-    ]);
+    let b = CompoundGeometry::new(vec![Geometry::new(square(1.0, 0.0, 1.0), vec![])]);
 
     // Union
     let u = a.union(&b).unwrap();
@@ -488,8 +509,6 @@ fn regression_compound_operations() {
 
 #[test]
 fn regression_section_error_propagation() {
-    
-
     let a = Section::new(square(0.0, 0.0, 4.0), vec![]);
     let b = Section::new(square(1.0, 1.0, 2.0), vec![]);
 
@@ -505,8 +524,6 @@ fn regression_section_error_propagation() {
 
 #[test]
 fn regression_difference_edge_cases() {
-    
-
     // A inside B's hole -> A survives
     let b = Section::new(square(0.0, 0.0, 10.0), vec![square(3.0, 3.0, 4.0)]);
     let a = Section::new(square(4.0, 4.0, 2.0), vec![]);
@@ -533,7 +550,7 @@ fn regression_difference_edge_cases() {
 fn regression_offset_stability() {
     // Test that multiple offset operations are stable
     let rect = square(0.0, 0.0, 10.0);
-    
+
     // Multiple small offsets should compose
     let mut current = rect;
     for _ in 0..5 {
@@ -601,11 +618,11 @@ fn regression_large_polygon_vertex_count() {
         circle.push(Point::new(10.0 * angle.cos(), 10.0 * angle.sin()));
     }
     let a = Polygon::new(circle);
-    
+
     let b = square(-5.0, -5.0, 10.0); // square inside circle
     let r = polygon_boolean(&a, &b, BoolOp::Intersection);
     assert!(!r.is_empty());
-    
+
     // Circle area = 100*pi ≈ 314, square = 100
     // Intersection ≈ 100
     assert!((r[0].area() - 100.0).abs() < 1.0); // ~1% tolerance
@@ -626,11 +643,14 @@ fn regression_thin_rectangle_operations() {
 #[test]
 fn regression_compound_hole_validation() {
     use section_properties::geometry::{CompoundGeometry, Section};
-    
+
     // Nested holes should be rejected
     let hole_outer = square(1.0, 1.0, 2.0);
     let hole_inner = square(1.5, 1.5, 1.0);
-    let s = Section::new(square(0.0, 0.0, 4.0), vec![square(1.0, 1.0, 2.0), square(1.5, 1.5, 1.0)]);
+    let s = Section::new(
+        square(0.0, 0.0, 4.0),
+        vec![square(1.0, 1.0, 2.0), square(1.5, 1.5, 1.0)],
+    );
     let compound = CompoundGeometry::from_sections(&[s]);
     assert!(matches!(
         compound.validate(),
@@ -638,10 +658,10 @@ fn regression_compound_hole_validation() {
     ));
 
     // Non-nested is valid
-    let ok = Section::new(square(0.0, 0.0, 4.0), vec![
-        square(0.5, 0.5, 0.5),
-        square(3.0, 3.0, 0.5),
-    ]);
+    let ok = Section::new(
+        square(0.0, 0.0, 4.0),
+        vec![square(0.5, 0.5, 0.5), square(3.0, 3.0, 0.5)],
+    );
     let compound_ok = CompoundGeometry::from_sections(&[ok]);
     assert!(compound_ok.validate().is_ok());
 }

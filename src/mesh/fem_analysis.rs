@@ -502,8 +502,16 @@ fn compute_fem_stress(
 
     let sig_at = |x: f64, y: f64| -> [f64; 3] {
         let s_n = if n.abs() > 1e-12 { n / area } else { 0.0 };
-        let s_mx = if mxx.abs() > 1e-12 { mxx * (y - cy) / ixx } else { 0.0 };
-        let s_my = if myy.abs() > 1e-12 { -myy * (x - cx) / iy } else { 0.0 };
+        let s_mx = if mxx.abs() > 1e-12 {
+            mxx * (y - cy) / ixx
+        } else {
+            0.0
+        };
+        let s_my = if myy.abs() > 1e-12 {
+            -myy * (x - cx) / iy
+        } else {
+            0.0
+        };
         let mut tau_xz = 0.0;
         let mut tau_yz = 0.0;
         if mzz.abs() > 1e-12 && j_t.is_finite() && j_t > 1e-15 {
@@ -527,8 +535,10 @@ fn compute_fem_stress(
     let mut min_p2 = f64::INFINITY;
 
     for (elem_idx, element) in mesh.elements.iter().enumerate() {
-        let xc = (mesh.nodes[element[0]].x + mesh.nodes[element[1]].x + mesh.nodes[element[2]].x) / 3.0;
-        let yc = (mesh.nodes[element[0]].y + mesh.nodes[element[1]].y + mesh.nodes[element[2]].y) / 3.0;
+        let xc =
+            (mesh.nodes[element[0]].x + mesh.nodes[element[1]].x + mesh.nodes[element[2]].x) / 3.0;
+        let yc =
+            (mesh.nodes[element[0]].y + mesh.nodes[element[1]].y + mesh.nodes[element[2]].y) / 3.0;
         let s = sig_at(xc, yc);
         let sr = StressResult::from_stress(s[0], s[1], s[2]);
         if sr.von_mises > max_vm {
@@ -587,7 +597,6 @@ fn compute_fem_stress(
         min_principal: min_p2,
     })
 }
-
 
 /// High-level FEM analysis for composite sections.
 #[derive(Debug, Clone)]
