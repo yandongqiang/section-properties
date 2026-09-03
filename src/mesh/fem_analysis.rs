@@ -444,7 +444,7 @@ fn compute_fem_geometric_properties(mesh: &Mesh, _material: &Material) -> FemGeo
 }
 
 /// Compute warping properties using FEM.
-fn compute_fem_warping_properties(mesh: &Mesh, _material: &Material) -> FemWarpingProperties {
+fn compute_fem_warping_properties(mesh: &Mesh, material: &Material) -> FemWarpingProperties {
     // Full FEM warping analysis would:
     // 1. Solve for warping function ω(x,y) with unit twist
     // 2. Compute J = ∫(ψ_x² + ψ_y²) dA where ψ is Prandtl stress function
@@ -456,7 +456,7 @@ fn compute_fem_warping_properties(mesh: &Mesh, _material: &Material) -> FemWarpi
     // For now, delegate to existing analytical warping module
     use crate::plastic::warping::WarpingProperties;
     let section = section_from_mesh(mesh);
-    let wp = WarpingProperties::from_section(&section, 0.3);
+    let wp = WarpingProperties::from_section(&section, material.poissons_ratio);
 
     FemWarpingProperties {
         j: wp.j,

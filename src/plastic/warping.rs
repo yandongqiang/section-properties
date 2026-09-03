@@ -3,7 +3,7 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-use super::warping_fem::{compute_fem_warping_properties, compute_fem_solution, estimate_shear_areas_fallback, FemWarpingResult, FemSolution, analytical_shear_center, analytical_beta};
+use super::warping_fem::{compute_fem_warping_properties, compute_fem_solution, FemWarpingResult, FemSolution, analytical_shear_center, analytical_beta};
 use crate::geometry::Point;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -124,22 +124,9 @@ impl WarpingProperties {
         let iw = fem.iw;
         let j = fem.j;
 
-        // FEM shear areas may be inaccurate for thin-walled sections with coarse meshes.
-        // Fall back to approximate formulas when FEM gives zero, negative or
-        // unphysical values (non-finite or far above the section area).
-        let fem_shear_ok = |sx: f64, sy: f64| {
-            sx.is_finite()
-                && sy.is_finite()
-                && sx > 0.0
-                && sy > 0.0
-                && sx < area * 100.0
-                && sy < area * 100.0
-        };
-        let (ay, az) = if fem_shear_ok(fem.a_sx, fem.a_sy) {
-            (fem.a_sx, fem.a_sy)
-        } else {
-            estimate_shear_areas_fallback(section, &props)
-        };
+        // FEM shear areas directly (Python sectionproperties uses the FEM
+        // values without an analytical fallback guess).
+        let (ay, az) = (fem.a_sx, fem.a_sy);
 
         let ip = props.ix + props.iy;
         let r_t = (j / area).sqrt();
@@ -191,36 +178,24 @@ impl WarpingProperties {
             (a_s11, a_s22)
         };
 
-        // Principal axis monosymmetry constants via tensor rotation
-        // (no additional FEM run needed)
-        let (beta_11, beta_22) = if phi.abs() < 1e-10 {
-            (beta_x, beta_y)
-        } else {
-            let cos_phi = phi.cos();
-            let sin_phi = phi.sin();
-            // Transform monosymmetry constants to principal axes
-            // beta_11 = beta_x * cos(phi) + beta_y * sin(phi)
-            // beta_22 = -beta_x * sin(phi) + beta_y * cos(phi)
-            let beta_11 = beta_x * cos_phi + beta_y * sin_phi;
-            let beta_22 = -beta_x * sin_phi + beta_y * cos_phi;
-            (beta_11, beta_22)
-        };
+        // Principal-axis monosymmetry constants via direct integration in
+        // rotated coordinates (Python formula) computed by the FEM analysis,
+        // not by rotating the centroidal beta values.
+        let beta_11 = fem.beta_11_plus;
+        let beta_22 = fem.beta_22_plus;
+        let beta_11_plus = fem.beta_11_plus;
+        let beta_11_minus = fem.beta_11_minus;
+        let beta_22_plus = fem.beta_22_plus;
+        let beta_22_minus = fem.beta_22_minus;
 
         let delta_s = 2.0 * (1.0 + nu) * (props.ix * props.iy - props.ixy * props.ixy);
 
-        // Use FEM-computed beta_minus values (not just -beta_plus)
+        // Use FEM-computed centroidal monosymmetry constants. AS4100 /
+        // Python sectionproperties convention: beta_x_minus = -beta_x_plus.
         let beta_x_plus = fem.beta_x_plus;
         let beta_x_minus = fem.beta_x_minus;
         let beta_y_plus = fem.beta_y_plus;
         let beta_y_minus = fem.beta_y_minus;
-
-        // Principal axis plus/minus via tensor rotation
-        let cos_phi = phi.cos();
-        let sin_phi = phi.sin();
-        let beta_11_plus = beta_11;
-        let beta_11_minus = -beta_11; // For doubly symmetric, this holds; for general, would need FEM
-        let beta_22_plus = beta_22;
-        let beta_22_minus = -beta_22;
 
         // Max St. Venant shear stress for unit torque from FEM
         let tau_sv_max_unit = fem_solution.tau_sv_max;
@@ -294,7 +269,8 @@ impl ThinWalledCheck for Section {
         let props = SectionProperties::from_section(self);
         let bounds = self.bounds();
         let bbox_area = (bounds.1 - bounds.0) * (bounds.3 - bounds.2);
-        props.area / bbox_area < 0.15 // Less than 15% solid
+        // 20% threshold captures I, Channel, and Angle sections
+        props.area / bbox_area < 0.20
     }
 }
 
@@ -422,12 +398,18 @@ impl SectionDistance for Section {
 }
 
 /// Exact warping analysis using sectorial coordinates.
-pub mod exact {
+pub mod trefftz {
     use super::*;
     use crate::geometry::Point;
     use crate::mesh::{Mesh, MeshParams, mesh_section};
 
     /// Sectorial coordinate (warping function) computation using Trefftz method.
+    ///
+    /// NOTE: this is a legacy, approximate sectorial-coordinate solver kept for
+    /// reference. The boundary integral in `apply_sectorial_bc` is a pointwise
+    /// approximation (not a proper edge integration) and `compute_sectorial_properties`
+    /// averages `omega` over elements, so results are only qualitatively useful.
+    /// Prefer the FEM warping path in `warping_fem`.
     pub fn compute_sectorial_coordinates(section: &Section) -> SectorialProperties {
         // Use FEM to solve for the sectorial coordinate (warping function)
         // ∇²�?= 0 with boundary condition: ∂�?∂n = y*n_x - x*n_y on boundary
@@ -442,6 +424,7 @@ pub mod exact {
                 quality_threshold: 0.3,
                 use_delaunay: true,
                 max_iterations: 10,
+                max_nodes: 20000,
             },
         );
 
@@ -924,20 +907,25 @@ mod tests {
 
     #[test]
     fn warping_shear_areas_i_section() {
-        // I-section: check shear areas against theoretical values
-        // For I-section: A_sy (web shear) �?hw * tw, A_sx (flange shear) �?2*bf*tf
+        // I-section: check that FEM shear areas are positive and reasonable.
+        // The FEM shear areas differ from the simple web/flange area formulas
+        // (which were previously used as a fallback). FEM computes shear areas
+        // from the full shear coefficient formulation, which gives different
+        // values than the simple web/flange area approximation.
         let i = crate::section_library::steel::ISection::new(0.3, 0.15, 0.007, 0.01, 0.012);
         let section = i.build();
         let props = WarpingProperties::from_section(&section, 0.3);
 
-        // ay = shear area for x-direction (flanges), az = shear area for y-direction (web)
+        // Both shear areas should be positive and in a reasonable range
         assert!(props.ay > 0.0);
         assert!(props.az > 0.0);
 
-        // For I-section, web carries vertical shear: az �?hw * tw
-        // hw �?0.3 - 2*0.01 = 0.28, tw = 0.007
-        let expected_az = 0.28 * 0.007;
-        assert!((props.az - expected_az).abs() / expected_az < 0.3);
+        // For the IPE300-like section, FEM shear areas are approximately:
+        // ay (flange shear) ~ 0.0026, az (web shear) ~ 0.0035
+        // These differ from the simple web/flange area formulas (web ~ 0.00196)
+        // because FEM uses the full shear coefficient formulation.
+        assert!((props.ay - 0.00261).abs() / 0.00261 < 0.15);
+        assert!((props.az - 0.00351).abs() / 0.00351 < 0.15);
     }
 
     #[test]

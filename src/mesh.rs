@@ -178,6 +178,11 @@ pub struct MeshParams {
     pub use_delaunay: bool,
     /// Maximum refinement iterations
     pub max_iterations: usize,
+    /// Maximum number of tri3 nodes the uniform refine step may create.
+    /// (The internal cap is `max_nodes / 4` tri3 nodes, to bound the FEM mesh
+    /// size for thin-walled sections whose uniform refinement would otherwise
+    /// explode and make the direct solver impractically slow.)
+    pub max_nodes: usize,
 }
 
 impl Default for MeshParams {
@@ -189,6 +194,7 @@ impl Default for MeshParams {
             quality_threshold: 0.3,
             use_delaunay: true,
             max_iterations: 10,
+            max_nodes: 20000,
         }
     }
 }

@@ -450,7 +450,7 @@ pub fn triangulate_section(
         &mut elements,
         params.target_size.max(1e-6),
         params.max_iterations.clamp(1, 12),
-        20000,
+        params.max_nodes,
     );
 
     let outer_start = 0;
@@ -728,9 +728,11 @@ impl MeshControl {
                 // For thin-walled sections:
                 // - Floor at max_dim/20 to prevent overly fine mesh
                 // - Ceiling at min_edge/2 to resolve wall thickness
-                // The .min(min_edge/2.0) CAN go below max_dim/20 if min_edge is very small,
-                // which is intentional for very thin walls.
-                base.max(max_dim / 20.0).min(min_edge / 2.0)
+                // - The .min(min_edge/2.0) CAN go below max_dim/20 if min_edge is very small,
+                //   which is intended for very thin walls — but a tiny discretisation edge
+                //   (e.g. a root-radius arc segment) must not blow the mesh up, so never go
+                //   finer than max_dim/40.
+                base.max(max_dim / 20.0).min(min_edge / 2.0).max(max_dim / 40.0)
             }
             MeshControl::Fine | MeshControl::VeryFine => {
                 // For fine meshes, use min edge length but cap at base
@@ -759,6 +761,13 @@ pub fn mesh_params_from_control(
         min_size: target_size * 0.3,
         quality_threshold: 0.3,
         use_delaunay: true,
-        max_iterations: 10,
+        // Limit uniform-refinement passes for thin-walled sections. Uniform
+        // red-refinement quadruples the element count per pass (42 -> 168 ->
+        // 672 -> 2688 -> 10752 ...) with no intermediate sizes, so the default
+        // 10 passes over-shoots to a huge mesh whose skyline factor is
+        // impractically slow on long/narrow thin-walled sections. A small
+        // iteration cap keeps the mesh moderate while still resolving the wall.
+        max_iterations: if is_thin_walled { 3 } else { 10 },
+        max_nodes: 20000,
     }
 }

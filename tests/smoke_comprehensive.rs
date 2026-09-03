@@ -397,7 +397,7 @@ fn smoke_compound_boolean() {
 fn smoke_warping_svg() {
     let sec = ChannelSection::new(0.2, 0.075, 0.005, 0.008, 0.0, 0.0).build();
     let props = SectionProperties::from_section(&sec);
-    let svg = section_properties::warping_svg(&sec, &props, 800, 600)
+    let svg = section_properties::warping_svg(&sec, &props, 800, 600, 0.3)
         .expect("warping svg");
     assert!(svg.contains("<svg"));
     assert!(svg.contains("wleg")); // legend gradient id

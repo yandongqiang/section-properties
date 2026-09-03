@@ -19,7 +19,7 @@ pub use interaction::{
 pub use plastic_section::{
     FullPlasticProperties, PlasticAxis, PlasticNeutralAxis, PlasticProperties, PlasticSection,
 };
-pub use warping::{TorsionAnalysis, WarpingProperties, exact};
+pub use warping::{TorsionAnalysis, WarpingProperties, trefftz};
 
 use crate::material::Material;
 use crate::section::Section;

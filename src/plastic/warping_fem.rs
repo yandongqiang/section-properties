@@ -110,10 +110,10 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties, nu: f6
     
     let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
     let n = tri6_mesh.nodes.len();
-
+    
     // Build elements with proper orientation
     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
-
+    
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
     let mut c_global = vec![0.0; n];
@@ -146,16 +146,15 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties, nu: f6
         m.compress();
         m
     };
+    // Direct solver: factor once, solve omega/psi/phi.
     let _k_lg = crate::fea::DirectLagrangeSolver::assemble_torsion_lagrange(&k_global, &c_global);
-    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+    let solver = crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
         &k_reg,
         &c_global,
         crate::fea::SolverOptions { auto_regularize_singular: true },
-    ) {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    };
+    )
+    .ok();
 
     let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
 
@@ -165,6 +164,13 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties, nu: f6
         .map(|(&a, &b)| a * b)
         .sum();
     let j = ixx + iyy - omega_dot_f;
+    // If FEM torsion constant is non-positive (e.g., for asymmetric thin-walled sections
+    // where the formulation breaks down), fall back to analytical thin-walled formula.
+    let j = if j <= 0.0 {
+        crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(j.max(0.0))
+    } else {
+        j
+    };
 
     let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
@@ -228,27 +234,6 @@ pub fn compute_fem_solution(section: &Section, props: &SectionProperties, nu: f6
 }
 
 /// Estimate shear areas using simple formulas (fallback when FEM is inaccurate).
-pub fn estimate_shear_areas_fallback(section: &Section, props: &SectionProperties) -> (f64, f64) {
-    let bounds = section.bounds();
-    let h = bounds.3 - bounds.2;
-    let b = bounds.1 - bounds.0;
-    let area = props.area;
-
-    let sym_x = is_symmetric_about_x(section);
-    let sym_y = is_symmetric_about_y(section);
-
-    if sym_x || (sym_x && sym_y) {
-        let hw = h * 0.9;
-        let tw = area / (2.0 * b + hw);
-        let tf = tw;
-        let ay = 2.0 * b * tf;
-        let az = hw * tw;
-        (ay.max(area * 0.1), az.max(area * 0.1))
-    } else {
-        (area * 0.85, area * 0.85)
-    }
-}
-
 fn is_symmetric_about_x(section: &Section) -> bool {
     for v in &section.outer.vertices {
         let found = section
@@ -292,6 +277,10 @@ pub struct FemWarpingResult {
     pub a_sxy: f64,
     pub a_s11: f64,
     pub a_s22: f64,
+    pub beta_11_plus: f64,
+    pub beta_11_minus: f64,
+    pub beta_22_plus: f64,
+    pub beta_22_minus: f64,
     /// Maximum warping coordinate |ω| from FEM solution
     pub omega_max: f64,
 }
@@ -356,7 +345,6 @@ pub fn compute_fem_warping_properties(
     let node_map: Vec<Option<usize>> = used_nodes.iter().enumerate().map(|(i, &used)| {
         if used { Some(i) } else { None }
     }).collect();
-    
     // Remap element indices to new node indices
     let mut new_nodes = Vec::new();
     let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
@@ -373,10 +361,10 @@ pub fn compute_fem_warping_properties(
     
     let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
     let n = tri6_mesh.nodes.len();
-
+    
     // Build elements with proper orientation
     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
-
+    
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
     let mut c_global = vec![0.0; n];
@@ -393,7 +381,7 @@ pub fn compute_fem_warping_properties(
         }
     }
 
-    // Direct solver: factor once, solve omega/psi/phi.
+    // Regularise the nearly-singular torsion/warping stiffness matrix.
     let k_reg = {
         let mut m = k_global.clone();
         m.compress();
@@ -408,6 +396,8 @@ pub fn compute_fem_warping_properties(
         m.compress();
         m
     };
+
+    // Direct solver: factor once, solve omega/psi/phi.
     let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
         &k_reg,
@@ -417,7 +407,6 @@ pub fn compute_fem_warping_properties(
         Ok(s) => Some(s),
         Err(_) => None,
     };
-
     let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
 
     let omega_dot_f: f64 = omega
@@ -426,6 +415,13 @@ pub fn compute_fem_warping_properties(
         .map(|(&a, &b)| a * b)
         .sum();
     let j = ixx + iyy - omega_dot_f;
+    // If FEM torsion constant is non-positive (e.g., for asymmetric thin-walled sections
+    // where the formulation breaks down), fall back to analytical thin-walled formula.
+    let j = if j <= 0.0 {
+        crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(j.max(0.0))
+    } else {
+        j
+    };
 
     let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
@@ -528,23 +524,32 @@ pub fn compute_fem_warping_properties(
         kappa_xy += kxy;
     }
 
-    let a_sx = if kappa_x.abs() > 1e-15 {
+    // Thin-walled sections legitimately produce kappa ~ 1e-16 (and even
+    // smaller), while delta_s^2/kappa is a well-conditioned O(1) shear area.
+    // A 1e-15 guard would wrongly zero these, so only guard against exact
+    // division-by-zero (kappa genuinely 0).
+    let a_sx = if kappa_x.abs() > 1e-30 {
         delta_s * delta_s / kappa_x
     } else {
         0.0
     };
-    let a_sy = if kappa_y.abs() > 1e-15 {
+    let a_sy = if kappa_y.abs() > 1e-30 {
         delta_s * delta_s / kappa_y
     } else {
         0.0
     };
-    let a_sxy = if kappa_xy.abs() > 1e-15 {
+    let a_sxy = if kappa_xy.abs() > 1e-30 {
         delta_s * delta_s / kappa_xy
     } else {
         0.0
     };
 
-    // Principal axis shear areas via tensor rotation (Python method)
+    // Principal axis shear areas + cross-coupling via full tensor rotation
+    // (Python method): rotate the 2x2 alpha tensor, then read the diagonal for
+    // a_s11/a_s22 and the off-diagonal for the cross-coupling a_sxy. Python
+    // sectionproperties does not expose a_sxy; it is derived here so that it is
+    // consistent with the rotated tensor (and is ~0 for symmetric sections)
+    // instead of being an independent reciprocal of a single kappa_xy.
     let principal = props.principal_properties();
     let phi_rad = principal.phi;
     let cos_phi = phi_rad.cos();
@@ -558,6 +563,8 @@ pub fn compute_fem_warping_properties(
         + sin_phi * (cos_phi * alpha_xy + sin_phi * alpha_yy);
     let rot_11 = (-sin_phi) * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
         + cos_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
+    let rot_01 = cos_phi * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
+        + sin_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
 
     let a_s11 = if rot_00.abs() > 1e-15 {
         ea / rot_00
@@ -569,14 +576,26 @@ pub fn compute_fem_warping_properties(
     } else {
         0.0
     };
+    let a_sxy = if rot_01.abs() > 1e-15 {
+        ea / rot_01
+    } else {
+        0.0
+    };
 
+    // Monosymmetry integrals about the centroidal (x, y) and principal
+    // (11, 22) axes. Python `monosymmetry_integrals(phi)` integrates in rotated
+    // coordinates for int_11/int_22, so pass the real principal angle.
     let mut int_x = 0.0;
     let mut int_y = 0.0;
+    let mut int_11 = 0.0;
+    let mut int_22 = 0.0;
 
     for tri6 in &elements {
-        let (ix, iy, _, _) = tri6.monosymmetry_integrals(0.0);
+        let (ix, iy, i11, i22) = tri6.monosymmetry_integrals(phi_rad);
         int_x += ix;
         int_y += iy;
+        int_11 += i11;
+        int_22 += i22;
     }
 
     let beta_x_plus = if ixx.abs() > 1e-15 {
@@ -590,12 +609,33 @@ pub fn compute_fem_warping_properties(
         0.0
     };
 
-    // For general asymmetric sections, beta_minus != -beta_plus
-    // We need to compute beta_minus separately using the FEM solution
-    // For now, use the standard relation for doubly symmetric sections
-    // but allow it to be different for asymmetric sections
+    // AS4100 / Python sectionproperties convention: the "+" and "−"
+    // monosymmetry constants are the same scalar with the sign flipped
+    // (beta_x_minus = -beta_x_plus). This matches sectionproperties exactly.
     let beta_x_minus = -beta_x_plus;
     let beta_y_minus = -beta_y_plus;
+
+    // Principal-axis monosymmetry constants by direct integration in rotated
+    // coordinates (Python formula), not by rotating the centroidal beta:
+    //   beta_11 = -int_11/i11 + 2*y22_se ; beta_22 = -int_22/i22 + 2*x11_se
+    // with the shear centre projected onto the principal axes via
+    // principal_coordinate(phi, x_se, y_se) = (x11_se, y22_se).
+    let i11 = principal.i11;
+    let i22 = principal.i22;
+    let (x11_se, y22_se) = crate::fea::principal_coordinate(phi_rad, x_se, y_se);
+
+    let beta_11_plus = if i11.abs() > 1e-15 {
+        -int_11 / i11 + 2.0 * y22_se
+    } else {
+        0.0
+    };
+    let beta_11_minus = -beta_11_plus;
+    let beta_22_plus = if i22.abs() > 1e-15 {
+        -int_22 / i22 + 2.0 * x11_se
+    } else {
+        0.0
+    };
+    let beta_22_minus = -beta_22_plus;
 
     Ok(FemWarpingResult {
         j: j.max(0.0),
@@ -611,6 +651,10 @@ pub fn compute_fem_warping_properties(
         a_sxy,
         a_s11,
         a_s22,
+        beta_11_plus,
+        beta_11_minus,
+        beta_22_plus,
+        beta_22_minus,
         omega_max,
     })
 }
@@ -731,14 +775,17 @@ fn iccg_lagrange_solve(
 ///
 /// Convenience wrapper combining [`compute_fem_solution`] with
 /// `sectionproperties`-style warping contour output.
+///
+/// `nu` is the Poisson's ratio of the material (e.g. 0.3 for steel).
 pub fn warping_svg(
     section: &Section,
     props: &SectionProperties,
     width: u32,
     height: u32,
+    nu: f64,
 ) -> Result<String, crate::mesh::fem::FemError> {
     use crate::io::{SvgExportOptions, plot_warping_svg};
-    let fem = compute_fem_solution(section, props, 0.3)?;
+    let fem = compute_fem_solution(section, props, nu)?;
     let opts = SvgExportOptions {
         width,
         height,
@@ -923,6 +970,25 @@ pub fn analytical_j(section: &Section, props: &SectionProperties) -> Option<f64>
         }
     }
 
+    // Open thin-walled sections (I, Channel, Angle, etc.): J = Σ(b_i * t_i³ / 3)
+    // Approximate by average thickness t ≈ area / perimeter, sum over all boundary edges
+    if section.is_thin_walled() && section.holes.is_empty() {
+        let mut j = 0.0;
+        for i in 0..section.outer.vertices.len() {
+            let p1 = section.outer.vertices[i];
+            let p2 = section.outer.vertices[(i + 1) % section.outer.vertices.len()];
+            let b = (p2.x - p1.x).hypot(p2.y - p1.y);
+            if b > 1e-12 {
+                // Estimate wall thickness as local edge length contribution to area/perimeter
+                let t = props.area / section.perimeter();
+                j += b * t.powi(3) / 3.0;
+            }
+        }
+        if j > 0.0 {
+            return Some(j);
+        }
+    }
+
     // General section: no exact formula available, use FEM
     None
 }
@@ -1041,3 +1107,7 @@ pub fn analytical_beta(props: &SectionProperties, shear_center: Point) -> (f64, 
     let beta_y = -props.ixy / props.iy + 2.0 * shear_center.x;
     (beta_x, beta_y)
 }
+
+
+
+
