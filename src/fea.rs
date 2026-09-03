@@ -33,7 +33,9 @@ pub const NEAR_ZERO_TOL: f64 = 1e-15;
 /// Gaussian weights and locations for `n`-point integration of a Tri6 element.
 ///
 /// Returns `n` tuples of `(weight, eta, xi, zeta)` where `zeta = 1 - eta - xi`.
-/// Supports n = 1, 3, 4, 6.
+/// Supports n = 1, 3, 4 and 6. The weights are normalised such that they
+/// sum to one; `shape_function()` supplies the physical element area through
+/// its Jacobian.
 pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
     match n {
         1 => vec![(1.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)],
@@ -49,12 +51,14 @@ pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
             (25.0 / 48.0, 0.2, 0.2, 0.6),
         ],
         6 => {
-            let g1 =
-                1.0 / 18.0 * (8.0 - (10f64).sqrt() + (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
-            let g2 =
-                1.0 / 18.0 * (8.0 - (10f64).sqrt() - (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt());
-            let w1 = (620.0 + (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
-            let w2 = (620.0 - (213125.0 - 53320.0 * (10f64).sqrt()).sqrt()) / 3720.0;
+            // Six-point rule used by section-properties for stress recovery.
+            // The ordering is coupled to H_INV in `extrapolate_to_nodes`.
+            let root = (38.0 - 44.0 * (2.0_f64 / 5.0).sqrt()).sqrt();
+            let g1 = (8.0 - 10.0_f64.sqrt() + root) / 18.0;
+            let g2 = (8.0 - 10.0_f64.sqrt() - root) / 18.0;
+            let weight_root = (213_125.0 - 53_320.0 * 10.0_f64.sqrt()).sqrt();
+            let w1 = (620.0 + weight_root) / 3720.0;
+            let w2 = (620.0 - weight_root) / 3720.0;
             vec![
                 (w2, 1.0 - 2.0 * g2, g2, g2),
                 (w2, g2, 1.0 - 2.0 * g2, g2),
@@ -64,7 +68,7 @@ pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
                 (w1, g1, 1.0 - 2.0 * g1, g1),
             ]
         }
-        _ => panic!("gauss_points: n must be 1, 3, 4 or 6, got {n}"),
+        _ => panic!("gauss_points: n must be 1, 3, 4, or 6, got {n}"),
     }
 }
 
@@ -357,7 +361,7 @@ impl Tri6 {
             coords[1][i] = points[i].y;
         }
         // Check orientation at centroid (xi=eta=zeta=1/3)
-        let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
+        let sf = shape_function(&coords, (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
         if sf.j.abs() <= JACOBIAN_TOL {
             return Err(crate::mesh::fem::FemError::DegenerateElement);
         }
@@ -403,6 +407,8 @@ impl Tri6 {
         let mut f_el = [0.0; 6];
         let mut c_el = [0.0; 6];
 
+        // K_e, F_e and C_e: use the E-weighted 4-point rule used by
+        // section-properties.
         for &(w, eta, xi, zeta) in &gauss_points(4) {
             let sf = shape_function(&self.coords, (eta, xi, zeta));
             let weight = w * sf.j * self.elastic_modulus;
@@ -414,7 +420,7 @@ impl Tri6 {
                 }
                 // f_el += weight * B^T * [y, -x]
                 f_el[i] += weight * (sf.b[0][i] * sf.y - sf.b[1][i] * sf.x);
-                // c_el += weight * N
+                // c_el += E·N dA: Lagrange constraint ∫ E·ω dA = 0
                 c_el[i] += weight * sf.n[i];
             }
         }
@@ -529,7 +535,7 @@ impl Tri6 {
         (kappa_x, kappa_y, kappa_xy)
     }
 
-/// Calculate monosymmetry integrals (int_x, int_y, int_11, int_22).
+    /// Calculate monosymmetry integrals (int_x, int_y, int_11, int_22).
     ///
     /// `phi` is the principal axis angle in **radians**.
     pub fn monosymmetry_integrals(&self, phi: f64) -> (f64, f64, f64, f64) {
@@ -559,10 +565,7 @@ impl Tri6 {
     ///
     /// Returns (max_shear_stress_magnitude, max_shear_stress_vector)
     /// where max_shear_stress_vector = (tau_x, tau_y) at the point of max magnitude.
-    pub fn torsion_shear_stress(
-        &self,
-        omega: &[f64; 6],
-    ) -> (f64, (f64, f64)) {
+    pub fn torsion_shear_stress(&self, omega: &[f64; 6]) -> (f64, (f64, f64)) {
         let mut max_tau = 0.0;
         let mut max_tau_vec = (0.0, 0.0);
 
@@ -571,19 +574,19 @@ impl Tri6 {
         let gps = gauss_points(6);
         for &(_w, eta, xi, zeta) in &gps {
             let sf = shape_function(&self.coords, (eta, xi, zeta));
-            
+
             let mut b_omega = [0.0; 2];
             for k in 0..6 {
                 b_omega[0] += sf.b[0][k] * omega[k];
                 b_omega[1] += sf.b[1][k] * omega[k];
             }
-            
+
             // St. Venant shear stress components
             // τ_x = ∂ω/∂x - y (for unit twist)
             // τ_y = ∂ω/∂y + x (for unit twist)
             let tau_x = b_omega[0] - sf.y;
             let tau_y = b_omega[1] + sf.x;
-            
+
             let tau_mag = (tau_x * tau_x + tau_y * tau_y).sqrt();
             if tau_mag > max_tau {
                 max_tau = tau_mag;
@@ -769,7 +772,7 @@ pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6M
             coords[0][k] = nodes[elem[k]].x;
             coords[1][k] = nodes[elem[k]].y;
         }
-        let sf = shape_function(&coords, (1.0/3.0, 1.0/3.0, 1.0/3.0));
+        let sf = shape_function(&coords, (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
         if sf.j < 0.0 {
             // Reverse the vertex order to fix orientation (CCW required)
             // Original: [n0, n1, n2, mid01, mid12, mid20]
@@ -834,7 +837,12 @@ fn get_or_create_midpoint(
 /// Returns `Err(FemError::DegenerateElement)` if any element has
 /// zero or negative Jacobian determinant at any Gauss point.
 /// Coordinates are kept in section-centroid frame for stress calculation compatibility.
-pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Result<Vec<Tri6>, crate::mesh::fem::FemError> {
+pub fn build_tri6_elements(
+    mesh: &Tri6Mesh,
+    em: f64,
+    gm: f64,
+    rho: f64,
+) -> Result<Vec<Tri6>, crate::mesh::fem::FemError> {
     let gps = gauss_points(6);
     let mut elements = Vec::with_capacity(mesh.elements.len());
     for (i, &elem) in mesh.elements.iter().enumerate() {
@@ -847,8 +855,22 @@ pub fn build_tri6_elements(mesh: &Tri6Mesh, em: f64, gm: f64, rho: f64) -> Resul
             mesh.nodes[elem[5]],
         ];
         let coords = [
-            [points[0].x, points[1].x, points[2].x, points[3].x, points[4].x, points[5].x],
-            [points[0].y, points[1].y, points[2].y, points[3].y, points[4].y, points[5].y],
+            [
+                points[0].x,
+                points[1].x,
+                points[2].x,
+                points[3].x,
+                points[4].x,
+                points[5].x,
+            ],
+            [
+                points[0].y,
+                points[1].y,
+                points[2].y,
+                points[3].y,
+                points[4].y,
+                points[5].y,
+            ],
         ];
         // Check for degenerate element at all Gauss points
         let mut degenerate = false;
@@ -1193,12 +1215,21 @@ impl CgResult {
 /// [c^T 0] [λ] = [0]
 ///
 /// u = K^{-1}*(f - c*λ),  λ = (c^T*K^{-1}*c)^{-1} * c^T*K^{-1}*f
-pub fn solve_lagrange_sparse(k: &SparseMatrix, c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+pub fn solve_lagrange_sparse(
+    k: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     solve_lagrange_sparse_tol(k, c, f, 1e-6)
 }
 
 /// Like [`solve_lagrange_sparse`] with an explicit relative CG tolerance.
-pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f64) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+pub fn solve_lagrange_sparse_tol(
+    k: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+    tol: f64,
+) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     // Tight tolerances (needed for shear-centre difference quantities)
     // require a proportionally larger iteration budget.
     let n = k.n;
@@ -1264,7 +1295,11 @@ pub fn solve_lagrange_sparse_tol(k: &SparseMatrix, c: &[f64], f: &[f64], tol: f6
 ///
 /// `k` is n×n stiffness matrix, `c` is n constraint vector, `f` is n load vector.
 /// Returns the solution vector u (length n), or `Err` if singular.
-pub fn solve_lagrange(k: &[Vec<f64>], c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+pub fn solve_lagrange(
+    k: &[Vec<f64>],
+    c: &[f64],
+    f: &[f64],
+) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     let n = k.len();
     // Augmented system (n+1)×(n+1)
     let mut a = vec![vec![0.0; n + 1]; n + 1];
@@ -1396,7 +1431,13 @@ impl CscMatrix {
             }
         }
 
-        Self { n_rows, n_cols, col_ptr, rows, vals }
+        Self {
+            n_rows,
+            n_cols,
+            col_ptr,
+            rows,
+            vals,
+        }
     }
 
     /// Build a CSC matrix from COO triplets, summing duplicates
@@ -1446,7 +1487,13 @@ impl CscMatrix {
             col_ptr[cc + 1] = col_ptr[cc] + counts[cc];
         }
 
-        Self { n_rows, n_cols, col_ptr, rows, vals }
+        Self {
+            n_rows,
+            n_cols,
+            col_ptr,
+            rows,
+            vals,
+        }
     }
 
     /// y = A x
@@ -1507,7 +1554,9 @@ pub struct SolverOptions {
 
 impl Default for SolverOptions {
     fn default() -> Self {
-        Self { auto_regularize_singular: false }
+        Self {
+            auto_regularize_singular: false,
+        }
     }
 }
 
@@ -1556,7 +1605,9 @@ impl DirectLagrangeSolver {
                 m.compress();
                 let m = match SkylineLdlt::factor(&m) {
                     Ok(ldlt) => ldlt,
-                    Err(crate::mesh::fem::FemError::SingularMatrix) if opts.auto_regularize_singular => {
+                    Err(crate::mesh::fem::FemError::SingularMatrix)
+                        if opts.auto_regularize_singular =>
+                    {
                         let mut m_reg = k.clone();
                         m_reg.compress();
                         let mut diag_avg = 0.0;
@@ -1577,10 +1628,14 @@ impl DirectLagrangeSolver {
             #[cfg(feature = "pardiso")]
             LagrangeKernel::Pardiso => LagrangeKernelInstance::Pardiso(std::sync::Mutex::new(
                 crate::fea::solvers::pardiso::PardisoSolver::new(k, c)
-                    .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?,),
-            ),
+                    .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?,
+            )),
         };
-        Ok(Self { n: k.n, kernel: instance, c: c.to_vec() })
+        Ok(Self {
+            n: k.n,
+            kernel: instance,
+            c: c.to_vec(),
+        })
     }
 
     /// Solve [K c; c^T 0] [u; lam] = [f; 0] and return u.
@@ -1596,7 +1651,11 @@ impl DirectLagrangeSolver {
                 let w2 = ldlt.solve(&self.c)?;
                 let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
                 let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-                let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
+                let lambda = if ct_w2.abs() > NEAR_ZERO_TOL {
+                    ct_w1 / ct_w2
+                } else {
+                    0.0
+                };
                 let u = w1
                     .iter()
                     .zip(w2.iter())
@@ -1682,8 +1741,7 @@ fn rcm_order(n: usize, adj: &[Vec<usize>]) -> Vec<usize> {
     visited[peripheral] = true;
     while let Some(u) = queue.pop_front() {
         perm.push(u);
-        let mut nbrs: Vec<usize> =
-            adj[u].iter().filter(|&&w| !visited[w]).copied().collect();
+        let mut nbrs: Vec<usize> = adj[u].iter().filter(|&&w| !visited[w]).copied().collect();
         nbrs.sort_by_key(|&w| adj[w].len());
         for w in nbrs {
             visited[w] = true;
@@ -1824,7 +1882,14 @@ impl SkylineLdlt {
             diag[i] = d;
         }
 
-        Ok(Self { n, diag, first, lower, row_start, perm })
+        Ok(Self {
+            n,
+            diag,
+            first,
+            lower,
+            row_start,
+            perm,
+        })
     }
 
     /// Solve A x = b.
@@ -1872,12 +1937,20 @@ impl SkylineLdlt {
     /// Solve with a Lagrange multiplier constraint vector, mirroring
     /// [`solve_lagrange_sparse`]: u = w1 - lambda * w2 with
     /// lambda = (c.w1)/(c.w2).
-    pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+    pub fn solve_lagrange(
+        &self,
+        c: &[f64],
+        f: &[f64],
+    ) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
         let w1 = self.solve(f)?;
         let w2 = self.solve(c)?;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = if ct_w2.abs() > NEAR_ZERO_TOL { ct_w1 / ct_w2 } else { 0.0 };
+        let lambda = if ct_w2.abs() > NEAR_ZERO_TOL {
+            ct_w1 / ct_w2
+        } else {
+            0.0
+        };
 
         let mut u = vec![0.0; self.n];
         for i in 0..self.n {
@@ -1893,13 +1966,7 @@ mod direct_lagrange_tests {
 
     #[test]
     fn csc_from_coo_sums_duplicates() {
-        let m = CscMatrix::from_coo(
-            3,
-            3,
-            &[0, 1, 0],
-            &[0, 1, 0],
-            &[1.0, 2.0, 3.5],
-        );
+        let m = CscMatrix::from_coo(3, 3, &[0, 1, 0], &[0, 1, 0], &[1.0, 2.0, 3.5]);
         // (0,0) should be 4.5 after duplicate summing
         let col0 = &m.vals[m.col_ptr[0]..m.col_ptr[1]];
         assert!((col0.iter().sum::<f64>() - 4.5).abs() < 1e-12);
@@ -1924,7 +1991,10 @@ mod direct_lagrange_tests {
         let u_ref = {
             let mut k2 = k.clone();
             k2.compress();
-            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f).unwrap()
+            SkylineLdlt::factor(&k2)
+                .unwrap()
+                .solve_lagrange(&c, &f)
+                .unwrap()
         };
 
         // Python-style: assemble augmented CSC, factor leading block.
@@ -1957,15 +2027,26 @@ mod skyline_tests {
     fn skyline_debug_4x4() {
         let mut a = SparseMatrix::new(4);
         let entries = [
-            (0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (3, 3, 7.0),
-            (0, 1, 1.0), (1, 0, 1.0),
-            (1, 2, 2.0), (2, 1, 2.0),
-            (2, 3, 1.0), (3, 2, 1.0),
+            (0, 0, 4.0),
+            (1, 1, 5.0),
+            (2, 2, 6.0),
+            (3, 3, 7.0),
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (1, 2, 2.0),
+            (2, 1, 2.0),
+            (2, 3, 1.0),
+            (3, 2, 1.0),
         ];
-        for &(r, c, v) in &entries { a.add(r, c, v); }
+        for &(r, c, v) in &entries {
+            a.add(r, c, v);
+        }
         let s = SkylineLdlt::factor(&a).unwrap();
-        eprintln!("perm-like diag={:?} first={:?} lower={:?}", s.diag, s.first, s.lower);
-        let x = s.solve(&[1.0,2.0,3.0,4.0]);
+        eprintln!(
+            "perm-like diag={:?} first={:?} lower={:?}",
+            s.diag, s.first, s.lower
+        );
+        let x = s.solve(&[1.0, 2.0, 3.0, 4.0]);
         eprintln!("x={:?} expected~[0.1934,0.2264,0.3374,0.5232]", x);
     }
 
@@ -1974,10 +2055,16 @@ mod skyline_tests {
         // SPD matrix: A = [[4,1,0,0],[1,5,2,0],[0,2,6,1],[0,0,1,7]]
         let mut a = SparseMatrix::new(4);
         let entries = [
-            (0, 0, 4.0), (1, 1, 5.0), (2, 2, 6.0), (3, 3, 7.0),
-            (0, 1, 1.0), (1, 0, 1.0),
-            (1, 2, 2.0), (2, 1, 2.0),
-            (2, 3, 1.0), (3, 2, 1.0),
+            (0, 0, 4.0),
+            (1, 1, 5.0),
+            (2, 2, 6.0),
+            (3, 3, 7.0),
+            (0, 1, 1.0),
+            (1, 0, 1.0),
+            (1, 2, 2.0),
+            (2, 1, 2.0),
+            (2, 3, 1.0),
+            (3, 2, 1.0),
         ];
         for &(r, c, v) in &entries {
             a.add(r, c, v);
@@ -1995,7 +2082,13 @@ mod skyline_tests {
                         sum += v * x[c];
                     }
                 }
-                assert!((sum - b[row]).abs() < 1e-10, "row {} got {} (x={:?})", row, sum - b[row], x);
+                assert!(
+                    (sum - b[row]).abs() < 1e-10,
+                    "row {} got {} (x={:?})",
+                    row,
+                    sum - b[row],
+                    x
+                );
             }
         }
 
@@ -2040,10 +2133,16 @@ mod skyline_tests {
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
         let lambda = ct_w2 / ct_w1;
-        let u_ref: Vec<f64> =
-            w1.iter().zip(w2.iter()).map(|(&a, &b)| a - lambda * b).collect();
+        let u_ref: Vec<f64> = w1
+            .iter()
+            .zip(w2.iter())
+            .map(|(&a, &b)| a - lambda * b)
+            .collect();
 
-        let u_dir = SkylineLdlt::factor(&k).unwrap().solve_lagrange(&c, &f).unwrap();
+        let u_dir = SkylineLdlt::factor(&k)
+            .unwrap()
+            .solve_lagrange(&c, &f)
+            .unwrap();
         for i in 0..n {
             assert!(
                 (u_ref[i] - u_dir[i]).abs() < 5e-6,
@@ -2076,8 +2175,31 @@ mod tests {
     fn gauss_points_sum_to_one() {
         for &n in &[1, 3, 4, 6] {
             let gps = gauss_points(n);
+            assert_eq!(gps.len(), n, "gauss({n}) returned {} points", gps.len());
             let sum: f64 = gps.iter().map(|&(w, _, _, _)| w).sum();
             assert!((sum - 1.0).abs() < 1e-12, "gauss({n}): weights sum = {sum}");
+        }
+    }
+
+    #[test]
+    fn torsion_constraint_is_elastic_modulus_weighted() {
+        let points = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(0.0, 1.0),
+            Point::new(0.5, 0.0),
+            Point::new(0.5, 0.5),
+            Point::new(0.0, 0.5),
+        ];
+        let tri = Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 7.0, 1.0, 1.0).unwrap();
+        let (_, _, constraint) = tri.torsion_properties();
+
+        // The 4-point rule used by the reference implementation integrates
+        // corner functions to zero and mid-side functions to A/3. It is
+        // multiplied by the elastic modulus in the warping constraint.
+        assert_eq!(constraint[..3], [0.0; 3]);
+        for value in &constraint[3..] {
+            assert!((*value - 7.0 / 6.0).abs() < 1e-12, "constraint = {value}");
         }
     }
 
@@ -2218,10 +2340,17 @@ mod tests {
         let u = {
             let mut k2 = k.clone();
             k2.compress();
-            SkylineLdlt::factor(&k2).unwrap().solve_lagrange(&c, &f).unwrap()
+            SkylineLdlt::factor(&k2)
+                .unwrap()
+                .solve_lagrange(&c, &f)
+                .unwrap()
         };
         let ct_u: f64 = c.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
-        assert!(ct_u.abs() < 1e-10, "SkylineLdlt constraint residual c^T u = {}", ct_u);
+        assert!(
+            ct_u.abs() < 1e-10,
+            "SkylineLdlt constraint residual c^T u = {}",
+            ct_u
+        );
     }
 
     #[test]
@@ -2235,7 +2364,10 @@ mod tests {
         a.compress();
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
         // Should detect non-SPD (p^T A p <= 0) and not converge
-        assert!(!result.converged(), "CG should not converge on non-SPD matrix");
+        assert!(
+            !result.converged(),
+            "CG should not converge on non-SPD matrix"
+        );
         assert_eq!(result.status, CgStatus::NotPositiveDefinite);
         // iterations may be 0 if breakdown happens on first check
     }
@@ -2251,10 +2383,17 @@ mod tests {
         let b = vec![1.0, 2.0];
         a.compress();
         let result = cg_solve(&a, &b, 100, SOLVER_TOL);
-        assert!(result.converged(), "CG should converge on SPD matrix: {}", result.residual);
+        assert!(
+            result.converged(),
+            "CG should converge on SPD matrix: {}",
+            result.residual
+        );
         assert_eq!(result.status, CgStatus::Converged);
         // Check all output values are finite
-        assert!(result.x.iter().all(|v| v.is_finite()), "Solution has non-finite values");
+        assert!(
+            result.x.iter().all(|v| v.is_finite()),
+            "Solution has non-finite values"
+        );
         assert!(result.residual.is_finite(), "Residual is non-finite");
     }
 
@@ -2274,10 +2413,10 @@ mod tests {
         let nodes = vec![
             Point::new(0.0, 0.0),
             Point::new(1.0, 0.0),
-            Point::new(2.0, 0.0),  // collinear!
-            Point::new(0.5, 0.0),  // mid01
-            Point::new(1.5, 0.0),  // mid12
-            Point::new(1.0, 0.0),  // mid20
+            Point::new(2.0, 0.0), // collinear!
+            Point::new(0.5, 0.0), // mid01
+            Point::new(1.5, 0.0), // mid12
+            Point::new(1.0, 0.0), // mid20
         ];
         let elements = vec![[0, 1, 2, 3, 4, 5]];
         let mesh = Tri6Mesh { nodes, elements };
