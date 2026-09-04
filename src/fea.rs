@@ -407,9 +407,9 @@ impl Tri6 {
         let mut f_el = [0.0; 6];
         let mut c_el = [0.0; 6];
 
-        // K_e, F_e and C_e: use the E-weighted 4-point rule used by
-        // section-properties.
-        for &(w, eta, xi, zeta) in &gauss_points(4) {
+        // K_e, F_e and C_e: use 6-point Gauss rule that exactly integrates
+        // quadratic shape functions (degree 4 precision for triangles).
+        for &(w, eta, xi, zeta) in &gauss_points(6) {
             let sf = shape_function(&self.coords, (eta, xi, zeta));
             let weight = w * sf.j * self.elastic_modulus;
 
@@ -2194,12 +2194,21 @@ mod tests {
         let tri = Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 7.0, 1.0, 1.0).unwrap();
         let (_, _, constraint) = tri.torsion_properties();
 
-        // The 4-point rule used by the reference implementation integrates
-        // corner functions to zero and mid-side functions to A/3. It is
-        // multiplied by the elastic modulus in the warping constraint.
-        assert_eq!(constraint[..3], [0.0; 3]);
+        // The 6-point rule exactly integrates corner functions to zero
+        // and mid-side functions to A/3, multiplied by the elastic modulus.
+        for i in 0..3 {
+            assert!(
+                constraint[i].abs() < 1e-12,
+                "corner constraint[{}] = {}",
+                i,
+                constraint[i]
+            );
+        }
         for value in &constraint[3..] {
-            assert!((*value - 7.0 / 6.0).abs() < 1e-12, "constraint = {value}");
+            assert!(
+                (*value - 7.0 / 6.0).abs() < 1e-12,
+                "mid-side constraint = {value}"
+            );
         }
     }
 
