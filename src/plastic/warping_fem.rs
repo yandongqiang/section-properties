@@ -396,11 +396,28 @@ pub fn compute_fem_warping_solution(
 
     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
 
+    // Torsion/warping system assembly requires coordinates in the section
+    // centroid frame to match Python's sectionproperties.calculate_warping_properties,
+    // which translates every element's coordinates to the centroid before
+    // assembling the stiffness and load vectors. The torsion load vector
+    // f_torsion = integral of B^T [y, -x] dA and the shear load vectors depend
+    // on the coordinate origin; assembling them in the centroid frame removes
+    // the rigid-body first-moment part and yields the correct warping solution
+    // and positive torsion constant J. We keep the original-frame `elements`
+    // (with identical node connectivity) for downstream stress calculation,
+    // which does its own centroid subtraction.
+    let shifted_nodes: Vec<Point> = new_nodes
+        .iter()
+        .map(|p| Point::new(p.x - cx, p.y - cy))
+        .collect();
+    let shifted_tri6_mesh = tri3_to_tri6(&shifted_nodes, &remapped_elements);
+    let shifted_elements = build_tri6_elements(&shifted_tri6_mesh, 1.0, 1.0, 1.0)?;
+
     let mut k_global = SparseMatrix::new(n);
     let mut f_torsion = vec![0.0; n];
     let mut c_global = vec![0.0; n];
 
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         let (k_el, f_el, c_el) = tri6.torsion_properties();
         for i in 0..6 {
             let gi = tri6.node_ids[i];
@@ -466,7 +483,7 @@ pub fn compute_fem_warping_solution(
     let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
 
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         let (f_psi_el, f_phi_el) = tri6.shear_load_vectors(ixx, iyy, ixy, nu);
         for i in 0..6 {
             let gi = tri6.node_ids[i];
@@ -493,7 +510,7 @@ pub fn compute_fem_warping_solution(
     let mut i_xomega = 0.0;
     let mut i_yomega = 0.0;
 
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         let omega_el: [f64; 6] = {
             let mut e = [0.0; 6];
             for i in 0..6 {
@@ -539,7 +556,7 @@ pub fn compute_fem_warping_solution(
     let mut kappa_y = 0.0;
     let mut kappa_xy = 0.0;
 
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         let psi_el: [f64; 6] = {
             let mut e = [0.0; 6];
             for i in 0..6 {
@@ -610,7 +627,7 @@ pub fn compute_fem_warping_solution(
     let mut int_11 = 0.0;
     let mut int_22 = 0.0;
 
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         let (ix, iy, i11, i22) = tri6.monosymmetry_integrals(phi_rad);
         int_x += ix;
         int_y += iy;
@@ -650,7 +667,7 @@ pub fn compute_fem_warping_solution(
     let beta_22_minus = -beta_22_plus;
 
     let mut tau_sv_max = 0.0;
-    for tri6 in &elements {
+    for tri6 in &shifted_elements {
         for i in 0..6 {
             let node_id = tri6.node_ids[i];
             let omega_val = omega[node_id].abs();
@@ -1607,17 +1624,17 @@ pub fn export_global_warping_matrices(
         .iter()
         .map(|tri| [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]])
         .collect();
-    
+
     let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
-    let n_dof = tri6_mesh.nodes.len();
-    
+    let n = tri6_mesh.nodes.len();
+
     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
     let n_elements = elements.len();
     
     // Global system assembly
-    let mut k_global = SparseMatrix::new(n_dof);
-    let mut f_torsion = vec![0.0_f64; n_dof];
-    let mut c_global = vec![0.0_f64; n_dof];
+    let mut k_global = SparseMatrix::new(n);
+    let mut f_torsion = vec![0.0_f64; n];
+    let mut c_global = vec![0.0_f64; n];
     
     for tri6 in &elements {
         let (k_el, f_el, c_el) = tri6.torsion_properties();
@@ -1639,7 +1656,7 @@ pub fn export_global_warping_matrices(
     // Write header
     writeln!(file, "{{")?;
     writeln!(file, "  \"section_name\": \"{}\",", name)?;
-    writeln!(file, "  \"n_dof\": {},", n_dof)?;
+    writeln!(file, "  \"n_dof\": {},", n)?;
     writeln!(file, "  \"n_elements\": {},", elements.len())?;
     writeln!(file, "  \"n_nodes\": {},", tri6_mesh.nodes.len())?;
     
@@ -1702,6 +1719,184 @@ pub fn export_global_warping_matrices(
     writeln!(file, "  ]")?;
     
 writeln!(file, "}}")?;
+
+    Ok(())
+}
+
+/// Run Rust FEM directly on Python's full 6-node mesh and export K/F/C for
+/// index-level comparison against Python's exported global matrices.
+///
+/// Unlike `run_fem_on_python_mesh` (which re-triangulates Python's Tri3 corner
+/// mesh into a different Tri6 mesh), this uses Python's own 6-node `nodes` and
+/// `elements` connectivity, yielding the *same* DOF count and connectivity so
+/// the global stiffness/load/constraint matrices can be compared entry by entry.
+///
+/// `py_global_path` points at `python_global_<section>.json` which contains
+/// `nodes` (coords), `elements` (6-node), and Python's own `K`/`F`/`C`.
+pub fn run_fem_on_python_tri6_mesh(
+    py_global_path: &str,
+    name: &str,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let mut file = File::open(py_global_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let mesh_json: serde_json::Value = serde_json::from_str(&contents)?;
+
+    let nodes: Vec<Point> = mesh_json["nodes"]
+        .as_array()
+        .ok_or("nodes not found")?
+        .iter()
+        .map(|v| {
+            let coords = v.as_array().unwrap();
+            Point::new(coords[0].as_f64().unwrap(), coords[1].as_f64().unwrap())
+        })
+        .collect();
+
+    let elements: Vec<[usize; 6]> = mesh_json["elements"]
+        .as_array()
+        .ok_or("elements not found")?
+        .iter()
+        .map(|e| {
+            let arr = e.as_array().unwrap();
+            [
+                arr[0].as_u64().unwrap() as usize,
+                arr[1].as_u64().unwrap() as usize,
+                arr[2].as_u64().unwrap() as usize,
+                arr[3].as_u64().unwrap() as usize,
+                arr[4].as_u64().unwrap() as usize,
+                arr[5].as_u64().unwrap() as usize,
+            ]
+        })
+        .collect();
+
+    let n_dof = nodes.len();
+    println!(
+        "Rust FEM on Python Tri6 mesh: {} nodes, {} elements",
+        n_dof,
+        elements.len()
+    );
+
+    // Build Tri6 elements, fixing orientation if Python's winding is CW.
+    let mut rust_elements = Vec::with_capacity(elements.len());
+    let mut n_fixed = 0usize;
+    for (i, &elem) in elements.iter().enumerate() {
+        let mut e = elem;
+        let points: [Point; 6] = [
+            nodes[e[0]],
+            nodes[e[1]],
+            nodes[e[2]],
+            nodes[e[3]],
+            nodes[e[4]],
+            nodes[e[5]],
+        ];
+        let mut coords = [[0.0; 6]; 2];
+        for k in 0..6 {
+            coords[0][k] = points[k].x;
+            coords[1][k] = points[k].y;
+        }
+        let sf = shape_function(&coords, (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+        if sf.j < 0.0 {
+            let [n0, n1, n2, m01, m12, m20] = e;
+            e = [n2, n1, n0, m12, m01, m20];
+            n_fixed += 1;
+        }
+        let pts: [Point; 6] = [
+            nodes[e[0]],
+            nodes[e[1]],
+            nodes[e[2]],
+            nodes[e[3]],
+            nodes[e[4]],
+            nodes[e[5]],
+        ];
+        rust_elements.push(Tri6::from_points(i, pts, e, 1.0, 1.0, 1.0)?);
+    }
+    if n_fixed > 0 {
+        println!("  fixed orientation on {} CW elements", n_fixed);
+    }
+
+    // Assemble global K, F, C
+    let mut k_global = SparseMatrix::new(n_dof);
+    let mut f_torsion = vec![0.0_f64; n_dof];
+    let mut c_global = vec![0.0_f64; n_dof];
+    for tri6 in &rust_elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    k_global.compress();
+
+    // Collect K COO triplets
+    let mut k_rows: Vec<usize> = Vec::new();
+    let mut k_cols: Vec<usize> = Vec::new();
+    let mut k_vals: Vec<f64> = Vec::new();
+    for i in 0..n_dof {
+        for j_idx in k_global.row_ptr()[i]..k_global.row_ptr()[i + 1] {
+            k_rows.push(i);
+            k_cols.push(k_global.csr_cols()[j_idx]);
+            k_vals.push(k_global.csr_vals()[j_idx]);
+        }
+    }
+    let k_nnz = k_rows.len();
+
+    // Export K (COO, matching Python's format), F, C
+    let mut file = File::create(output_path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"section_name\": \"{}\",", name)?;
+    writeln!(file, "  \"n_dof\": {},", n_dof)?;
+    writeln!(file, "  \"n_elements\": {},", rust_elements.len())?;
+    writeln!(file, "  \"F\": [")?;
+    for i in 0..n_dof {
+        writeln!(file, "    {:.12e}{}", f_torsion[i], if i < n_dof - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    writeln!(file, "  \"C\": [")?;
+    for i in 0..n_dof {
+        writeln!(file, "    {:.12e}{}", c_global[i], if i < n_dof - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    writeln!(file, "  \"K\": {{")?;
+    writeln!(file, "    \"row\": [")?;
+    for i in 0..k_nnz {
+        writeln!(file, "      {}{}", k_rows[i], if i < k_nnz - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for i in 0..k_nnz {
+        writeln!(file, "      {}{}", k_cols[i], if i < k_nnz - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for i in 0..k_nnz {
+        writeln!(file, "      {:.12e}{}", k_vals[i], if i < k_nnz - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"shape\": [{}, {}]", n_dof, n_dof)?;
+    writeln!(file, "  }}")?;
+    writeln!(file, "}}")?;
+
+    println!("  Exported Rust-on-Python-Tri6 K/F/C to {}", output_path);
+    println!("  K nnz (Rust): {}", k_global.csr_vals().len());
+    if let Some(py_k) = mesh_json.get("K") {
+        if let Some(shape) = py_k.get("shape") {
+            if let (Some(rs), Some(cs)) = (shape[0].as_u64(), shape[1].as_u64()) {
+                println!(
+                    "  Python K shape: {}x{}, Python K nnz: {}",
+                    rs,
+                    cs,
+                    py_k["data"].as_array().map(|a| a.len()).unwrap_or(0)
+                );
+            }
+        }
+    }
 
     Ok(())
 }
