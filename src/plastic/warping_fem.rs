@@ -7,6 +7,7 @@
 
 use crate::fea::{
     SparseMatrix, Tri6, Tri6Mesh, build_tri6_elements, solve_lagrange_sparse, tri3_to_tri6,
+    gauss_points, shape_function,
 };
 use crate::geometry::Point;
 use crate::mesh::{MeshControl, MeshParams, mesh_params_from_control, mesh_section};
@@ -1173,4 +1174,341 @@ pub fn diag_test_eps(
     let omega_norm = omega.iter().map(|v| v * v).sum::<f64>().sqrt();
 
     Ok((j, 0.0, omega_norm, omega_dot_f))
+}
+
+/// Comprehensive diagnostic data for warping FEM system
+#[derive(Debug, Clone)]
+pub struct WarpingDiagnostics {
+    pub section_name: String,
+    pub n_dof: usize,
+    pub n_elements: usize,
+    
+    // Element-level
+    pub detj_min: f64,
+    pub detj_max: f64,
+    pub detj_weighted_sum: f64,
+    pub ke_sym_max_err: f64,
+    pub element_energy_min: f64,
+    pub element_energy_max: f64,
+    pub element_energy_sum: f64,
+    
+    // Global system
+    pub k_sym_rel_err: f64,
+    pub k_rank_estimate: usize,
+    pub k_nullity: usize,
+    pub constraint_dofs: usize,
+    pub constraint_nodes: Vec<usize>,
+    pub constraint_sum: f64,
+    
+    // Warping solution
+    pub residual_norm: f64,
+    pub residual_rel: f64,
+    pub ct_omega: f64,
+    pub wtkw: f64,
+    pub wtf: f64,
+    pub j_raw: f64,
+    pub ixx_plus_iyy: f64,
+    pub omega_dot_f: f64,
+    
+    // Coordinate invariants
+    pub integral_x_da: f64,
+    pub integral_y_da: f64,
+    pub centroid: (f64, f64),
+    
+    // Final results
+    pub j_fem: f64,
+    pub j_analytical: f64,
+    pub j_fallback: bool,
+    
+    // Status
+    pub fem_succeeded: bool,
+}
+
+/// Run comprehensive diagnostics on warping FEM system
+pub fn diagnose_warping_fem(
+    section: &Section,
+    name: &str,
+    nu: f64,
+) -> Result<WarpingDiagnostics, crate::mesh::fem::FemError> {
+    let props = SectionProperties::from_section(section);
+    
+    // Mesh
+    let bounds = section.bounds();
+    let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
+    let min_edge = min_edge_length(section);
+    let is_thin_walled = section.is_thin_walled();
+    
+    let params = mesh_params_from_control(MeshControl::Fine, max_dim, min_edge, is_thin_walled);
+    let mesh = mesh_section(section, params);
+    
+    let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
+    let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
+    let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
+    
+    let mut used_nodes = vec![false; mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let node_map: Vec<Option<usize>> = used_nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &used)| if used { Some(i) } else { None })
+        .collect();
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(mesh.nodes[old_idx]);
+        }
+    }
+    
+    let remapped_elements: Vec<[usize; 3]> = clean_elements
+        .iter()
+        .map(|tri| [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]])
+        .collect();
+    
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
+    let n_dof = tri6_mesh.nodes.len();
+    
+    // Build Tri6 elements
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+    let n_elements = elements.len();
+    
+    // Element-level diagnostics
+    let mut detj_min = f64::INFINITY;
+    let mut detj_max = 0.0_f64;
+    let mut detj_weighted_sum = 0.0_f64;
+    let mut ke_sym_max_err = 0.0_f64;
+    let mut element_energy_min = f64::INFINITY;
+    let mut element_energy_max = 0.0_f64;
+    let mut element_energy_sum = 0.0_f64;
+    
+    for tri6 in &elements {
+        let gps = gauss_points(6);
+        for &(w, eta, xi, zeta) in &gps {
+            let sf = shape_function(&tri6.coords, (eta, xi, zeta));
+            detj_min = detj_min.min(sf.j);
+            detj_max = detj_max.max(sf.j);
+            detj_weighted_sum += sf.j * w;
+        }
+        
+        let (k_el, _, _) = tri6.torsion_properties();
+        for i in 0..6 {
+            for j in 0..6 {
+                let err = (k_el[i][j] - k_el[j][i]).abs();
+                ke_sym_max_err = ke_sym_max_err.max(err);
+            }
+        }
+        
+        let energy: f64 = (0..6).map(|i| k_el[i][i]).sum();
+        element_energy_min = element_energy_min.min(energy);
+        element_energy_max = element_energy_max.max(energy);
+        element_energy_sum += energy;
+    }
+    
+    // Global system assembly
+    let mut k_global = SparseMatrix::new(n_dof);
+    let mut f_torsion = vec![0.0_f64; n_dof];
+    let mut c_global = vec![0.0_f64; n_dof];
+    
+    for tri6 in &elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    
+    // Global K symmetry - use new SparseMatrix methods
+    k_global.compress();
+    let k_sym_max_err = k_global.symmetry_max_error();
+    let k_fro = k_global.frobenius_norm();
+    let k_sym_rel_err = if k_fro > 0.0 { k_sym_max_err / k_fro } else { 0.0 };
+    
+    // Constraint info
+    let constraint_sum: f64 = c_global.iter().sum();
+    let constraint_nodes: Vec<usize> = c_global.iter().enumerate()
+        .filter_map(|(i, &v)| if v.abs() > 1e-15 { Some(i) } else { None })
+        .collect();
+    let constraint_dofs = constraint_nodes.len();
+    
+    // Regularized K
+    let k_reg = {
+        let mut m = k_global.clone();
+        m.compress();
+        let mut diag_avg = 0.0_f64;
+        for i in 0..n_dof {
+            diag_avg += m.matvec_diag(i);
+        }
+        let eps = diag_avg.max(1e-300) / n_dof as f64 * 1e-9;
+        for i in 0..n_dof {
+            m.add(i, i, eps);
+        }
+        m.compress();
+        m
+    };
+    
+    // Solve for omega (warping)
+    let ixx = props.ix;
+    let iyy = props.iy;
+    let ixy = props.ixy;
+    
+    let solver = crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        &c_global,
+        crate::fea::SolverOptions { auto_regularize_singular: true },
+    ).map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?;
+    
+    let solver_opt = Some(solver);
+    let omega = solve_with_fallback(&solver_opt, &k_reg, &c_global, &f_torsion)?;
+    
+    // Residual: K*w - F (lambda=0 for regularized system without explicit constraint)
+    let mut residual = vec![0.0_f64; n_dof];
+    for i in 0..n_dof {
+        let mut sum = 0.0_f64;
+        let row_ptr = k_reg.row_ptr();
+        let csr_cols = k_reg.csr_cols();
+        let csr_vals = k_reg.csr_vals();
+        for j_idx in row_ptr[i]..row_ptr[i+1] {
+            let j = csr_cols[j_idx];
+            sum += csr_vals[j_idx] * omega[j];
+        }
+        sum -= f_torsion[i];
+        residual[i] = sum;
+    }
+    let residual_norm: f64 = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let f_norm: f64 = f_torsion.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let residual_rel = if f_norm > 0.0 { residual_norm / f_norm } else { 0.0 };
+    
+    // C^T * omega
+    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    
+    // w^T K w
+    let mut kw = vec![0.0_f64; n_dof];
+    let row_ptr = k_reg.row_ptr();
+    let csr_cols = k_reg.csr_cols();
+    let csr_vals = k_reg.csr_vals();
+    for i in 0..n_dof {
+        for j_idx in row_ptr[i]..row_ptr[i+1] {
+            let j = csr_cols[j_idx];
+            kw[i] += csr_vals[j_idx] * omega[j];
+        }
+    }
+    let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();
+    
+    // w^T F
+    let wtf: f64 = omega.iter().zip(f_torsion.iter()).map(|(w, f)| w * f).sum();
+    
+    // J_raw = Ixx + Iyy - w^T F
+    let ixx_plus_iyy = ixx + iyy;
+    let omega_dot_f = wtf;
+    let j_raw = ixx_plus_iyy - omega_dot_f;
+    
+    // Coordinate invariants
+    let mut integral_x_da = 0.0_f64;
+    let mut integral_y_da = 0.0_f64;
+    
+    for tri6 in &elements {
+        let gps = gauss_points(6);
+        for &(w, eta, xi, zeta) in &gps {
+            let sf = shape_function(&tri6.coords, (eta, xi, zeta));
+            let weight = w * sf.j;
+            integral_x_da += weight * sf.x;
+            integral_y_da += weight * sf.y;
+        }
+    }
+    
+    let centroid = (props.centroid.x, props.centroid.y);
+    
+    // Compute J with fallback
+    let j_fem = ixx + iyy - omega_dot_f;
+    let j_analytical = analytical_j(section, &props).unwrap_or(0.0);
+    let j_fallback = !j_fem.is_finite() || j_fem <= 0.0;
+    
+    // Rank/nullity estimate
+    let k_diag_count = (0..n_dof).filter(|&i| k_reg.matvec_diag(i).abs() > 1e-12).count();
+    let k_rank_estimate = k_diag_count.min(n_dof - 1);
+    let k_nullity = n_dof - k_rank_estimate;
+    
+    // K symmetry relative error
+    let k_sym_max_err = k_global.symmetry_max_error();
+    let k_fro = k_global.frobenius_norm();
+    let k_sym_rel_err = if k_fro > 0.0 { k_sym_max_err / k_fro } else { 0.0 };
+    
+    // Constraint info
+    let constraint_sum: f64 = c_global.iter().sum();
+    let constraint_nodes: Vec<usize> = c_global.iter().enumerate()
+        .filter_map(|(i, &v)| if v.abs() > 1e-15 { Some(i) } else { None })
+        .collect();
+    let constraint_dofs = constraint_nodes.len();
+    
+    // Residual
+    let residual_norm: f64 = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let f_norm: f64 = f_torsion.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let residual_rel = if f_norm > 0.0 { residual_norm / f_norm } else { 0.0 };
+    
+    // J_raw
+    let j_raw = ixx_plus_iyy - omega_dot_f;
+    let omega_dot_f = wtf;
+    
+    // C^T * omega
+    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    
+    // w^T K w
+    let mut kw = vec![0.0_f64; n_dof];
+    let row_ptr = k_reg.row_ptr();
+    let csr_cols = k_reg.csr_cols();
+    let csr_vals = k_reg.csr_vals();
+    for i in 0..n_dof {
+        for j_idx in row_ptr[i]..row_ptr[i+1] {
+            let j = csr_cols[j_idx];
+            kw[i] += csr_vals[j_idx] * omega[j];
+        }
+    }
+    let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();
+    
+    // w^T F
+    let wtf: f64 = omega.iter().zip(f_torsion.iter()).map(|(w, f)| w * f).sum();
+    
+    Ok(WarpingDiagnostics {
+        section_name: name.to_string(),
+        n_dof,
+        n_elements,
+        detj_min,
+        detj_max,
+        detj_weighted_sum,
+        ke_sym_max_err,
+        element_energy_min,
+        element_energy_max,
+        element_energy_sum,
+        k_sym_rel_err,
+        k_rank_estimate,
+        k_nullity,
+        constraint_dofs,
+        constraint_nodes,
+        constraint_sum,
+        residual_norm,
+        residual_rel,
+        ct_omega,
+        wtkw,
+        wtf,
+        j_raw,
+        ixx_plus_iyy,
+        omega_dot_f,
+        integral_x_da,
+        integral_y_da,
+        centroid: (props.centroid.x, props.centroid.y),
+        j_fem,
+        j_analytical: analytical_j(section, &props).unwrap_or(0.0),
+        j_fallback: !j_fem.is_finite() || j_fem <= 0.0,
+        fem_succeeded: true,
+    })
 }

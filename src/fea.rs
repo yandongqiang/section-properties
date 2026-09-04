@@ -1044,6 +1044,77 @@ impl SparseMatrix {
         }
         (&self.row_ptr, &self.csr_cols, &self.csr_vals)
     }
+
+    /// Get CSR row pointers (for diagnostics).
+    pub fn row_ptr(&self) -> &[usize] {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before row_ptr");
+        }
+        &self.row_ptr
+    }
+
+    /// Get CSR column indices (for diagnostics).
+    pub fn csr_cols(&self) -> &[usize] {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before csr_cols");
+        }
+        &self.csr_cols
+    }
+
+    /// Get CSR values (for diagnostics).
+    pub fn csr_vals(&self) -> &[f64] {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before csr_vals");
+        }
+        &self.csr_vals
+    }
+
+    /// Frobenius norm of the matrix.
+    pub fn frobenius_norm(&self) -> f64 {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before frobenius_norm");
+        }
+        self.csr_vals.iter().map(|v| v * v).sum::<f64>().sqrt()
+    }
+
+    /// Maximum symmetry error max_{i<j} |A_ij - A_ji|.
+    pub fn symmetry_max_error(&self) -> f64 {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before symmetry_max_error");
+        }
+        let mut max_err = 0.0;
+        for i in 0..self.n {
+            let start = self.row_ptr[i];
+            let end = self.row_ptr[i + 1];
+            for k in start..end {
+                let j = self.csr_cols[k];
+                if j > i {
+                    let val_ij = self.csr_vals[k];
+                    let val_ji = self.get(j, i);
+                    let err = (val_ij - val_ji).abs();
+                    if err > max_err {
+                        max_err = err;
+                    }
+                }
+            }
+        }
+        max_err
+    }
+
+    /// Get value at (row, col) - requires compress().
+    pub fn get(&self, row: usize, col: usize) -> f64 {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before get");
+        }
+        let start = self.row_ptr[row];
+        let end = self.row_ptr[row + 1];
+        for k in start..end {
+            if self.csr_cols[k] == col {
+                return self.csr_vals[k];
+            }
+        }
+        0.0
+    }
 }
 
 /// Conjugate gradient solver with diagonal preconditioning.
