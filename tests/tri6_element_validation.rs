@@ -319,12 +319,13 @@ fn tri6_fe_invariance() {
 /// The element stiffness matrix K_e for torsion has 1 zero eigenvalue
 /// corresponding to constant warping mode (null space). The constraint
 /// C_e = ∫N dA removes this mode in the full system. For a single element:
-/// - Rank = 5 (one rigid body mode: constant warping)
-/// - 1 zero eigenvalue
-/// - 5 positive eigenvalues
+/// - Expected rank = 5 (one rigid body mode: constant warping)
+/// - 1 zero eigenvalue (constant mode)
+/// - 5 positive eigenvalues (non-constant modes)
 ///
-/// Note: Eigenvalue computation is numerically sensitive. This test uses
-/// the more robust quadratic form x^T K x >= 0 to verify PSD.
+/// Note: This test does NOT compute eigenvalues (numerically sensitive).
+/// It verifies PSD via the robust quadratic form x^T K x >= 0,
+/// and explicitly checks constant mode gives 0, linear modes positive.
 #[test]
 fn tri6_ke_psd() {
     let points = [
