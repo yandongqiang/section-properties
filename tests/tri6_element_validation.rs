@@ -252,11 +252,13 @@ fn tri6_fe_reference_values() {
     println!("✓ F_e reference values validated ✓");
 }
 
-/// Test F_e invariance under rotation (sum=0) and known values
+/// Test F_e resultant/equilibrium invariants (sum=0)
 /// Note: F_e for torsion is NOT translation-invariant because
 /// the integrand B^T * [y, -x] depends on absolute coordinates.
+/// This test verifies the resultant force is zero (equilibrium),
+/// not that F_e values are invariant.
 #[test]
-fn tri6_fe_invariance() {
+fn tri6_fe_resultant_equilibrium() {
     // Base triangle
     let base_points = [
         Point::new(0.0, 0.0),
@@ -280,7 +282,7 @@ fn tri6_fe_invariance() {
 
     let trans_f_sum: f64 = trans_f.iter().sum();
     assert!(trans_f_sum.abs() < 1e-10, "Translated F_e sum should be 0");
-    println!("✓ F_e sum=0 under translation validated (not invariant, but sum preserved) ✓");
+    println!("✓ F_e resultant=0 under translation validated ✓");
 
     // Test rotation: rotate 90 degrees about origin
     // Original: (0,0), (1,0), (0,1) -> Rotated: (0,0), (0,1), (-1,0)
@@ -297,10 +299,10 @@ fn tri6_fe_invariance() {
 
     // Under 90° rotation: x' = -y, y' = x
     // F_x' = ∫ B^T [y', -x'] = ∫ B^T [x, y]
-    // This is not simply related to original F, but sum should be 0
+    // This is not simply related to original F, but resultant should be 0
     let rot_f_sum: f64 = rot_f.iter().sum();
     assert!(rot_f_sum.abs() < 1e-10, "Rotated F_e sum should be 0");
-    println!("✓ F_e rotation invariance (sum=0) validated ✓");
+    println!("✓ F_e resultant=0 under rotation validated ✓");
 
     // Verify base_f values match expected
     let expected_f = [0.0, 0.0, 0.0, 1.0 / 3.0, 0.0, -1.0 / 3.0];
