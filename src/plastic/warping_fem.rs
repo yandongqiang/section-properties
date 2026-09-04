@@ -14,6 +14,9 @@ use crate::mesh::{MeshControl, MeshParams, mesh_params_from_control, mesh_sectio
 use crate::plastic::warping::ThinWalledCheck;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
+use serde_json;
+use std::fs::File;
+use std::io::Write;
 
 /// Drop zero-area (degenerate) triangles from a tri3 mesh.
 ///
@@ -1553,6 +1556,386 @@ pub fn diagnose_warping_fem(
         j_fem,
         j_analytical: analytical_j(section, &props).unwrap_or(0.0),
         j_fallback: !j_fem.is_finite() || j_fem <= 0.0,
+        fem_succeeded: true,
+    })
+}
+
+/// Export global warping matrices for cross-validation
+pub fn export_global_warping_matrices(
+    section: &Section,
+    name: &str,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs::File;
+    use std::io::Write;
+    
+    let props = SectionProperties::from_section(section);
+    
+    let bounds = section.bounds();
+    let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
+    let min_edge = min_edge_length(section);
+    let is_thin_walled = section.is_thin_walled();
+    
+    let params = mesh_params_from_control(MeshControl::Fine, max_dim, min_edge, is_thin_walled);
+    let mesh = mesh_section(section, params);
+    
+    let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
+    let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
+    let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
+    
+    let mut used_nodes = vec![false; mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let node_map: Vec<Option<usize>> = used_nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &used)| if used { Some(i) } else { None })
+        .collect();
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(mesh.nodes[old_idx]);
+        }
+    }
+    
+    let remapped_elements: Vec<[usize; 3]> = clean_elements
+        .iter()
+        .map(|tri| [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]])
+        .collect();
+    
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
+    let n_dof = tri6_mesh.nodes.len();
+    
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+    let n_elements = elements.len();
+    
+    // Global system assembly
+    let mut k_global = SparseMatrix::new(n_dof);
+    let mut f_torsion = vec![0.0_f64; n_dof];
+    let mut c_global = vec![0.0_f64; n_dof];
+    
+    for tri6 in &elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    
+    k_global.compress();
+    
+    // Export to JSON
+    let mut file = File::create(output_path)?;
+    
+    // Write header
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"section_name\": \"{}\",", name)?;
+    writeln!(file, "  \"n_dof\": {},", n_dof)?;
+    writeln!(file, "  \"n_elements\": {},", elements.len())?;
+    writeln!(file, "  \"n_nodes\": {},", tri6_mesh.nodes.len())?;
+    
+    // Node coordinates
+    writeln!(file, "  \"nodes\": [")?;
+    for (i, node) in tri6_mesh.nodes.iter().enumerate() {
+        writeln!(file, "    [{:.10}, {:.10}]{}", node.x, node.y, if i < tri6_mesh.nodes.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Element connectivity
+    writeln!(file, "  \"elements\": [")?;
+    for (i, tri6) in elements.iter().enumerate() {
+        writeln!(file, "    [{}, {}, {}, {}, {}, {}]{}", 
+            tri6.node_ids[0], tri6.node_ids[1], tri6.node_ids[2],
+            tri6.node_ids[3], tri6.node_ids[4], tri6.node_ids[5],
+            if i < elements.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Global K matrix (CSR format)
+    let (row_ptr, csr_cols, csr_vals) = k_global.csr_data();
+    writeln!(file, "  \"K\": {{")?;
+    writeln!(file, "    \"row_ptr\": [")?;
+    for (i, &val) in row_ptr.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < row_ptr.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for (i, &val) in csr_cols.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < csr_cols.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for (i, &val) in csr_vals.iter().enumerate() {
+        writeln!(file, "      {:.15e}{}", val, if i < csr_vals.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ]")?;
+    writeln!(file, "  }},")?;
+    
+    // Global F vector
+    writeln!(file, "  \"F\": [")?;
+    for (i, &val) in f_torsion.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < f_torsion.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Global C vector
+    writeln!(file, "  \"C\": [")?;
+    for (i, &val) in c_global.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < c_global.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Node coordinates for DOF mapping
+    writeln!(file, "  \"node_coords\": [")?;
+    for (i, node) in tri6_mesh.nodes.iter().enumerate() {
+        writeln!(file, "    [{:.10}, {:.10}]{}", node.x, node.y, if i < tri6_mesh.nodes.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ]")?;
+    
+writeln!(file, "}}")?;
+
+    Ok(())
+}
+
+/// Import a Python mesh from JSON and run FEM analysis.
+/// This allows direct comparison with Python's sectionproperties using the exact same mesh.
+pub fn run_fem_on_python_mesh(
+    mesh_path: &str,
+    name: &str,
+    output_path: &str,
+) -> Result<WarpingDiagnostics, Box<dyn std::error::Error>> {
+    use std::fs::File;
+    use std::io::Read;
+    
+    // Load Python mesh
+    let mut file = File::open(mesh_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let mesh_json: serde_json::Value = serde_json::from_str(&contents)?;
+    
+    // Extract vertices and triangles
+    let vertices = mesh_json["vertices"].as_array().ok_or("vertices not found")?;
+    let triangles = mesh_json["triangles"].as_array().ok_or("triangles not found")?;
+    
+    let vertices: Vec<Point> = vertices.iter()
+        .map(|v| {
+            let coords = v.as_array().unwrap();
+            Point::new(coords[0].as_f64().unwrap(), coords[1].as_f64().unwrap())
+        })
+        .collect();
+    
+    let tri3_elements: Vec<[usize; 3]> = triangles.iter()
+        .map(|t| {
+            let arr = t.as_array().unwrap();
+            [arr[0].as_u64().unwrap() as usize, arr[1].as_u64().unwrap() as usize, arr[2].as_u64().unwrap() as usize]
+        })
+        .collect();
+    
+    println!("Loaded Python mesh: {} vertices, {} triangles", vertices.len(), tri3_elements.len());
+    
+    // Convert Tri3 to Tri6
+    let tri6_mesh = tri3_to_tri6(&vertices, &tri3_elements);
+    let n_dof = tri6_mesh.nodes.len();
+    println!("Tri6 mesh: {} nodes, {} elements", tri6_mesh.nodes.len(), tri6_mesh.elements.len());
+    
+    // Build Tri6 elements
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+    
+    // Global system assembly
+    let n_dof = tri6_mesh.nodes.len();
+    let mut k_global = SparseMatrix::new(n_dof);
+    let mut f_torsion = vec![0.0_f64; n_dof];
+    let mut c_global = vec![0.0_f64; n_dof];
+    
+    for tri6 in &elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    
+    // Global K symmetry
+    k_global.compress();
+    let k_sym_max_err = k_global.symmetry_max_error();
+    let k_fro = k_global.frobenius_norm();
+    let k_sym_rel_err = if k_fro > 0.0 { k_sym_max_err / k_fro } else { 0.0 };
+    
+    // Constraint info
+    let constraint_sum: f64 = c_global.iter().sum();
+    let constraint_nodes: Vec<usize> = c_global.iter().enumerate()
+        .filter_map(|(i, &v)| if v.abs() > 1e-15 { Some(i) } else { None })
+        .collect();
+    let constraint_dofs = constraint_nodes.len();
+    
+    // Regularized K
+    let k_reg = {
+        let mut m = k_global.clone();
+        m.compress();
+        let mut diag_avg = 0.0_f64;
+        for i in 0..n_dof {
+            diag_avg += m.matvec_diag(i);
+        }
+        let eps = diag_avg.max(1e-300) / n_dof as f64 * 1e-9;
+        for i in 0..n_dof {
+            m.add(i, i, eps);
+        }
+        m.compress();
+        m
+    };
+    
+    // Solve for omega (warping)
+    let ixx = 1.0; // placeholder - we don't have section properties here
+    let iyy = 1.0;
+    let ixy = 0.0;
+    
+    let solver = crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        &c_global,
+        crate::fea::SolverOptions { auto_regularize_singular: true },
+    ).map_err(|_| "Failed to create solver")?;
+    
+    let solver_opt = Some(solver);
+    let omega = solve_with_fallback(&solver_opt, &k_reg, &c_global, &f_torsion)?;
+    
+    // Residual: K*w - F
+    let mut residual = vec![0.0_f64; n_dof];
+    let row_ptr = k_reg.row_ptr();
+    let csr_cols = k_reg.csr_cols();
+    let csr_vals = k_reg.csr_vals();
+    for i in 0..n_dof {
+        let mut sum = 0.0_f64;
+        for j_idx in row_ptr[i]..row_ptr[i+1] {
+            let j = csr_cols[j_idx];
+            sum += csr_vals[j_idx] * omega[j];
+        }
+        sum -= f_torsion[i];
+        residual[i] = sum;
+    }
+    let residual_norm: f64 = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let f_norm: f64 = f_torsion.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let residual_rel = if f_norm > 0.0 { residual_norm / f_norm } else { 0.0 };
+    
+    // C^T * omega
+    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    
+    // w^T K w
+    let mut kw = vec![0.0_f64; n_dof];
+    let row_ptr = k_reg.row_ptr();
+    let csr_cols = k_reg.csr_cols();
+    let csr_vals = k_reg.csr_vals();
+    for i in 0..n_dof {
+        for j_idx in row_ptr[i]..row_ptr[i+1] {
+            let j = csr_cols[j_idx];
+            kw[i] += csr_vals[j_idx] * omega[j];
+        }
+    }
+    let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();
+    
+    // w^T F
+    let wtf: f64 = omega.iter().zip(f_torsion.iter()).map(|(w, f)| w * f).sum();
+    
+    // J_raw = Ixx + Iyy - w^T F (using placeholder Ixx, Iyy = 1.0)
+    let ixx_plus_iyy = 1.0;
+    let omega_dot_f = wtf;
+    let j_raw = ixx_plus_iyy - omega_dot_f;
+    
+    // Energy identity
+    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+        (wtkw - wtf).abs() / wtf.abs()
+    } else {
+        0.0
+    };
+    
+    // C^T * omega
+    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    
+    // w^T K w
+    let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();
+    
+    // w^T F
+    let wtf: f64 = omega.iter().zip(f_torsion.iter()).map(|(w, f)| w * f).sum();
+    
+    // Energy identity
+    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+        (wtkw - wtf).abs() / wtf.abs()
+    } else {
+        0.0
+    };
+    
+    // C^T * omega
+    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    
+    // Export results
+    let mut file = File::create(output_path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"section_name\": \"{}\",", name)?;
+    writeln!(file, "  \"n_dof\": {},", n_dof)?;
+    writeln!(file, "  \"n_elements\": {},", elements.len())?;
+    writeln!(file, "  \"n_nodes\": {},", tri6_mesh.nodes.len())?;
+    writeln!(file, "  \"residual_norm\": {:.6e},", residual_norm)?;
+    writeln!(file, "  \"residual_rel\": {:.6e},", residual_rel)?;
+    writeln!(file, "  \"ct_omega\": {:.6e},", ct_omega)?;
+    writeln!(file, "  \"wtkw\": {:.6e},", wtkw)?;
+    writeln!(file, "  \"wtf\": {:.6e},", wtf)?;
+    writeln!(file, "  \"j_raw\": {:.6e},", j_raw)?;
+    writeln!(file, "  \"energy_identity_rel_error\": {:.6e},", energy_identity_rel_error)?;
+    writeln!(file, "  \"ct_omega\": {:.6e},", ct_omega)?;
+    writeln!(file, "}}")?;
+    
+    Ok(WarpingDiagnostics {
+        section_name: name.to_string(),
+        n_dof,
+        n_elements: elements.len(),
+        detj_min: 0.0,
+        detj_max: 0.0,
+        detj_weighted_sum: 0.0,
+        ke_sym_max_err: 0.0,
+        element_energy_min: 0.0,
+        element_energy_max: 0.0,
+        element_energy_sum: 0.0,
+        k_sym_rel_err,
+        k_rank_estimate: 0,
+        k_nullity: 0,
+        constraint_dofs,
+        constraint_nodes,
+        constraint_sum: 0.0,
+        residual_norm,
+        residual_rel,
+        ct_omega,
+        wtkw,
+        wtf,
+        j_raw,
+        ixx_plus_iyy: 1.0,
+        omega_dot_f: wtf,
+        energy_identity_rel_error,
+        ixx: 1.0,
+        iyy: 1.0,
+        sum_fx: 0.0,
+        sum_fy: 0.0,
+        first_moment_x: 0.0,
+        first_moment_y: 0.0,
+        integral_x_da: 0.0,
+        integral_y_da: 0.0,
+        centroid: (0.0, 0.0),
+        f_formulation_global: true,
+        j_fem: j_raw,
+        j_analytical: 0.0,
+        j_fallback: false,
         fem_succeeded: true,
     })
 }

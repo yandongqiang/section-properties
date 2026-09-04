@@ -1,0 +1,14 @@
+{
+  "section_name": "Angle_100x100",
+  "n_dof": 2030,
+  "n_elements": 518,
+  "n_nodes": 2030,
+  "residual_norm": 6.424077e-8,
+  "residual_rel": 4.357545e-11,
+  "ct_omega": 1.782041e-11,
+  "wtkw": 5.225904e6,
+  "wtf": 5.225904e6,
+  "j_raw": -5.225903e6,
+  "energy_identity_rel_error": 2.316766e-15,
+  "ct_omega": 1.782041e-11,
+}

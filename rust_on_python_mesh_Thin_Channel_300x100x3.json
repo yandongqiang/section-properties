@@ -1,0 +1,14 @@
+{
+  "section_name": "Thin_Channel_300x100x3",
+  "n_dof": 2911,
+  "n_elements": 666,
+  "n_nodes": 2911,
+  "residual_norm": 5.291377e-5,
+  "residual_rel": 1.022995e-8,
+  "ct_omega": 3.936293e-9,
+  "wtkw": 8.354120e7,
+  "wtf": 8.354120e7,
+  "j_raw": -8.354120e7,
+  "energy_identity_rel_error": 3.210642e-14,
+  "ct_omega": 3.936293e-9,
+}

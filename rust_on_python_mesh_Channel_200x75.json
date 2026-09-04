@@ -1,0 +1,14 @@
+{
+  "section_name": "Channel_200x75",
+  "n_dof": 2079,
+  "n_elements": 517,
+  "n_nodes": 2079,
+  "residual_norm": 3.617036e-6,
+  "residual_rel": 1.016060e-9,
+  "ct_omega": -1.833541e-9,
+  "wtkw": 5.070899e7,
+  "wtf": 5.070899e7,
+  "j_raw": -5.070899e7,
+  "energy_identity_rel_error": 9.403405e-15,
+  "ct_omega": -1.833541e-9,
+}

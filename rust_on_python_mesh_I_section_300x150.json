@@ -1,0 +1,14 @@
+{
+  "section_name": "I_section_300x150",
+  "n_dof": 2674,
+  "n_elements": 669,
+  "n_nodes": 2674,
+  "residual_norm": 2.487640e-6,
+  "residual_rel": 2.899071e-10,
+  "ct_omega": -1.004082e-9,
+  "wtkw": 2.510363e8,
+  "wtf": 2.510363e8,
+  "j_raw": -2.510363e8,
+  "energy_identity_rel_error": 2.231883e-14,
+  "ct_omega": -1.004082e-9,
+}

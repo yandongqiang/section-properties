@@ -1115,6 +1115,14 @@ impl SparseMatrix {
         }
         0.0
     }
+
+    /// Get the raw COO triplets (for diagnostics/export).
+    pub fn triplets(&self) -> (&[usize], &[usize], &[f64]) {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before accessing triplets");
+        }
+        (&self.rows, &self.cols, &self.vals)
+    }
 }
 
 /// Conjugate gradient solver with diagonal preconditioning.
