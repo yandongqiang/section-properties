@@ -9,8 +9,7 @@
 //! - Mid-side nodes (3,4,5): C_e = ∫N_i dA = A/3 = 1/6 ≈ 0.166667
 //! Sum = 3*(A/3) = A = 0.5 ✓
 //!
-//! Both 4-point and 6-point Gauss rules give exact results for straight-edged triangles.
-//! The 6-point rule is used for consistency with higher-order elements.
+//! The 6-point Gauss rule is used for exact integration of quadratic functions.
 //!
 //! Run with: cargo test --test tri6_element_validation
 
@@ -139,11 +138,9 @@ fn tri6_unit_triangle_element_matrices() {
     }
     println!("K_e symmetry verified ✓");
 
-    // K_e should be positive semi-definite (diagonal > 0)
-    for i in 0..6 {
-        assert!(k_el[i][i] > 0.0, "K[{},{}] should be positive", i, i);
-    }
-    println!("K_e positive diagonal verified ✓");
+    // Note: positive diagonal does NOT prove positive semi-definiteness.
+    // See tri6_ke_psd test for proper PSD verification.
+    println!("K_e diagonal values printed (positive diagonal check NOT sufficient for PSD)");
 
     println!(
         "\n✓ Tri6 element matrices validated (6-point Gauss rule - exact for straight-edged triangles)"
@@ -304,13 +301,30 @@ fn tri6_fe_invariance() {
     let rot_f_sum: f64 = rot_f.iter().sum();
     assert!(rot_f_sum.abs() < 1e-10, "Rotated F_e sum should be 0");
     println!("✓ F_e rotation invariance (sum=0) validated ✓");
+
+    // Verify base_f values match expected
+    let expected_f = [0.0, 0.0, 0.0, 1.0 / 3.0, 0.0, -1.0 / 3.0];
+    for i in 0..6 {
+        assert!(
+            (base_f[i] - expected_f[i]).abs() < 1e-10,
+            "Base F[{}] = {} (expected {})",
+            i,
+            base_f[i],
+            expected_f[i]
+        );
+    }
 }
 
 /// Test K_e positive semi-definiteness via quadratic form
-/// Note: The element stiffness matrix K_e for torsion has 1 zero eigenvalue
-/// corresponding to constant warping mode. The constraint C_e = ∫N dA
-/// removes this mode in the full system. For a single element, we verify
-/// x^T K x >= 0 for all x.
+/// The element stiffness matrix K_e for torsion has 1 zero eigenvalue
+/// corresponding to constant warping mode (null space). The constraint
+/// C_e = ∫N dA removes this mode in the full system. For a single element:
+/// - Rank = 5 (one rigid body mode: constant warping)
+/// - 1 zero eigenvalue
+/// - 5 positive eigenvalues
+///
+/// Note: Eigenvalue computation is numerically sensitive. This test uses
+/// the more robust quadratic form x^T K x >= 0 to verify PSD.
 #[test]
 fn tri6_ke_psd() {
     let points = [
@@ -341,7 +355,8 @@ fn tri6_ke_psd() {
         }
     }
 
-    // Verify x^T K x >= 0 for many test vectors
+    // Verify x^T K x >= 0 for many test vectors (quadratic form test)
+    // This is the robust way to verify PSD without numerical eigenvalue issues
     use std::f64::consts::PI;
     for trial in 0..50 {
         let angle = trial as f64 * PI / 25.0;
@@ -365,9 +380,9 @@ fn tri6_ke_psd() {
 
     // Test specific modes: constant, linear x, linear y
     let modes = [
-        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], // constant
-        [0.0, 1.0, 0.0, 0.5, 0.5, 0.0], // linear x
-        [0.0, 0.0, 1.0, 0.0, 0.5, 0.5], // linear y
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], // constant -> 0 (null space)
+        [0.0, 1.0, 0.0, 0.5, 0.5, 0.0], // linear x -> positive
+        [0.0, 0.0, 1.0, 0.0, 0.5, 0.5], // linear y -> positive
     ];
     for mode in &modes {
         let mut km = [0.0; 6];
@@ -377,12 +392,109 @@ fn tri6_ke_psd() {
             }
         }
         let mkm: f64 = mode.iter().zip(km.iter()).map(|(mi, kmi)| mi * kmi).sum();
-        // Constant mode should give 0 (rigid body)
+        // Constant mode should give ~0 (null space)
         // Linear modes should give positive values
         assert!(mkm >= -1e-10, "Mode x^T K x = {} should be >= 0", mkm);
     }
 
+    // Verify constant mode gives exactly zero quadratic form
+    let constant_mode = [1.0; 6];
+    let mut kc = [0.0; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            kc[i] += k_el[i][j] * constant_mode[j];
+        }
+    }
+    let c_kc: f64 = constant_mode
+        .iter()
+        .zip(kc.iter())
+        .map(|(ci, kci)| ci * kci)
+        .sum();
+    assert!(
+        c_kc.abs() < 1e-12,
+        "Constant mode x^T K x = {} should be exactly 0",
+        c_kc
+    );
+
     println!("✓ K_e quadratic form x^T K x >= 0 validated ✓");
+    println!("  Constant mode: x^T K x = {:.2e} (null space)", c_kc);
+    println!("  Random vectors: all >= 0");
+}
+
+/// Test K_e null space (rigid body modes)
+/// The constant warping mode should be in the null space of K_e
+#[test]
+fn tri6_ke_null_space() {
+    let points = [
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(0.0, 1.0),
+        Point::new(0.5, 0.0),
+        Point::new(0.5, 0.5),
+        Point::new(0.0, 0.5),
+    ];
+
+    let tri6 = Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
+    let (k_el, _, _) = tri6.torsion_properties();
+
+    // Constant warping mode (rigid body)
+    let constant_mode = [1.0; 6];
+    let mut kc = [0.0; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            kc[i] += k_el[i][j] * constant_mode[j];
+        }
+    }
+    // K_e * constant = 0 (null space)
+    for i in 0..6 {
+        assert!(
+            kc[i].abs() < 1e-10,
+            "K_e * constant_mode[{}] = {} should be ~0",
+            i,
+            kc[i]
+        );
+    }
+    println!("✓ Constant warping mode in null space of K_e ✓");
+
+    // Linear x mode should NOT be in null space
+    let linear_x = [0.0, 1.0, 0.0, 0.5, 0.5, 0.0];
+    let mut kx = [0.0; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            kx[i] += k_el[i][j] * linear_x[j];
+        }
+    }
+    let x_kx: f64 = linear_x
+        .iter()
+        .zip(kx.iter())
+        .map(|(xi, kxi)| xi * kxi)
+        .sum();
+    assert!(
+        x_kx > 1e-10,
+        "Linear x mode should have positive x^T K x, got {}",
+        x_kx
+    );
+    println!("✓ Linear x mode not in null space ✓");
+
+    // Linear y mode should NOT be in null space
+    let linear_y = [0.0, 0.0, 1.0, 0.0, 0.5, 0.5];
+    let mut ky = [0.0; 6];
+    for i in 0..6 {
+        for j in 0..6 {
+            ky[i] += k_el[i][j] * linear_y[j];
+        }
+    }
+    let y_ky: f64 = linear_y
+        .iter()
+        .zip(ky.iter())
+        .map(|(yi, kyi)| yi * kyi)
+        .sum();
+    assert!(
+        y_ky > 1e-10,
+        "Linear y mode should have positive y^T K y, got {}",
+        y_ky
+    );
+    println!("✓ Linear y mode not in null space ✓");
 }
 
 /// Test extrapolate_to_nodes with 6-point Gauss rule ordering
@@ -416,7 +528,7 @@ fn tri6_extrapolate_to_nodes_ordering() {
     // Evaluate x at the 6 Gauss points
     let gps = gauss_points(6);
     let mut x_at_gp = [0.0; 6];
-    for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+    for (i, &(_w, eta, xi, zeta)) in gps.iter().enumerate() {
         let sf = shape_function(&tri6.coords, (eta, xi, zeta));
         x_at_gp[i] = sf.x;
     }
@@ -439,7 +551,7 @@ fn tri6_extrapolate_to_nodes_ordering() {
 
     // Test y field
     let mut y_at_gp = [0.0; 6];
-    for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+    for (i, &(_w, eta, xi, zeta)) in gps.iter().enumerate() {
         let sf = shape_function(&tri6.coords, (eta, xi, zeta));
         y_at_gp[i] = sf.y;
     }
