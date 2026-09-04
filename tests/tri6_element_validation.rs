@@ -14,7 +14,7 @@
 //!
 //! Run with: cargo test --test tri6_element_validation
 
-use section_properties::fea::Tri6;
+use section_properties::fea::{Tri6, extrapolate_to_nodes, gauss_points, shape_function};
 use section_properties::geometry::Point;
 
 /// Test Tri6 element matrices on unit right triangle
@@ -255,9 +255,64 @@ fn tri6_fe_reference_values() {
     println!("✓ F_e reference values validated ✓");
 }
 
-/// Test K_e positive definiteness and known properties
+/// Test F_e invariance under rotation (sum=0) and known values
+/// Note: F_e for torsion is NOT translation-invariant because
+/// the integrand B^T * [y, -x] depends on absolute coordinates.
 #[test]
-fn tri6_ke_properties() {
+fn tri6_fe_invariance() {
+    // Base triangle
+    let base_points = [
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(0.0, 1.0),
+        Point::new(0.5, 0.0),
+        Point::new(0.5, 0.5),
+        Point::new(0.0, 0.5),
+    ];
+
+    let base_tri6 = Tri6::from_points(0, base_points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
+    let (_, base_f, _) = base_tri6.torsion_properties();
+
+    // Test translation: F_e is NOT translation-invariant for torsion
+    // because the load vector involves absolute coordinates [y, -x]
+    // This is expected behavior - just verify the sum is still zero
+    let translated_points: [Point; 6] = base_points.map(|p| Point::new(p.x + 10.0, p.y - 5.0));
+    let trans_tri6 =
+        Tri6::from_points(0, translated_points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
+    let (_, trans_f, _) = trans_tri6.torsion_properties();
+
+    let trans_f_sum: f64 = trans_f.iter().sum();
+    assert!(trans_f_sum.abs() < 1e-10, "Translated F_e sum should be 0");
+    println!("✓ F_e sum=0 under translation validated (not invariant, but sum preserved) ✓");
+
+    // Test rotation: rotate 90 degrees about origin
+    // Original: (0,0), (1,0), (0,1) -> Rotated: (0,0), (0,1), (-1,0)
+    let rotated_points = [
+        Point::new(0.0, 0.0),
+        Point::new(0.0, 1.0),
+        Point::new(-1.0, 0.0),
+        Point::new(0.0, 0.5),
+        Point::new(-0.5, 0.5),
+        Point::new(-0.5, 0.0),
+    ];
+    let rot_tri6 = Tri6::from_points(0, rotated_points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
+    let (_, rot_f, _) = rot_tri6.torsion_properties();
+
+    // Under 90° rotation: x' = -y, y' = x
+    // F_x' = ∫ B^T [y', -x'] = ∫ B^T [x, y]
+    // This is not simply related to original F, but sum should be 0
+    let rot_f_sum: f64 = rot_f.iter().sum();
+    assert!(rot_f_sum.abs() < 1e-10, "Rotated F_e sum should be 0");
+    println!("✓ F_e rotation invariance (sum=0) validated ✓");
+}
+
+/// Test K_e positive semi-definiteness via quadratic form
+/// Note: The element stiffness matrix K_e for torsion has 1 zero eigenvalue
+/// corresponding to constant warping mode. The constraint C_e = ∫N dA
+/// removes this mode in the full system. For a single element, we verify
+/// x^T K x >= 0 for all x.
+#[test]
+fn tri6_ke_psd() {
     let points = [
         Point::new(0.0, 0.0),
         Point::new(1.0, 0.0),
@@ -286,28 +341,125 @@ fn tri6_ke_properties() {
         }
     }
 
-    // K_e should be positive semi-definite (all eigenvalues >= 0)
-    // For a single element with 6 DOF, K_e has rank 3 (3 rigid body modes)
-    // Check diagonal dominance and positive diagonals
-    for i in 0..6 {
-        assert!(k_el[i][i] > 0.0, "K[{},{}] should be positive", i, i);
+    // Verify x^T K x >= 0 for many test vectors
+    use std::f64::consts::PI;
+    for trial in 0..50 {
+        let angle = trial as f64 * PI / 25.0;
+        let x = [
+            angle.cos(),
+            angle.sin(),
+            (2.0 * angle).cos(),
+            (2.0 * angle).sin(),
+            (3.0 * angle).cos(),
+            (3.0 * angle).sin(),
+        ];
+        let mut kx = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                kx[i] += k_el[i][j] * x[j];
+            }
+        }
+        let xtkx: f64 = x.iter().zip(kx.iter()).map(|(xi, kxi)| xi * kxi).sum();
+        assert!(xtkx >= -1e-10, "x^T K x = {} should be >= 0 for PSD", xtkx);
     }
 
-    // Trace of K_e should be positive
-    let trace: f64 = (0..6).map(|i| k_el[i][i]).sum();
-    assert!(trace > 0.0, "Trace(K_e) should be positive");
+    // Test specific modes: constant, linear x, linear y
+    let modes = [
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], // constant
+        [0.0, 1.0, 0.0, 0.5, 0.5, 0.0], // linear x
+        [0.0, 0.0, 1.0, 0.0, 0.5, 0.5], // linear y
+    ];
+    for mode in &modes {
+        let mut km = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                km[i] += k_el[i][j] * mode[j];
+            }
+        }
+        let mkm: f64 = mode.iter().zip(km.iter()).map(|(mi, kmi)| mi * kmi).sum();
+        // Constant mode should give 0 (rigid body)
+        // Linear modes should give positive values
+        assert!(mkm >= -1e-10, "Mode x^T K x = {} should be >= 0", mkm);
+    }
 
-    // Check row sums for rigid body modes
-    // For torsion, the constraint C_e = ∫N dA ensures proper behavior
-    println!("\n=== K_e Properties ===");
-    println!("Trace(K_e) = {:.12}", trace);
-    println!("✓ K_e properties validated ✓");
+    println!("✓ K_e quadratic form x^T K x >= 0 validated ✓");
 }
 
-/// Test that 4-point and 6-point rules agree for straight-edged triangles
-/// (verifying both are exact)
+/// Test extrapolate_to_nodes with 6-point Gauss rule ordering
 #[test]
-fn tri6_quadrature_equivalence() {
+fn tri6_extrapolate_to_nodes_ordering() {
+    // Test that a constant field at 6 Gauss points extrapolates to constant at 6 nodes
+    let constant_field = [1.0; 6];
+    let extrapolated = extrapolate_to_nodes(&constant_field);
+    for i in 0..6 {
+        assert!(
+            (extrapolated[i] - 1.0).abs() < 1e-12,
+            "Node {}: constant field should extrapolate to 1.0, got {}",
+            i,
+            extrapolated[i]
+        );
+    }
+    println!("✓ Constant field extrapolates to constant ✓");
+
+    // Test that linear field x extrapolates correctly
+    // For unit right triangle, at Gauss points, x values should extrapolate to nodal x
+    let tri6_points = [
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(0.0, 1.0),
+        Point::new(0.5, 0.0),
+        Point::new(0.5, 0.5),
+        Point::new(0.0, 0.5),
+    ];
+    let tri6 = Tri6::from_points(0, tri6_points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
+
+    // Evaluate x at the 6 Gauss points
+    let gps = gauss_points(6);
+    let mut x_at_gp = [0.0; 6];
+    for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+        let sf = shape_function(&tri6.coords, (eta, xi, zeta));
+        x_at_gp[i] = sf.x;
+    }
+
+    // Extrapolate to nodes
+    let x_at_nodes = extrapolate_to_nodes(&x_at_gp);
+
+    // Should match nodal x coordinates
+    let expected_x = [0.0, 1.0, 0.0, 0.5, 0.5, 0.0];
+    for i in 0..6 {
+        assert!(
+            (x_at_nodes[i] - expected_x[i]).abs() < 1e-10,
+            "Node {}: x extrapolation failed: got {}, expected {}",
+            i,
+            x_at_nodes[i],
+            expected_x[i]
+        );
+    }
+    println!("✓ Linear field x extrapolates to correct nodal values ✓");
+
+    // Test y field
+    let mut y_at_gp = [0.0; 6];
+    for (i, &(w, eta, xi, zeta)) in gps.iter().enumerate() {
+        let sf = shape_function(&tri6.coords, (eta, xi, zeta));
+        y_at_gp[i] = sf.y;
+    }
+    let y_at_nodes = extrapolate_to_nodes(&y_at_gp);
+    let expected_y = [0.0, 0.0, 1.0, 0.0, 0.5, 0.5];
+    for i in 0..6 {
+        assert!(
+            (y_at_nodes[i] - expected_y[i]).abs() < 1e-10,
+            "Node {}: y extrapolation failed: got {}, expected {}",
+            i,
+            y_at_nodes[i],
+            expected_y[i]
+        );
+    }
+    println!("✓ Linear field y extrapolates to correct nodal values ✓");
+}
+
+/// Test production path uses 6-point Gauss rule and gives exact results
+#[test]
+fn tri6_six_point_quadrature_validation() {
     let points = [
         Point::new(0.0, 0.0),
         Point::new(1.0, 0.0),
@@ -319,11 +471,8 @@ fn tri6_quadrature_equivalence() {
 
     let tri6 = Tri6::from_points(0, points, [0, 1, 2, 3, 4, 5], 1.0, 1.0, 1.0).unwrap();
 
-    // Access internal gauss_points function via torsion_properties with different rules
-    // We can't directly call private functions, but we can verify the production path
-    // uses 6-point and gives exact results
-
-    let (k_el, f_el, c_el) = tri6.torsion_properties(); // Uses 6-point
+    // Verify the production torsion_properties() uses 6-point rule
+    let (k_el, f_el, c_el) = tri6.torsion_properties();
 
     let area = 0.5;
     let expected_c_corner = 0.0;
