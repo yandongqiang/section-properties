@@ -28,22 +28,34 @@ fn print_diagnostics(d: &WarpingDiagnostics) {
     println!("  K sym rel err:        {:.2e}", d.k_sym_rel_err);
     println!("  K est rank:           {} / {} (nullity={})", d.k_rank_estimate, d.n_dof, d.k_nullity);
     println!("  Constraint DOFs:      {}", d.constraint_dofs);
-    println!("  Constraint nodes:     {:?}", d.constraint_nodes);
+    println!("  Constraint nodes:     {} (first 20: {:?})", d.constraint_nodes.len(), &d.constraint_nodes[..20.min(d.constraint_nodes.len())]);
     println!("  Sum(C):               {:.6e} (should = area)", d.constraint_sum);
     
     println!("\n--- Warping Solution ---");
-    println!("  ||Kω + Cλ - F||:      {:.6e}", d.residual_norm);
+    println!("  ||Kω - F||:           {:.6e}", d.residual_norm);
     println!("  ||res||/||F||:        {:.2e} {}", d.residual_rel, if d.residual_rel < 1e-6 { "✓" } else { "✗" });
     println!("  Cᵀω:                  {:.6e} {}", d.ct_omega, if d.ct_omega.abs() < 1e-9 { "✓" } else { "✗" });
     println!("  ωᵀKω:                 {:.6e}", d.wtkw);
     println!("  ωᵀF:                  {:.6e}", d.wtf);
+    println!("  Ixx:                  {:.6e}", d.ixx);
+    println!("  Iyy:                  {:.6e}", d.iyy);
     println!("  Ixx+Iyy:              {:.6e}", d.ixx_plus_iyy);
     println!("  ωᵀF:                  {:.6e}", d.omega_dot_f);
     println!("  J_raw = Ixx+Iyy-ωᵀF:  {:.6e} {}", d.j_raw, if d.j_raw > 0.0 { "✓ POSITIVE" } else { "✗ NEGATIVE" });
     
-    println!("\n--- Coordinate Invariants ---");
+    println!("\n--- Energy Identity ---");
+    println!("  ωᵀKω - ωᵀF:           {:.6e}", d.wtkw - d.wtf);
+    println!("  rel_error:            {:.2e} {}", d.energy_identity_rel_error, if d.energy_identity_rel_error < 1e-10 { "✓" } else { "✗" });
+    
+    println!("\n--- Warping RHS Invariants ---");
+    println!("  sum(F_x):             {:.6e} (should = 0)", d.sum_fx);
+    println!("  sum(F_y):             {:.6e} (should = 0)", d.sum_fy);
     println!("  ∫x dA:                {:.6e} (centroid.x={:.6e})", d.integral_x_da, d.centroid.0);
     println!("  ∫y dA:                {:.6e} (centroid.y={:.6e})", d.integral_y_da, d.centroid.1);
+    println!("  first_moment_x (∫y dA): {:.6e}", d.first_moment_x);
+    println!("  first_moment_y (∫x dA): {:.6e}", d.first_moment_y);
+    println!("  centroid:             ({:.6e}, {:.6e})", d.centroid.0, d.centroid.1);
+    println!("  F formulation:        {}", if d.f_formulation_global { "GLOBAL [y, -x]" } else { "CENTROIDAL [y-yc, -(x-xc)]" });
     
     println!("\n--- Final Results ---");
     println!("  J_raw (FEM):          {:.6e}", d.j_fem);

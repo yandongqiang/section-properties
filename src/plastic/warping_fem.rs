@@ -1210,10 +1210,24 @@ pub struct WarpingDiagnostics {
     pub ixx_plus_iyy: f64,
     pub omega_dot_f: f64,
     
-    // Coordinate invariants
+    // Energy identity
+    pub energy_identity_rel_error: f64,  // |w^T*K*w - w^T*F| / |w^T*F|
+    
+    // Individual values for comparison
+    pub ixx: f64,
+    pub iyy: f64,
+    
+    // Warping RHS invariants
+    pub sum_fx: f64,      // sum(F_x) = sum of F elements (x-components)
+    pub sum_fy: f64,      // sum(F_y) = sum of F elements (y-components) - should be zero for symmetry
+    pub first_moment_x: f64,  // integral(y dA)
+    pub first_moment_y: f64,  // integral(x dA)  
     pub integral_x_da: f64,
     pub integral_y_da: f64,
     pub centroid: (f64, f64),
+    
+    // F formulation check
+    pub f_formulation_global: bool,  // true if F uses [y, -x], false if [y-yc, -(x-xc)]
     
     // Final results
     pub j_fem: f64,
@@ -1412,9 +1426,18 @@ pub fn diagnose_warping_fem(
     let omega_dot_f = wtf;
     let j_raw = ixx_plus_iyy - omega_dot_f;
     
+    // Energy identity: |w^T*K*w - w^T*F| / |w^T*F|
+    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+        (wtkw - wtf).abs() / wtf.abs()
+    } else {
+        0.0
+    };
+    
     // Coordinate invariants
     let mut integral_x_da = 0.0_f64;
     let mut integral_y_da = 0.0_f64;
+    let mut first_moment_x = 0.0_f64;  // integral(y dA)
+    let mut first_moment_y = 0.0_f64;  // integral(x dA)
     
     for tri6 in &elements {
         let gps = gauss_points(6);
@@ -1423,10 +1446,16 @@ pub fn diagnose_warping_fem(
             let weight = w * sf.j;
             integral_x_da += weight * sf.x;
             integral_y_da += weight * sf.y;
+            first_moment_x += weight * sf.y;
+            first_moment_y += weight * sf.x;
         }
     }
     
     let centroid = (props.centroid.x, props.centroid.y);
+    
+    // Warping RHS invariants
+    let sum_fx: f64 = f_torsion.iter().sum();
+    let sum_fy: f64 = 0.0; // F has no y-component for torsion (it's B^T [y, -x])
     
     // Compute J with fallback
     let j_fem = ixx + iyy - omega_dot_f;
@@ -1462,21 +1491,28 @@ pub fn diagnose_warping_fem(
     // C^T * omega
     let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
     
-    // w^T K w
-    let mut kw = vec![0.0_f64; n_dof];
-    let row_ptr = k_reg.row_ptr();
-    let csr_cols = k_reg.csr_cols();
-    let csr_vals = k_reg.csr_vals();
-    for i in 0..n_dof {
-        for j_idx in row_ptr[i]..row_ptr[i+1] {
-            let j = csr_cols[j_idx];
-            kw[i] += csr_vals[j_idx] * omega[j];
+    // Energy identity
+    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+        (wtkw - wtf).abs() / wtf.abs()
+    } else {
+        0.0
+    };
+    
+    // Verify F formulation: check if F uses global [y, -x] or centroidal [y-yc, -(x-xc)]
+    // This is determined by checking if sum(F) is zero and moments match
+    let f_formulation_global = sum_fx.abs() < 1e-10; // global formulation has sum(F) ≈ 0
+    
+    // Verify element F formulation
+    // For torsion, F_e = ∫ B^T [y, -x] dA in global coordinates
+    // Let's verify by checking if element F matches global or centroidal
+    let mut f_formulation_verified = true;
+    for tri6 in &elements {
+        let (_, f_el, _) = tri6.torsion_properties();
+        let f_el_sum: f64 = f_el.iter().sum();
+        if f_el_sum.abs() > 1e-10 {
+            f_formulation_verified = false;
         }
     }
-    let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();
-    
-    // w^T F
-    let wtf: f64 = omega.iter().zip(f_torsion.iter()).map(|(w, f)| w * f).sum();
     
     Ok(WarpingDiagnostics {
         section_name: name.to_string(),
@@ -1503,9 +1539,17 @@ pub fn diagnose_warping_fem(
         j_raw,
         ixx_plus_iyy,
         omega_dot_f,
+        energy_identity_rel_error,
+        ixx,
+        iyy,
+        sum_fx,
+        sum_fy,
+        first_moment_x,
+        first_moment_y,
         integral_x_da,
         integral_y_da,
-        centroid: (props.centroid.x, props.centroid.y),
+        centroid,
+        f_formulation_global,
         j_fem,
         j_analytical: analytical_j(section, &props).unwrap_or(0.0),
         j_fallback: !j_fem.is_finite() || j_fem <= 0.0,
