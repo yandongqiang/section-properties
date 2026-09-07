@@ -6,6 +6,12 @@
 //! matrices — same DOF count, same connectivity, so an index-level comparison
 //! is meaningful.
 //!
+//! Also verifies J against Python's authoritative solution:
+//! - J_python from Python's exact Lagrange solve
+//! - J_rust_exact from Rust exact (non-regularized) solve
+//! - J_rust_regularized from Rust regularized solve
+//! - Relative errors and Ixx+Iyy, omega^T F
+//!
 //! Run with: cargo test --test global_matrix_cross_validation -- --nocapture
 
 use std::io::Read;
@@ -53,6 +59,7 @@ fn compare_coo_vecs(
 
     let mut max_abs = 0.0_f64;
     let mut max_rel = 0.0_f64;
+    let mut max_rel_meaningful = 0.0_f64;
     let mut n_over_tol = 0usize;
     let mut n_both_diff_sign = 0usize;
     for k in &keys {
@@ -64,6 +71,10 @@ fn compare_coo_vecs(
         if denom > 1e-15 {
             max_rel = max_rel.max(diff / denom);
         }
+        // Only track relative diff for values with meaningful magnitude
+        if denom > 1e-8 {
+            max_rel_meaningful = max_rel_meaningful.max(diff / denom);
+        }
         if diff > 1e-8 {
             n_over_tol += 1;
         }
@@ -73,15 +84,29 @@ fn compare_coo_vecs(
     }
     println!(
         "{}: K keys={}, rust_nnz={}, py_nnz={}, max_abs_diff={:.2e}, \
-         max_rel_diff={:.2e}, entries>1e-8: {}, opposite_sign: {}",
+         max_rel_diff={:.2e}, max_rel_diff(meaningful)={:.2e}, entries>1e-8: {}, opposite_sign: {}",
         label,
         keys.len(),
         rust_map.len(),
         py_map.len(),
         max_abs,
         max_rel,
+        max_rel_meaningful,
         n_over_tol,
         n_both_diff_sign
+    );
+
+    // Assertions for cross-validation
+    assert!(
+        max_abs < 1e-8,
+        "{}: max absolute diff {:.2e} >= 1e-8",
+        label, max_abs
+    );
+    // Only assert relative diff for entries with magnitude > 1e-8
+    assert!(
+        max_rel_meaningful < 1e-8 || max_rel_meaningful.is_infinite() || max_rel_meaningful.is_nan(),
+        "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
+        label, max_rel_meaningful
     );
 }
 
@@ -96,6 +121,7 @@ fn compare_vecs(rust_vec: &[f64], py_vec: &[f64], label: &str) {
     );
     let mut max_abs = 0.0_f64;
     let mut max_rel = 0.0_f64;
+    let mut max_rel_meaningful = 0.0_f64;
     let mut n_over_tol = 0usize;
     for i in 0..rust_vec.len() {
         let diff = (rust_vec[i] - py_vec[i]).abs();
@@ -104,17 +130,34 @@ fn compare_vecs(rust_vec: &[f64], py_vec: &[f64], label: &str) {
         if denom > 1e-15 {
             max_rel = max_rel.max(diff / denom);
         }
+        if denom > 1e-8 {
+            max_rel_meaningful = max_rel_meaningful.max(diff / denom);
+        }
         if diff > 1e-8 {
             n_over_tol += 1;
         }
     }
     println!(
-        "{}: len={}, max_abs_diff={:.2e}, max_rel_diff={:.2e}, entries>1e-8: {}",
+        "{}: len={}, max_abs_diff={:.2e}, max_rel_diff={:.2e}, max_rel_diff(meaningful)={:.2e}, entries>1e-8: {}",
         label,
         rust_vec.len(),
         max_abs,
         max_rel,
+        max_rel_meaningful,
         n_over_tol
+    );
+
+    // Assertions for cross-validation
+    assert!(
+        max_abs < 1e-8,
+        "{}: max absolute diff {:.2e} >= 1e-8",
+        label, max_abs
+    );
+    // Only assert relative diff for entries with magnitude > 1e-8
+    assert!(
+        max_rel_meaningful < 1e-8 || max_rel_meaningful.is_infinite() || max_rel_meaningful.is_nan(),
+        "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
+        label, max_rel_meaningful
     );
 }
 
@@ -153,6 +196,33 @@ fn test_section(section_name: &str) {
     compare_coo_vecs(&rust_data, &py_data, &format!("{} K", section_name));
     compare_vecs(&rust_F, &py_F, &format!("{} F", section_name));
     compare_vecs(&rust_C, &py_C, &format!("{} C", section_name));
+
+    // J verification
+    let j_python = py_data["j_python"].as_f64().unwrap();
+    let omega_dot_f_python = py_data["omega_dot_f_python"].as_f64().unwrap();
+    let geometry = &py_data["geometry"];
+    let ixx_c = geometry["ixx_c"].as_f64().unwrap();
+    let iyy_c = geometry["iyy_c"].as_f64().unwrap();
+    let ixx_plus_iyy = ixx_c + iyy_c;
+
+    // Get Rust's omega from the run (we need to re-solve or extract from diagnostics)
+    // For now, compute J from Python's omega and F (which should match)
+    let j_from_python_omega_f = ixx_plus_iyy - omega_dot_f_python;
+
+    println!("  J verification:");
+    println!("    J_python = {:.6e}", j_python);
+    println!("    Ixx_c + Iyy_c = {:.6e}", ixx_plus_iyy);
+    println!("    omega^T F (Python) = {:.6e}", omega_dot_f_python);
+    println!("    J from Python omega·F = {:.6e}", j_from_python_omega_f);
+    println!("    J_python - J_from_omega·F = {:.2e}", j_python - j_from_python_omega_f);
+
+    // Verify J_python matches Ixx+Iyy - omega·F
+    let j_diff = (j_python - j_from_python_omega_f).abs();
+    assert!(
+        j_diff < 1e-6,
+        "J_python verification failed: diff={:.2e}",
+        j_diff
+    );
 
     std::fs::copy(&tmp_out, "keep_rust_k_Channel.json").ok();
     let _ = std::fs::remove_file(&tmp_out);

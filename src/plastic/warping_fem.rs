@@ -227,6 +227,188 @@ fn solve_with_fallback(
     solve_lagrange_sparse(k_reg, c, f)
 }
 
+/// Solve the exact (non-regularized) Lagrangian system using SparseLU.
+/// This mirrors Python's `solve_direct_lagrange` which solves the full (n+1)x(n+1)
+/// system without adding eps to the diagonal. SparseLU uses static pivoting
+/// (SuperLU-style diagonal perturbation) which handles the indefinite matrix.
+fn solve_exact_lagrange(
+    k: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+    let n = f.len();
+    let mut k_lg = SparseMatrix::new(n + 1);
+    // Use COO triplets directly - need to compress first to access them
+    let mut k_compressed = k.clone();
+    k_compressed.compress();
+    let (rows, cols, vals) = k_compressed.triplets();
+    for (&i, (&j, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+        if i < n && j < n {
+            k_lg.add(i, j, v);
+        }
+    }
+    for i in 0..n {
+        k_lg.add(i, n, c[i]);
+        k_lg.add(n, i, c[i]);
+    }
+    k_lg.compress();
+    
+    // Use SparseLU directly on the augmented matrix (handles indefinite with static pivoting)
+    let lu = crate::fea::solvers::SparseLu::factor(&k_lg)
+        .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?;
+    let mut rhs = f.to_vec();
+    rhs.push(0.0);
+    let sol = lu.solve(&rhs);
+    Ok(sol[..n].to_vec())
+}
+
+/// Solve with exact (non-regularized) K for diagnostic comparison.
+/// Returns (omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff)
+fn solve_compare_exact_vs_regularized(
+    k_global: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+    ixx: f64,
+    iyy: f64,
+) -> Result<(Vec<f64>, Vec<f64>, f64, f64, f64, f64), crate::mesh::fem::FemError> {
+    // Exact K (no regularization)
+    let omega_exact = solve_exact_lagrange(k_global, c, f)?;
+    
+    // Regularized K
+    let n = f.len();
+    let mut k_reg = k_global.clone();
+    k_reg.compress();
+    let mut diag_avg = 0.0;
+    for i in 0..n {
+        diag_avg += k_reg.matvec_diag(i);
+    }
+    let eps = diag_avg.max(1e-300) / n as f64 * 1e-9;
+    for i in 0..n {
+        k_reg.add(i, i, eps);
+    }
+    k_reg.compress();
+    
+    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_reg,
+        c,
+        crate::fea::SolverOptions {
+            auto_regularize_singular: true,
+        },
+    ) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    };
+    
+    let omega_reg = solve_with_fallback(&solver, &k_reg, c, f)?;
+    
+    let omega_dot_f_exact: f64 = omega_exact.iter().zip(f.iter()).map(|(&a, &b)| a * b).sum();
+    let omega_dot_f_reg: f64 = omega_reg.iter().zip(f.iter()).map(|(&a, &b)| a * b).sum();
+    
+    let j_exact = ixx + iyy - omega_dot_f_exact;
+    let j_reg = ixx + iyy - omega_dot_f_reg;
+    
+    // Compare omega
+    let mut max_abs_diff = 0.0f64;
+    let mut max_rel_diff = 0.0f64;
+    for i in 0..n {
+        let diff = (omega_exact[i] - omega_reg[i]).abs();
+        max_abs_diff = max_abs_diff.max(diff);
+        let denom = omega_exact[i].abs().max(omega_reg[i].abs());
+        if denom > 1e-15 {
+            max_rel_diff = max_rel_diff.max(diff / denom);
+        }
+    }
+    
+    Ok((omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff))
+}
+
+/// Diagnostic: attempt exact factorization and capture pivot information on failure.
+/// Returns Ok(()) if successful, or Err with diagnostic info if singular.
+pub fn diagnose_exact_factorization(
+    k: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+) -> Result<(), String> {
+    let n = f.len();
+    let mut k_lg = SparseMatrix::new(n + 1);
+    let mut k_compressed = k.clone();
+    k_compressed.compress();
+    let (rows, cols, vals) = k_compressed.triplets();
+    for (&i, (&j, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+        if i < n && j < n {
+            k_lg.add(i, j, v);
+        }
+    }
+    for i in 0..n {
+        k_lg.add(i, n, c[i]);
+        k_lg.add(n, i, c[i]);
+    }
+    k_lg.compress();
+    
+    // Attempt factorization with detailed error capture
+    match crate::fea::DirectLagrangeSolver::with_kernel(
+        crate::fea::LagrangeKernel::Skyline,
+        &k_lg,
+        c,
+        crate::fea::SolverOptions {
+            auto_regularize_singular: false,
+        },
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Try to diagnose by checking matrix properties
+            let mut diag_min = f64::INFINITY;
+            let mut diag_max = -f64::INFINITY;
+            for i in 0..n+1 {
+                let d = k_lg.matvec_diag(i);
+                diag_min = diag_min.min(d);
+                diag_max = diag_max.max(d);
+            }
+            
+            // Check matrix symmetry
+            let mut max_sym_err = 0.0f64;
+            let (rows, cols, vals) = k_lg.triplets();
+            for (&r, (&c, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+                if r != c {
+                    // Find symmetric entry
+                    let mut found = false;
+                    for (&r2, (&c2, &v2)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+                        if r2 == c && c2 == r {
+                            max_sym_err = max_sym_err.max((v - v2).abs());
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        max_sym_err = max_sym_err.max(v.abs());
+                    }
+                }
+            }
+            
+            // Estimate condition via row norms
+            let mut row_norm_max = 0.0f64;
+            let mut row_norm_min = f64::INFINITY;
+            for i in 0..n+1 {
+                let mut norm = 0.0f64;
+                let (rows, cols, vals) = k_lg.triplets();
+                for (&r, (&c, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+                    if r == i {
+                        norm += v.abs();
+                    }
+                }
+                row_norm_max = row_norm_max.max(norm);
+                row_norm_min = row_norm_min.min(norm);
+            }
+            
+            Err(format!(
+                "Exact factorization failed: {}. Matrix: n={}, diag_min={:.2e}, diag_max={:.2e}, max_sym_err={:.2e}, row_norm_max={:.2e}, row_norm_min={:.2e}",
+                e, n+1, diag_min, diag_max, max_sym_err, row_norm_max, row_norm_min
+            ))
+        }
+    }
+}
+
 /// IC(0)-PCG solves of K w1 = f and K w2 = c, combined with the Lagrange
 /// multiplier correction (lambda = c.w2 / c.w1).
 #[allow(dead_code)]
@@ -313,6 +495,9 @@ pub struct FemWarpingSolution {
     pub psi: Vec<f64>,
     pub phi: Vec<f64>,
     pub j: f64,
+    pub j_raw: f64,
+    pub j_fem: f64,
+    pub used_analytical_fallback: bool,
     pub iw: f64,
     pub shear_center: Point,
     pub shear_center_elastic: Point,
@@ -429,6 +614,40 @@ pub fn compute_fem_warping_solution(
         }
     }
 
+    // Diagnostic: compare exact (non-regularized) vs regularized K solutions
+    // If exact solver fails (singular), skip comparison and continue with regularized path
+    let exact_result = solve_compare_exact_vs_regularized(&k_global, &c_global, &f_torsion, ixx, iyy);
+    
+    // Additional diagnostic on exact factorization failure
+    if exact_result.is_err() {
+        let diag_result = diagnose_exact_factorization(&k_global, &c_global, &f_torsion);
+        if let Err(diag_msg) = diag_result {
+            eprintln!("[DIAG] Exact factorization diagnostic: {}", diag_msg);
+        }
+    }
+    
+    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff) = match exact_result {
+        Ok((oe, _, je, jr, mad, mrd)) => (Some(oe), je, jr, mad, mrd),
+        Err(_) => {
+            eprintln!("[DIAG] Exact K solver failed (singular), skipping exact vs reg comparison");
+            (None, 0.0, 0.0, 0.0, 0.0)
+        }
+    };
+    
+    if let Some(ref oe) = omega_exact {
+        let omega_dot_f_exact: f64 = oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
+        let je = ixx + iyy - omega_dot_f_exact;
+        eprintln!(
+            "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}",
+            max_abs_diff,
+            max_rel_diff,
+            je,
+            j_reg,
+            if je.abs() > 1e-15 { (je - j_reg).abs() / je.abs() } else { 0.0 }
+        );
+    }
+
+    // Prefer exact K if it solves stably (residual check passes), otherwise fall back to regularized
     let k_reg = {
         let mut m = k_global.clone();
         m.compress();
@@ -456,29 +675,58 @@ pub fn compute_fem_warping_solution(
         Err(_) => None,
     };
 
+    // Try exact solve first; if it fails residual check, use regularized
     let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
+    
+    // Verify exact solution residual if available
+    let use_exact = if let Some(ref oe) = omega_exact {
+        // Need to compress k_global for matvec
+        let mut k_global_compressed = k_global.clone();
+        k_global_compressed.compress();
+        let exact_residual: f64 = {
+            let prod = k_global_compressed.matvec(oe);
+            let mut worst = 0.0f64;
+            let mut f_norm = 0.0f64;
+            for i in 0..n {
+                worst = worst.max((prod[i] - f_torsion[i]).abs());
+                f_norm = f_norm.max(f_torsion[i].abs());
+            }
+            worst / f_norm.max(1e-300)
+        };
+        eprintln!("[DIAG] Exact K residual check: {:.2e}", exact_residual);
+        exact_residual <= 1e-6
+    } else {
+        false
+    };
+    
+    let (omega_final, used_exact) = if use_exact {
+        eprintln!("[DIAG] Using exact (non-regularized) K solution");
+        (omega_exact.unwrap(), true)
+    } else {
+        eprintln!("[DIAG] Exact K failed residual check or unavailable, using regularized K");
+        (omega, false)
+    };
 
-    let omega_dot_f: f64 = omega
+    let omega_dot_f: f64 = omega_final
         .iter()
         .zip(f_torsion.iter())
         .map(|(&a, &b)| a * b)
         .sum();
-    let j = ixx + iyy - omega_dot_f;
-    let j = if !j.is_finite() || j <= 0.0 {
-        // FEM produced non-positive J. For thin-walled open sections, use analytical formula
-        // as fallback with explicit logging. This indicates FEM numerical issues (mesh/regularization).
+    let j_raw = ixx + iyy - omega_dot_f;
+    let (j_fem, used_analytical_fallback) = if !j_raw.is_finite() || j_raw <= 0.0 {
         let analytical_j = crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(0.0);
         eprintln!(
             "[WARN] FEM J={:.6e} <= 0 (ixx+iyy={:.6e}, ω·f={:.6e}); using analytical J={:.6e}",
-            j,
+            j_raw,
             ixx + iyy,
             omega_dot_f,
             analytical_j
         );
-        analytical_j
+        (analytical_j, true)
     } else {
-        j
+        (j_raw, false)
     };
+    let j = j_fem.max(0.0);
 
     let mut f_psi = vec![0.0; n];
     let mut f_phi = vec![0.0; n];
@@ -496,7 +744,7 @@ pub fn compute_fem_warping_solution(
     let phi = solve_with_fallback(&solver, &k_reg, &c_global, &f_phi)?;
 
     let mut omega_max = 0.0;
-    for &val in &omega {
+    for &val in &omega_final {
         let abs_val = val.abs();
         if abs_val > omega_max {
             omega_max = abs_val;
@@ -514,7 +762,7 @@ pub fn compute_fem_warping_solution(
         let omega_el: [f64; 6] = {
             let mut e = [0.0; 6];
             for i in 0..6 {
-                e[i] = omega[tri6.node_ids[i]];
+                e[i] = omega_final[tri6.node_ids[i]];
             }
             e
         };
@@ -670,7 +918,7 @@ pub fn compute_fem_warping_solution(
     for tri6 in &shifted_elements {
         for i in 0..6 {
             let node_id = tri6.node_ids[i];
-            let omega_val = omega[node_id].abs();
+            let omega_val = omega_final[node_id].abs();
             if omega_val > omega_max {
                 omega_max = omega_val;
             }
@@ -678,7 +926,7 @@ pub fn compute_fem_warping_solution(
         let omega_el: [f64; 6] = {
             let mut e = [0.0; 6];
             for i in 0..6 {
-                e[i] = omega[tri6.node_ids[i]];
+                e[i] = omega_final[tri6.node_ids[i]];
             }
             e
         };
@@ -692,10 +940,13 @@ pub fn compute_fem_warping_solution(
     Ok(FemWarpingSolution {
         tri6_mesh,
         elements,
-        omega,
+        omega: omega_final,
         psi,
         phi,
-        j: j.max(0.0),
+        j,
+        j_raw,
+        j_fem,
+        used_analytical_fallback,
         iw: iw.max(0.0),
         shear_center,
         shear_center_elastic,
@@ -1577,6 +1828,198 @@ pub fn diagnose_warping_fem(
     })
 }
 
+/// Export the exact (non-regularized) augmented Lagrange system for diagnostic analysis.
+/// Exports A = [K C; C^T 0] and b = [F; 0] in COO format.
+pub fn export_exact_augmented_system(
+    section: &Section,
+    name: &str,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs::File;
+    use std::io::Write;
+    
+    let props = SectionProperties::from_section(section);
+    
+    let bounds = section.bounds();
+    let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
+    let min_edge = min_edge_length(section);
+    let is_thin_walled = section.is_thin_walled();
+    
+    let params = mesh_params_from_control(MeshControl::Fine, max_dim, min_edge, is_thin_walled);
+    let mesh = mesh_section(section, params);
+    
+    let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
+    let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
+    let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
+    
+    let mut used_nodes = vec![false; mesh.nodes.len()];
+    for tri in &clean_elements {
+        used_nodes[tri[0]] = true;
+        used_nodes[tri[1]] = true;
+        used_nodes[tri[2]] = true;
+    }
+    let mut new_nodes = Vec::new();
+    let mut old_to_new = vec![usize::MAX; mesh.nodes.len()];
+    for (old_idx, &used) in used_nodes.iter().enumerate() {
+        if used {
+            old_to_new[old_idx] = new_nodes.len();
+            new_nodes.push(mesh.nodes[old_idx]);
+        }
+    }
+    
+    let remapped_elements: Vec<[usize; 3]> = clean_elements
+        .iter()
+        .map(|tri| [old_to_new[tri[0]], old_to_new[tri[1]], old_to_new[tri[2]]])
+        .collect();
+    
+    let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
+    let n = tri6_mesh.nodes.len();
+    
+    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+    
+    // Centroid shift
+    let cx = props.centroid.x;
+    let cy = props.centroid.y;
+    let shifted_nodes: Vec<Point> = new_nodes
+        .iter()
+        .map(|p| Point::new(p.x - cx, p.y - cy))
+        .collect();
+    let shifted_tri6_mesh = tri3_to_tri6(&shifted_nodes, &remapped_elements);
+    let shifted_elements = build_tri6_elements(&shifted_tri6_mesh, 1.0, 1.0, 1.0)?;
+    
+    // Assemble exact K, F, C (no regularization)
+    let mut k_global = SparseMatrix::new(n);
+    let mut f_torsion = vec![0.0_f64; n];
+    let mut c_global = vec![0.0_f64; n];
+    
+    for tri6 in &shifted_elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    k_global.compress();
+    
+    // Build augmented matrix A = [K C; C^T 0] in COO format
+    let mut a_rows: Vec<usize> = Vec::new();
+    let mut a_cols: Vec<usize> = Vec::new();
+    let mut a_vals: Vec<f64> = Vec::new();
+    
+    // K block (n x n)
+    let (k_rows, k_cols, k_vals) = k_global.triplets();
+    for (&r, (&c, &v)) in k_rows.iter().zip(k_cols.iter().zip(k_vals.iter())) {
+        a_rows.push(r);
+        a_cols.push(c);
+        a_vals.push(v);
+    }
+    
+    // C column (n x 1) - upper right
+    for i in 0..n {
+        if c_global[i].abs() > 1e-15 {
+            a_rows.push(i);
+            a_cols.push(n);
+            a_vals.push(c_global[i]);
+        }
+    }
+    
+    // C^T row (1 x n) - lower left
+    for i in 0..n {
+        if c_global[i].abs() > 1e-15 {
+            a_rows.push(n);
+            a_cols.push(i);
+            a_vals.push(c_global[i]);
+        }
+    }
+    
+    // Bottom-right element (0)
+    a_rows.push(n);
+    a_cols.push(n);
+    a_vals.push(0.0);
+    
+    // RHS b = [F; 0]
+    let mut b_vec = f_torsion.clone();
+    b_vec.push(0.0);
+    
+    // Export to JSON
+    let mut file = File::create(output_path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"section_name\": \"{}\",", name)?;
+    writeln!(file, "  \"n_dof\": {},", n)?;
+    writeln!(file, "  \"A\": {{")?;
+    writeln!(file, "    \"row\": [")?;
+    for (i, &val) in a_rows.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < a_rows.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for (i, &val) in a_cols.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < a_cols.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for (i, &val) in a_vals.iter().enumerate() {
+        writeln!(file, "      {:.15e}{}", val, if i < a_vals.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"shape\": [{}, {}]", n + 1, n + 1)?;
+    writeln!(file, "  }},")?;
+    writeln!(file, "  \"b\": [")?;
+    for (i, &val) in b_vec.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < b_vec.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Also export individual components for easier analysis
+    writeln!(file, "  \"K\": {{")?;
+    writeln!(file, "    \"row\": [")?;
+    for (i, &val) in k_rows.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < k_rows.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for (i, &val) in k_cols.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < k_cols.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for (i, &val) in k_vals.iter().enumerate() {
+        writeln!(file, "      {:.15e}{}", val, if i < k_vals.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"shape\": [{}, {}]", n, n)?;
+    writeln!(file, "  }},")?;
+    writeln!(file, "  \"C\": [")?;
+    for (i, &val) in c_global.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < c_global.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    writeln!(file, "  \"F\": [")?;
+    for (i, &val) in f_torsion.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < f_torsion.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ]")?;
+    writeln!(file, "}}")?;
+    
+    // Diagnostic: matrix statistics
+    let a_nnz = a_rows.len();
+    let a_diag_min = a_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+    let a_diag_max = a_vals.iter().cloned().fold(-f64::INFINITY, f64::max);
+    let k_diag_sum: f64 = (0..n).map(|i| k_global.matvec_diag(i)).sum();
+    let k_diag_avg = k_diag_sum / n as f64;
+    
+    println!(
+        "Exported exact augmented system for {}: n={}, A_nnz={}, K_nnz={}, C_nnz={}, A_diag_min={:.2e}, A_diag_max={:.2e}, K_diag_avg={:.2e}",
+        name, n, a_nnz, k_rows.len(), c_global.iter().filter(|&&v| v.abs() > 1e-15).count(), a_diag_min, a_diag_max, k_diag_avg
+    );
+    
+    Ok(())
+}
+
 /// Export global warping matrices for cross-validation
 pub fn export_global_warping_matrices(
     section: &Section,
@@ -1720,6 +2163,212 @@ pub fn export_global_warping_matrices(
     
 writeln!(file, "}}")?;
 
+    Ok(())
+}
+
+/// Export the exact (non-regularized) augmented Lagrange system for diagnostic analysis.
+/// Uses Python's exact mesh (nodes/elements from python_global_*.json) to ensure DOF match.
+/// Exports A = [K C; C^T 0] and b = [F; 0] in COO format.
+pub fn export_exact_augmented_system_from_python_mesh(
+    py_global_path: &str,
+    name: &str,
+    output_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs::File;
+    use std::io::{Read, Write};
+    
+    // Load Python mesh
+    let mut file = File::open(py_global_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let mesh_json: serde_json::Value = serde_json::from_str(&contents)?;
+    
+    let nodes: Vec<Point> = mesh_json["nodes"]
+        .as_array()
+        .ok_or("nodes not found")?
+        .iter()
+        .map(|v| {
+            let coords = v.as_array().unwrap();
+            Point::new(coords[0].as_f64().unwrap(), coords[1].as_f64().unwrap())
+        })
+        .collect();
+    
+    let elements: Vec<[usize; 6]> = mesh_json["elements"]
+        .as_array()
+        .ok_or("elements not found")?
+        .iter()
+        .map(|e| {
+            let arr = e.as_array().unwrap();
+            [
+                arr[0].as_u64().unwrap() as usize,
+                arr[1].as_u64().unwrap() as usize,
+                arr[2].as_u64().unwrap() as usize,
+                arr[3].as_u64().unwrap() as usize,
+                arr[4].as_u64().unwrap() as usize,
+                arr[5].as_u64().unwrap() as usize,
+            ]
+        })
+        .collect();
+    
+    let n_dof = nodes.len();
+    
+    // Build Tri6 elements, fixing orientation if Python's winding is CW.
+    let mut rust_elements = Vec::with_capacity(elements.len());
+    let mut n_fixed = 0usize;
+    for (i, &elem) in elements.iter().enumerate() {
+        let mut e = elem;
+        let points: [Point; 6] = [
+            nodes[e[0]], nodes[e[1]], nodes[e[2]],
+            nodes[e[3]], nodes[e[4]], nodes[e[5]],
+        ];
+        let mut coords = [[0.0; 6]; 2];
+        for k in 0..6 {
+            coords[0][k] = points[k].x;
+            coords[1][k] = points[k].y;
+        }
+        let sf = shape_function(&coords, (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+        if sf.j < 0.0 {
+            let [n0, n1, n2, m01, m12, m20] = e;
+            e = [n2, n1, n0, m12, m01, m20];
+            n_fixed += 1;
+        }
+        let pts: [Point; 6] = [
+            nodes[e[0]], nodes[e[1]], nodes[e[2]],
+            nodes[e[3]], nodes[e[4]], nodes[e[5]],
+        ];
+        rust_elements.push(Tri6::from_points(i, pts, e, 1.0, 1.0, 1.0)?);
+    }
+    if n_fixed > 0 {
+        eprintln!("  Fixed orientation on {} CW elements", n_fixed);
+    }
+    
+    // Assemble exact K, F, C (no regularization)
+    let mut k_global = SparseMatrix::new(n_dof);
+    let mut f_torsion = vec![0.0_f64; n_dof];
+    let mut c_global = vec![0.0_f64; n_dof];
+    
+    for tri6 in &rust_elements {
+        let (k_el, f_el, c_el) = tri6.torsion_properties();
+        for i in 0..6 {
+            let gi = tri6.node_ids[i];
+            for j in 0..6 {
+                k_global.add(gi, tri6.node_ids[j], k_el[i][j]);
+            }
+            f_torsion[gi] += f_el[i];
+            c_global[gi] += c_el[i];
+        }
+    }
+    k_global.compress();
+    
+    // Build augmented matrix A = [K C; C^T 0] in COO format
+    let mut a_rows: Vec<usize> = Vec::new();
+    let mut a_cols: Vec<usize> = Vec::new();
+    let mut a_vals: Vec<f64> = Vec::new();
+    
+    // K block (n x n)
+    let (k_rows, k_cols, k_vals) = k_global.triplets();
+    for (&r, (&c, &v)) in k_rows.iter().zip(k_cols.iter().zip(k_vals.iter())) {
+        a_rows.push(r);
+        a_cols.push(c);
+        a_vals.push(v);
+    }
+    
+    // C column (upper right) - only non-zero entries
+    for i in 0..n_dof {
+        if c_global[i].abs() > 1e-15 {
+            a_rows.push(i);
+            a_cols.push(n_dof);
+            a_vals.push(c_global[i]);
+        }
+    }
+    
+    // C^T row (lower left) - only non-zero entries
+    for i in 0..n_dof {
+        if c_global[i].abs() > 1e-15 {
+            a_rows.push(n_dof);
+            a_cols.push(i);
+            a_vals.push(c_global[i]);
+        }
+    }
+    
+    // Bottom-right element (0) - not stored in COO (implicit)
+    
+    // RHS b = [F; 0]
+    let mut b_vec = f_torsion.clone();
+    b_vec.push(0.0);
+    
+    // Export to JSON
+    let mut file = File::create(output_path)?;
+    writeln!(file, "{{")?;
+    writeln!(file, "  \"section_name\": \"{}\",", name)?;
+    writeln!(file, "  \"n_dof\": {},", n_dof)?;
+    writeln!(file, "  \"A\": {{")?;
+    writeln!(file, "    \"row\": [")?;
+    for (i, &val) in a_rows.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < a_rows.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for (i, &val) in a_cols.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < a_cols.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for (i, &val) in a_vals.iter().enumerate() {
+        writeln!(file, "      {:.15e}{}", val, if i < a_vals.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"shape\": [{}, {}]", n_dof + 1, n_dof + 1)?;
+    writeln!(file, "  }},")?;
+    writeln!(file, "  \"b\": [")?;
+    for (i, &val) in b_vec.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < b_vec.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    
+    // Also export individual components for easier analysis
+    writeln!(file, "  \"K\": {{")?;
+    writeln!(file, "    \"row\": [")?;
+    for (i, &val) in k_rows.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < k_rows.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"col\": [")?;
+    for (i, &val) in k_cols.iter().enumerate() {
+        writeln!(file, "      {}{}", val, if i < k_cols.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"data\": [")?;
+    for (i, &val) in k_vals.iter().enumerate() {
+        writeln!(file, "      {:.15e}{}", val, if i < k_vals.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "    ],")?;
+    writeln!(file, "    \"shape\": [{}, {}]", n_dof, n_dof)?;
+    writeln!(file, "  }},")?;
+    writeln!(file, "  \"C\": [")?;
+    for (i, &val) in c_global.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < c_global.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ],")?;
+    writeln!(file, "  \"F\": [")?;
+    for (i, &val) in f_torsion.iter().enumerate() {
+        writeln!(file, "    {:.15e}{}", val, if i < f_torsion.len() - 1 { "," } else { "" })?;
+    }
+    writeln!(file, "  ]")?;
+    writeln!(file, "}}")?;
+    
+    // Diagnostic: matrix statistics
+    let a_nnz = a_rows.len();
+    let a_diag_min = a_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+    let a_diag_max = a_vals.iter().cloned().fold(-f64::INFINITY, f64::max);
+    let k_diag_sum: f64 = (0..n_dof).map(|i| k_global.matvec_diag(i)).sum();
+    let k_diag_avg = k_diag_sum / n_dof as f64;
+    
+    eprintln!(
+        "Exported exact augmented system for {}: n={}, A_nnz={}, K_nnz={}, C_nnz={}, A_diag_min={:.2e}, A_diag_max={:.2e}, K_diag_avg={:.2e}",
+        name, n_dof, a_nnz, k_rows.len(), c_global.iter().filter(|&&v| v.abs() > 1e-15).count(), a_diag_min, a_diag_max, k_diag_avg
+    );
+    
     Ok(())
 }
 

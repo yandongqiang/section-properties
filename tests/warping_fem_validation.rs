@@ -40,6 +40,9 @@ fn run_warping_fem_test(name: &str, section: Section) {
     // Print FEM results
     println!("\n--- FEM Results ---");
     println!("J (FEM):            {:.6e}", fem_result.j);
+    println!("J_raw:              {:.6e}", fem_result.j_raw);
+    println!("J_fem:              {:.6e}", fem_result.j_fem);
+    println!("Used analytical fallback: {}", fem_result.used_analytical_fallback);
     println!("Iw (FEM):           {:.6e}", fem_result.iw);
     println!("Shear center (FEM): ({:.6}, {:.6})", fem_result.shear_center.x, fem_result.shear_center.y);
     println!("βx:                 {:.6e}", fem_result.beta_x_plus);
@@ -55,6 +58,17 @@ fn run_warping_fem_test(name: &str, section: Section) {
     // Check for negative J (critical issue)
     if fem_result.j <= 0.0 {
         println!("\n!!! CRITICAL: NEGATIVE J DETECTED: {:.6e} !!!", fem_result.j);
+    }
+
+    // Verify used_analytical_fallback == false for the 4 standard sections
+    let is_standard_section = name.contains("Channel 200x75") 
+        || name.contains("I-section 300x150") 
+        || name.contains("Angle 100x100") 
+        || name.contains("Channel 300x100x3x6");
+    if is_standard_section {
+        assert!(!fem_result.used_analytical_fallback, 
+            "{}: used_analytical_fallback should be false for standard section", name);
+        println!("✓ used_analytical_fallback == false (as required)");
     }
 
     // Verify basic sanity
