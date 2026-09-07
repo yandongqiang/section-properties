@@ -370,6 +370,17 @@ impl SparseLu {
         let mut l = vec![vec![0.0f64; n]; n]; // unit diagonal implicit
         let mut u = vec![vec![0.0f64; n]; n];
 
+        // Compute matrix scale for scale-aware pivot tolerance
+        let mut matrix_scale = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                matrix_scale = matrix_scale.max(a_dense[i][j].abs());
+            }
+        }
+        // Scale-aware tolerance: machine_epsilon * n * matrix_scale * safety_factor
+        // safety_factor = 100 (allows some margin for floating point errors)
+        let pivot_tol = f64::EPSILON * n as f64 * matrix_scale.max(1.0) * 100.0;
+
         // LU factorization with partial pivoting (Gaussian elimination with row swaps)
         for k in 0..n {
             // Find pivot row: max |A[i][k]| for i >= k
@@ -383,11 +394,11 @@ impl SparseLu {
                 }
             }
 
-            // Check for singularity
-            if max_val < 1e-15 {
+            // Check for singularity using scale-aware tolerance
+            if max_val <= pivot_tol {
                 return Err(format!(
-                    "Singular or near-singular matrix at column {}: max pivot = {:.2e}",
-                    k, max_val
+                    "Singular or near-singular matrix at column {}: max pivot = {:.2e}, tolerance = {:.2e}",
+                    k, max_val, pivot_tol
                 ));
             }
 
@@ -395,8 +406,19 @@ impl SparseLu {
             if pivot_row != k {
                 a_dense.swap(k, pivot_row);
                 // Swap corresponding rows in L (only columns < k are filled)
+                // Use split_at_mut to get two mutable references
+                let (l_first, l_second) = if k < pivot_row {
+                    l.split_at_mut(pivot_row)
+                } else {
+                    l.split_at_mut(k)
+                };
+                let (row_k, row_pivot) = if k < pivot_row {
+                    (&mut l_first[k], &mut l_second[0])
+                } else {
+                    (&mut l_second[0], &mut l_first[k])
+                };
                 for j in 0..k {
-                    l.swap(k, pivot_row);
+                    std::mem::swap(&mut row_k[j], &mut row_pivot[j]);
                 }
                 perm.swap(k, pivot_row);
             }
