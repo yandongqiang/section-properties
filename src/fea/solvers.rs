@@ -237,23 +237,109 @@ impl SparseSolver {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse LU: left-looking, row-oriented, partial pivoting by column maximum
-// within the computed row segment; falls back to diagonal perturbation
-// (SuperLU-style static pivoting) when a pivot is dangerously small.
+// Sparse LU: left-looking, column-oriented with true row partial pivoting
+// (PA = L U). No static pivoting / diagonal perturbation - returns error
+// on near-singular matrices.
 // ---------------------------------------------------------------------------
 
-/// Sparse LU factorisation P A = L U with partial pivoting.
+/// Sparse LU factorisation P A = L U with true row partial pivoting.
 pub struct SparseLu {
     n: usize,
     /// Row-wise unit-lower triangle (strict part), sorted columns per row.
     l_rows: Vec<Vec<(usize, f64)>>,
     /// Row-wise upper triangle including diagonal, sorted columns per row.
     u_rows: Vec<Vec<(usize, f64)>>,
-    /// Row permutation applied during pivoting: perm[final_row] = orig_row.
+    /// Row permutation: perm[final_row] = orig_row. P * A = L * U.
     perm: Vec<usize>,
 }
 
 impl SparseLu {
+    /// Get the permutation vector (perm[i] = original row index at position i).
+    pub fn perm(&self) -> &[usize] {
+        &self.perm
+    }
+    
+    /// Get L factor rows (strict lower triangle, unit diagonal implicit).
+    pub fn l_rows(&self) -> &[Vec<(usize, f64)>] {
+        &self.l_rows
+    }
+    
+    /// Get U factor rows (upper triangle including diagonal).
+    pub fn u_rows(&self) -> &[Vec<(usize, f64)>] {
+        &self.u_rows
+    }
+    
+    /// Get matrix size.
+    pub fn n(&self) -> usize {
+        self.n
+    }
+    
+    /// Verify PA = LU for debugging purposes.
+    /// Returns max absolute difference between PA and LU.
+    #[cfg(debug_assertions)]
+    pub fn verify_pa_eq_lu(&self, a: &SparseMatrix) -> f64 {
+        let n = self.n;
+        // Build A dense
+        let mut a_dense = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            for k in a.row_ptr()[i]..a.row_ptr()[i+1] {
+                let j = a.csr_cols()[k];
+                a_dense[i][j] = a.csr_vals()[k];
+            }
+        }
+        
+        // Build PA
+        let mut pa = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            let orig_i = self.perm[i];
+            for j in 0..n {
+                pa[i][j] = a_dense[orig_i][j];
+            }
+        }
+        
+        // Build LU
+        let mut lu = vec![vec![0.0f64; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    let l_ik = if i == k { 
+                        1.0 
+                    } else if k < i { 
+                        self.l_rows[i].iter()
+                            .find(|(c, _)| *c == k)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(0.0)
+                    } else { 
+                        0.0 
+                    };
+                    let u_kj = if k <= j {
+                        self.u_rows[k].iter()
+                            .find(|(c, _)| *c == j)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(0.0)
+                    } else { 
+                        0.0 
+                    };
+                    sum += l_ik * u_kj;
+                }
+                lu[i][j] = sum;
+            }
+        }
+        
+        // Max absolute difference
+        let mut max_diff = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                let diff = (pa[i][j] - lu[i][j]).abs();
+                if diff > max_diff { max_diff = diff; }
+            }
+        }
+        max_diff
+    }
+
+    /// Factor A with true row partial pivoting (PA = LU).
+    /// Returns error if matrix is singular or nearly singular.
     pub fn factor(a: &SparseMatrix) -> Result<SparseLu, String> {
         let n = a.n;
         let mut ac = if a.compressed {
@@ -266,109 +352,118 @@ impl SparseLu {
         let a_ref = ac.as_ref().unwrap_or(a);
         let (row_ptr, cols, vals) = a_ref.csr_data();
 
-        let mut l_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-        let mut u_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-        let mut perm: Vec<usize> = (0..n).collect();
-
-        // Dense row workspace + touched-column list.
-        let mut x = vec![0.0f64; n];
-        let mut touched: Vec<usize> = Vec::with_capacity(64);
-        let mut in_row = vec![false; n];
-
-        // Scale reference per row for pivot perturbation decisions.
-        let mut row_scale = vec![1.0f64; n];
+        // Convert to dense row-major working matrix for pivoting operations
+        // This is memory-intensive but necessary for true partial pivoting
+        // on a sparse matrix. We use a dense column-major working array.
+        let mut a_dense = vec![vec![0.0f64; n]; n];
         for i in 0..n {
-            let mut m = 0.0f64;
             for k in row_ptr[i]..row_ptr[i + 1] {
-                m = m.max(vals[k].abs());
+                let j = cols[k];
+                a_dense[i][j] = vals[k];
             }
-            row_scale[i] = m;
         }
 
-        for i in 0..n {
-            // Gather original row i into workspace.
-            for k in row_ptr[i]..row_ptr[i + 1] {
-                let c = cols[k];
-                if !in_row[c] {
-                    in_row[c] = true;
-                    touched.push(c);
+        // Permutation vector: perm[i] = original row index that ended up at position i
+        let mut perm = (0..n).collect::<Vec<usize>>();
+
+        // LU factors stored in dense format during factorization, then compressed
+        let mut l = vec![vec![0.0f64; n]; n]; // unit diagonal implicit
+        let mut u = vec![vec![0.0f64; n]; n];
+
+        // LU factorization with partial pivoting (Gaussian elimination with row swaps)
+        for k in 0..n {
+            // Find pivot row: max |A[i][k]| for i >= k
+            let mut pivot_row = k;
+            let mut max_val = a_dense[k][k].abs();
+            for i in (k + 1)..n {
+                let v = a_dense[i][k].abs();
+                if v > max_val {
+                    max_val = v;
+                    pivot_row = i;
                 }
-                x[c] += vals[k];
             }
 
-            // Row-oriented elimination: for each earlier column k, take the
-            // multiplier from the live workspace value x[k].
-            for k in 0..i {
-                if !in_row[k] {
-                    continue;
+            // Check for singularity
+            if max_val < 1e-15 {
+                return Err(format!(
+                    "Singular or near-singular matrix at column {}: max pivot = {:.2e}",
+                    k, max_val
+                ));
+            }
+
+            // Swap rows k and pivot_row in A and L, and permutation
+            if pivot_row != k {
+                a_dense.swap(k, pivot_row);
+                // Swap corresponding rows in L (only columns < k are filled)
+                for j in 0..k {
+                    l.swap(k, pivot_row);
                 }
-                let u_kk = u_rows[k]
-                    .iter()
-                    .find(|&&(c, _)| c == k)
-                    .map(|&(_, v)| v)
-                    .unwrap_or(0.0);
-                if u_kk.abs() < 1e-300 {
-                    continue;
-                }
-                let l_ik = x[k] / u_kk;
-                x[k] = l_ik;
-                if l_ik != 0.0 {
-                    // x -= l_ik * U(k, k+1..)
-                    for &(uc, uv) in &u_rows[k] {
-                        if uc <= k {
-                            continue;
-                        }
-                        if !in_row[uc] {
-                            in_row[uc] = true;
-                            touched.push(uc);
-                        }
-                        x[uc] -= l_ik * uv;
+                perm.swap(k, pivot_row);
+            }
+
+            // U[k][k] = A[k][k] (after potential swap)
+            u[k][k] = a_dense[k][k];
+
+            // Compute U[k][j] for j > k
+            for j in (k + 1)..n {
+                u[k][j] = a_dense[k][j];
+            }
+
+            // Compute L[i][k] for i > k
+            let pivot = u[k][k];
+            for i in (k + 1)..n {
+                l[i][k] = a_dense[i][k] / pivot;
+            }
+
+            // Update trailing submatrix: A[i][j] -= L[i][k] * U[k][j] for i,j > k
+            for i in (k + 1)..n {
+                let lik = l[i][k];
+                if lik != 0.0 {
+                    for j in (k + 1)..n {
+                        a_dense[i][j] -= lik * u[k][j];
                     }
+                    a_dense[i][k] = 0.0; // Below diagonal becomes zero
                 }
-                x[k] = l_ik;
             }
+        }
 
-            // Split row into L (cols < i) and U (cols >= i).
-            let mut touched_sorted = std::mem::take(&mut touched);
-            touched_sorted.sort_unstable();
-            for &c in touched_sorted.iter() {
-                let v = x[c];
-                x[c] = 0.0;
-                in_row[c] = false;
-                if v == 0.0 {
-                    continue;
-                }
-                if c < i {
-                    l_rows[i].push((c, v));
-                } else {
-                    u_rows[i].push((c, v));
+        // Build sparse L and U factors (only non-zero entries)
+        let mut l_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        let mut u_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+
+        for i in 0..n {
+            // L has unit diagonal (not stored), strictly lower part
+            for j in 0..i {
+                if l[i][j].abs() > 1e-15 {
+                    l_rows[i].push((j, l[i][j]));
                 }
             }
-            touched.clear();
+            // U has diagonal and upper part
+            for j in i..n {
+                if u[i][j].abs() > 1e-15 {
+                    u_rows[i].push((j, u[i][j]));
+                }
+            }
             l_rows[i].sort_unstable_by_key(|e| e.0);
+            u_rows[i].sort_unstable_by_key(|e| e.0);
+        }
 
-            // Pivot: max |U(i..)| in this row from column i onward.
-            let pivot_val = u_rows[i].first().map(|(_, v)| v.abs()).unwrap_or(0.0);
-            let tol_pivot = PIVOT_TOL * row_scale[i].max(1e-300);
-            if u_rows[i].is_empty() || u_rows[i][0].0 != i || pivot_val <= tol_pivot {
-                // Static pivoting fallback: perturb the diagonal so the
-                // factorisation completes (SuperLU-style diagonal shift).
-                let perturb = tol_pivot.max(row_scale[i] * 1e-10);
-                // Insert at correct sorted position for column i.
-                let pos = u_rows[i]
-                    .iter()
-                    .position(|&(c, _)| c >= i)
-                    .unwrap_or(u_rows[i].len());
-                if pos < u_rows[i].len() && u_rows[i][pos].0 == i {
-                    u_rows[i][pos].1 = perturb;
-                } else {
-                    u_rows[i].insert(pos, (i, perturb));
+        // Verify PA = LU for debugging (can be removed in release)
+        #[cfg(debug_assertions)]
+        {
+            // Reconstruct PA and LU and compare
+            // PA reconstruction
+            let mut pa = vec![vec![0.0f64; n]; n];
+            for i in 0..n {
+                let orig_i = perm[i];
+                for j in 0..n {
+                    let mut sum = 0.0;
+                    // L row i
+                    sum += a_dense[orig_i][j]; // original matrix row orig_i
+                    pa[i][j] = sum;
                 }
             }
-
-            // Keep perm consistent: we never physically swap rows (static
-            // pivoting), so perm stays identity except for bookkeeping.
-            perm[i] = i;
+            // In debug, we could verify PA ≈ LU but skip for performance
         }
 
         Ok(SparseLu {
@@ -380,36 +475,44 @@ impl SparseLu {
     }
 
     /// Solve A x = b via forward/back substitution using P A = L U.
+    /// Returns x = A^{-1} b.
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
         let n = self.n;
+        // Apply permutation: Pb
         let mut y = vec![0.0f64; n];
-        // Forward: L y = b (unit diagonal), rows in order.
         for i in 0..n {
-            let mut s = b[self.perm[i]];
-            for &(c, v) in &self.l_rows[i] {
-                s -= v * y[c];
-            }
-            y[i] = s;
+            y[i] = b[self.perm[i]];
         }
-        // Backward: U x = y.
-        let mut out = vec![0.0f64; n];
+
+        // Forward substitution: L y = Pb (L has unit diagonal)
+        for i in 0..n {
+            let mut sum = 0.0;
+            for &(c, v) in &self.l_rows[i] {
+                sum += v * y[c];
+            }
+            y[i] -= sum;
+        }
+
+        // Backward substitution: U x = y
+        let mut x = vec![0.0f64; n];
         for i in (0..n).rev() {
-            let mut s = y[i];
-            let row = &self.u_rows[i];
-            // skip diagonal entry
-            for &(c, v) in row.iter() {
-                if c > i {
-                    s -= v * out[c];
+            let mut sum = 0.0;
+            // Find diagonal and sum U[i][j] * x[j] for j > i
+            let mut diag = 1.0;
+            for &(c, v) in &self.u_rows[i] {
+                if c == i {
+                    diag = v;
+                } else if c > i {
+                    sum += v * x[c];
                 }
             }
-            let d = row
-                .iter()
-                .find(|&&(c, _)| c == i)
-                .map(|&(_, v)| v)
-                .unwrap_or(1.0);
-            out[i] = if d.abs() < 1e-300 { 0.0 } else { s / d };
+            if diag.abs() < 1e-300 {
+                x[i] = 0.0;
+            } else {
+                x[i] = (y[i] - sum) / diag;
+            }
         }
-        out
+        x
     }
 }
 

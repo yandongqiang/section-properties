@@ -227,15 +227,21 @@ fn solve_with_fallback(
     solve_lagrange_sparse(k_reg, c, f)
 }
 
-/// Solve the exact (non-regularized) Lagrangian system using SparseLU.
-/// This mirrors Python's `solve_direct_lagrange` which solves the full (n+1)x(n+1)
-/// system without adding eps to the diagonal. SparseLU uses static pivoting
-/// (SuperLU-style diagonal perturbation) which handles the indefinite matrix.
+/// Result of exact Lagrange solve.
+#[derive(Debug, Clone)]
+struct ExactLagrangeSolution {
+    omega: Vec<f64>,
+    lambda: f64,
+}
+
+/// Solve the exact (non-regularized) Lagrangian system using SparseLU with
+/// true partial pivoting. This mirrors Python's `solve_direct_lagrange` which
+/// solves the full (n+1)x(n+1) system without adding eps to the diagonal.
 fn solve_exact_lagrange(
     k: &SparseMatrix,
     c: &[f64],
     f: &[f64],
-) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+) -> Result<ExactLagrangeSolution, crate::mesh::fem::FemError> {
     let n = f.len();
     let mut k_lg = SparseMatrix::new(n + 1);
     // Use COO triplets directly - need to compress first to access them
@@ -252,14 +258,16 @@ fn solve_exact_lagrange(
         k_lg.add(n, i, c[i]);
     }
     k_lg.compress();
-    
-    // Use SparseLU directly on the augmented matrix (handles indefinite with static pivoting)
+
+    // Use SparseLU with true partial pivoting on the augmented matrix
     let lu = crate::fea::solvers::SparseLu::factor(&k_lg)
-        .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?;
+        .map_err(|e| crate::mesh::fem::FemError::SingularMatrix)?;
     let mut rhs = f.to_vec();
     rhs.push(0.0);
     let sol = lu.solve(&rhs);
-    Ok(sol[..n].to_vec())
+    let omega = sol[..n].to_vec();
+    let lambda = sol[n];
+    Ok(ExactLagrangeSolution { omega, lambda })
 }
 
 /// Solve with exact (non-regularized) K for diagnostic comparison.
@@ -270,9 +278,11 @@ fn solve_compare_exact_vs_regularized(
     f: &[f64],
     ixx: f64,
     iyy: f64,
-) -> Result<(Vec<f64>, Vec<f64>, f64, f64, f64, f64), crate::mesh::fem::FemError> {
+) -> Result<(Vec<f64>, Vec<f64>, f64, f64, f64, f64, f64), crate::mesh::fem::FemError> {
     // Exact K (no regularization)
-    let omega_exact = solve_exact_lagrange(k_global, c, f)?;
+    let exact_sol = solve_exact_lagrange(k_global, c, f)?;
+    let omega_exact = exact_sol.omega;
+    let lambda_exact = exact_sol.lambda;
     
     // Regularized K
     let n = f.len();
@@ -320,7 +330,7 @@ fn solve_compare_exact_vs_regularized(
         }
     }
     
-    Ok((omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff))
+    Ok((omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact))
 }
 
 /// Diagnostic: attempt exact factorization and capture pivot information on failure.
@@ -626,11 +636,11 @@ pub fn compute_fem_warping_solution(
         }
     }
     
-    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff) = match exact_result {
-        Ok((oe, _, je, jr, mad, mrd)) => (Some(oe), je, jr, mad, mrd),
+    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact) = match exact_result {
+        Ok((oe, _, je, jr, mad, mrd, lam)) => (Some(oe), je, jr, mad, mrd, lam),
         Err(_) => {
             eprintln!("[DIAG] Exact K solver failed (singular), skipping exact vs reg comparison");
-            (None, 0.0, 0.0, 0.0, 0.0)
+            (None, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
     };
     
@@ -638,12 +648,13 @@ pub fn compute_fem_warping_solution(
         let omega_dot_f_exact: f64 = oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
         let je = ixx + iyy - omega_dot_f_exact;
         eprintln!(
-            "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}",
+            "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}, lambda_exact={:.2e}",
             max_abs_diff,
             max_rel_diff,
             je,
             j_reg,
-            if je.abs() > 1e-15 { (je - j_reg).abs() / je.abs() } else { 0.0 }
+            if je.abs() > 1e-15 { (je - j_reg).abs() / je.abs() } else { 0.0 },
+            lambda_exact
         );
     }
 
@@ -678,23 +689,35 @@ pub fn compute_fem_warping_solution(
     // Try exact solve first; if it fails residual check, use regularized
     let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
     
-    // Verify exact solution residual if available
+    // Verify exact solution residual if available - FULL LAGRANGE RESIDUAL
     let use_exact = if let Some(ref oe) = omega_exact {
         // Need to compress k_global for matvec
         let mut k_global_compressed = k_global.clone();
         k_global_compressed.compress();
-        let exact_residual: f64 = {
-            let prod = k_global_compressed.matvec(oe);
-            let mut worst = 0.0f64;
-            let mut f_norm = 0.0f64;
-            for i in 0..n {
-                worst = worst.max((prod[i] - f_torsion[i]).abs());
-                f_norm = f_norm.max(f_torsion[i].abs());
-            }
-            worst / f_norm.max(1e-300)
-        };
-        eprintln!("[DIAG] Exact K residual check: {:.2e}", exact_residual);
-        exact_residual <= 1e-6
+        
+        // Exact lambda from the exact solver
+        let exact_lambda = lambda_exact;
+        
+        // Full Lagrange residual:
+        // r1 = K*omega + C*lambda - F
+        // r2 = C^T*omega
+        let prod = k_global_compressed.matvec(oe);
+        let mut worst = 0.0f64;
+        let mut f_norm = 0.0f64;
+        for i in 0..n {
+            let r1 = prod[i] + c_global[i] * exact_lambda - f_torsion[i];
+            worst = worst.max(r1.abs());
+            f_norm = f_norm.max(f_torsion[i].abs());
+        }
+        // Constraint residual
+        let ct_omega: f64 = c_global.iter().zip(oe.iter()).map(|(&c, &w)| c * w).sum();
+        worst = worst.max(ct_omega.abs());
+        f_norm = f_norm.max(ct_omega.abs());
+        
+        let exact_residual = worst / f_norm.max(1e-300);
+        eprintln!("[DIAG] Exact K residual check: {:.2e}, lambda={:.2e}, C^T*omega={:.2e}", 
+                  exact_residual, exact_lambda, ct_omega);
+        exact_residual <= 1e-8
     } else {
         false
     };
