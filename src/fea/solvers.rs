@@ -93,7 +93,7 @@ impl FactoredDirectSolver {
     /// Direct solve (LU / LDLT). Returns error if solver fails.
     pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, SolverError> {
         match self {
-            FactoredDirectSolver::Lu(lu) => Ok(lu.solve(b)),
+            FactoredDirectSolver::Lu(lu) => lu.solve(b).map_err(SolverError::SolveFailed),
             FactoredDirectSolver::Ldlt(l) => l
                 .solve(b)
                 .map_err(|e| SolverError::SolveFailed(e.to_string())),
@@ -258,22 +258,22 @@ impl SparseLu {
     pub fn perm(&self) -> &[usize] {
         &self.perm
     }
-    
+
     /// Get L factor rows (strict lower triangle, unit diagonal implicit).
     pub fn l_rows(&self) -> &[Vec<(usize, f64)>] {
         &self.l_rows
     }
-    
+
     /// Get U factor rows (upper triangle including diagonal).
     pub fn u_rows(&self) -> &[Vec<(usize, f64)>] {
         &self.u_rows
     }
-    
+
     /// Get matrix size.
     pub fn n(&self) -> usize {
         self.n
     }
-    
+
     /// Verify PA = LU for debugging purposes.
     /// Returns max absolute difference between PA and LU.
     #[cfg(debug_assertions)]
@@ -282,12 +282,12 @@ impl SparseLu {
         // Build A dense
         let mut a_dense = vec![vec![0.0f64; n]; n];
         for i in 0..n {
-            for k in a.row_ptr()[i]..a.row_ptr()[i+1] {
+            for k in a.row_ptr()[i]..a.row_ptr()[i + 1] {
                 let j = a.csr_cols()[k];
                 a_dense[i][j] = a.csr_vals()[k];
             }
         }
-        
+
         // Build PA
         let mut pa = vec![vec![0.0f64; n]; n];
         for i in 0..n {
@@ -296,43 +296,47 @@ impl SparseLu {
                 pa[i][j] = a_dense[orig_i][j];
             }
         }
-        
+
         // Build LU
         let mut lu = vec![vec![0.0f64; n]; n];
         for i in 0..n {
             for j in 0..n {
                 let mut sum = 0.0;
                 for k in 0..n {
-                    let l_ik = if i == k { 
-                        1.0 
-                    } else if k < i { 
-                        self.l_rows[i].iter()
+                    let l_ik = if i == k {
+                        1.0
+                    } else if k < i {
+                        self.l_rows[i]
+                            .iter()
                             .find(|(c, _)| *c == k)
                             .map(|(_, v)| *v)
                             .unwrap_or(0.0)
-                    } else { 
-                        0.0 
+                    } else {
+                        0.0
                     };
                     let u_kj = if k <= j {
-                        self.u_rows[k].iter()
+                        self.u_rows[k]
+                            .iter()
                             .find(|(c, _)| *c == j)
                             .map(|(_, v)| *v)
                             .unwrap_or(0.0)
-                    } else { 
-                        0.0 
+                    } else {
+                        0.0
                     };
                     sum += l_ik * u_kj;
                 }
                 lu[i][j] = sum;
             }
         }
-        
+
         // Max absolute difference
         let mut max_diff = 0.0;
         for i in 0..n {
             for j in 0..n {
                 let diff = (pa[i][j] - lu[i][j]).abs();
-                if diff > max_diff { max_diff = diff; }
+                if diff > max_diff {
+                    max_diff = diff;
+                }
             }
         }
         max_diff
@@ -370,16 +374,24 @@ impl SparseLu {
         let mut l = vec![vec![0.0f64; n]; n]; // unit diagonal implicit
         let mut u = vec![vec![0.0f64; n]; n];
 
-        // Compute matrix scale for scale-aware pivot tolerance
-        let mut matrix_scale = 0.0f64;
-        for i in 0..n {
-            for j in 0..n {
-                matrix_scale = matrix_scale.max(a_dense[i][j].abs());
+        // Compute per-column scales for scale-invariant pivot tolerance
+        // Using column-wise infinity norm scaled by machine epsilon
+        let mut col_scales = vec![0.0f64; n];
+        for j in 0..n {
+            let mut max_abs = 0.0f64;
+            for i in 0..n {
+                max_abs = max_abs.max(a_dense[i][j].abs());
             }
+            col_scales[j] = max_abs;
         }
-        // Scale-aware tolerance: machine_epsilon * n * matrix_scale * safety_factor
-        // safety_factor = 100 (allows some margin for floating point errors)
-        let pivot_tol = f64::EPSILON * n as f64 * matrix_scale.max(1.0) * 100.0;
+        // Global matrix scale (for reference)
+        let matrix_scale = col_scales.iter().fold(0.0f64, |a, &v| a.max(v));
+
+        // Scale-invariant pivot tolerance:
+        // pivot_tol = EPS * n * max(|A[:,k]|_inf) * safety_factor
+        // This ensures that small-scale matrices aren't incorrectly flagged as singular
+        // and large-scale matrices don't reject legitimate small pivots
+        const PIVOT_SAFETY_FACTOR: f64 = 100.0;
 
         // LU factorization with partial pivoting (Gaussian elimination with row swaps)
         for k in 0..n {
@@ -394,11 +406,14 @@ impl SparseLu {
                 }
             }
 
-            // Check for singularity using scale-aware tolerance
+            // Check for singularity using scale-aware tolerance (per-column)
+            let col_scale = col_scales[k].max(1.0);
+            let pivot_tol = f64::EPSILON * n as f64 * col_scale * PIVOT_SAFETY_FACTOR;
+
             if max_val <= pivot_tol {
                 return Err(format!(
-                    "Singular or near-singular matrix at column {}: max pivot = {:.2e}, tolerance = {:.2e}",
-                    k, max_val, pivot_tol
+                    "Singular or near-singular matrix at column {}: max pivot = {:.2e}, tolerance = {:.2e} (col_scale = {:.2e})",
+                    k, max_val, pivot_tol, col_scale
                 ));
             }
 
@@ -450,42 +465,40 @@ impl SparseLu {
         }
 
         // Build sparse L and U factors (only non-zero entries)
+        // Use relative drop tolerance: keep entries where |v| > max_row_abs * EPS * n
+        // This avoids deleting legitimate small entries in scaled matrices
         let mut l_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut u_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
 
+        // Compute per-row scale for relative drop tolerance
+        let mut l_row_scale = vec![0.0f64; n];
+        let mut u_row_scale = vec![0.0f64; n];
+        for i in 0..n {
+            for j in 0..i {
+                l_row_scale[i] = l_row_scale[i].max(l[i][j].abs());
+            }
+            for j in i..n {
+                u_row_scale[i] = u_row_scale[i].max(u[i][j].abs());
+            }
+        }
+
         for i in 0..n {
             // L has unit diagonal (not stored), strictly lower part
+            let l_tol = l_row_scale[i] * f64::EPSILON * n as f64;
             for j in 0..i {
-                if l[i][j].abs() > 1e-15 {
+                if l[i][j].abs() > l_tol {
                     l_rows[i].push((j, l[i][j]));
                 }
             }
             // U has diagonal and upper part
+            let u_tol = u_row_scale[i] * f64::EPSILON * n as f64;
             for j in i..n {
-                if u[i][j].abs() > 1e-15 {
+                if u[i][j].abs() > u_tol {
                     u_rows[i].push((j, u[i][j]));
                 }
             }
             l_rows[i].sort_unstable_by_key(|e| e.0);
             u_rows[i].sort_unstable_by_key(|e| e.0);
-        }
-
-        // Verify PA = LU for debugging (can be removed in release)
-        #[cfg(debug_assertions)]
-        {
-            // Reconstruct PA and LU and compare
-            // PA reconstruction
-            let mut pa = vec![vec![0.0f64; n]; n];
-            for i in 0..n {
-                let orig_i = perm[i];
-                for j in 0..n {
-                    let mut sum = 0.0;
-                    // L row i
-                    sum += a_dense[orig_i][j]; // original matrix row orig_i
-                    pa[i][j] = sum;
-                }
-            }
-            // In debug, we could verify PA ≈ LU but skip for performance
         }
 
         Ok(SparseLu {
@@ -497,8 +510,8 @@ impl SparseLu {
     }
 
     /// Solve A x = b via forward/back substitution using P A = L U.
-    /// Returns x = A^{-1} b.
-    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+    /// Returns x = A^{-1} b or error if diagonal is near-zero.
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, String> {
         let n = self.n;
         // Apply permutation: Pb
         let mut y = vec![0.0f64; n];
@@ -528,13 +541,15 @@ impl SparseLu {
                     sum += v * x[c];
                 }
             }
-            if diag.abs() < 1e-300 {
-                x[i] = 0.0;
-            } else {
-                x[i] = (y[i] - sum) / diag;
+            if !diag.is_finite() || diag.abs() < f64::MIN_POSITIVE {
+                return Err(format!(
+                    "Solve failed: near-zero or invalid diagonal at row {}: diag = {:.2e}",
+                    i, diag
+                ));
             }
+            x[i] = (y[i] - sum) / diag;
         }
-        x
+        Ok(x)
     }
 }
 

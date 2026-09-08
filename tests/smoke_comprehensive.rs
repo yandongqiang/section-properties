@@ -308,7 +308,7 @@ fn smoke_solver_backends_agree() {
 
     // LU direct
     let lu = solvers::SparseLu::factor(&k).unwrap();
-    let x_lu = lu.solve(&f);
+    let x_lu = lu.solve(&f).unwrap();
     // ICCG iterative
     let mut k3 = k.clone();
     k3.compress();
