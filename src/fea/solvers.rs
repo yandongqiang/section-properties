@@ -97,6 +97,10 @@ impl FactoredDirectSolver {
             FactoredDirectSolver::Ldlt(l) => l
                 .solve(b)
                 .map_err(|e| SolverError::SolveFailed(e.to_string())),
+            #[cfg(feature = "pardiso")]
+            FactoredDirectSolver::Pardiso(_) => Err(SolverError::NotImplemented(
+                "PARDISO solve not implemented in this context".to_string(),
+            )),
         }
     }
 }
@@ -241,7 +245,13 @@ impl SparseSolver {
 // (PA = L U). No static pivoting / diagonal perturbation - returns error
 // on near-singular matrices.
 // ---------------------------------------------------------------------------
-
+//
+// IMPORTANT: This implementation is DENSE-BACKED.
+// The input sparse matrix is converted to a dense n×n matrix for Gaussian
+// elimination with partial pivoting. Time complexity: O(n³), Space: O(n²).
+// Suitable for n up to ~2000-3000 on typical hardware.
+// For larger problems, a true sparse LU (e.g. SuiteSparse, PARDISO) should be used.
+//
 /// Sparse LU factorisation P A = L U with true row partial pivoting.
 pub struct SparseLu {
     n: usize,
@@ -385,7 +395,7 @@ impl SparseLu {
             col_scales[j] = max_abs;
         }
         // Global matrix scale (for reference)
-        let matrix_scale = col_scales.iter().fold(0.0f64, |a, &v| a.max(v));
+        let _matrix_scale = col_scales.iter().fold(0.0f64, |a, &v| a.max(v));
 
         // Scale-invariant pivot tolerance:
         // pivot_tol = EPS * n * max(|A[:,k]|_inf) * safety_factor
