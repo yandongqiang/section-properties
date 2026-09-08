@@ -806,7 +806,7 @@ pub fn compute_fem_warping_solution(
         }
         0.0
     };
-    
+
     let use_exact = exact_residual > 0.0 && exact_residual <= 1e-8;
 
     let (omega_final, used_exact) = if use_exact {

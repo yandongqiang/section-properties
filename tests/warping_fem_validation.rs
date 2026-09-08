@@ -5,12 +5,12 @@
 //!
 //! Run with: cargo test --test warping_fem_validation -- --nocapture
 
-use section_properties::section::Section;
-use section_properties::section_library::steel::{ChannelSection, ISection, AngleSection};
-use section_properties::section_library::ParametricSection;
-use section_properties::section_properties::SectionProperties;
-use section_properties::plastic::warping_fem::{compute_fem_warping_solution, FemWarpingSolution};
 use section_properties::mesh::MeshControl;
+use section_properties::plastic::warping_fem::{FemWarpingSolution, compute_fem_warping_solution};
+use section_properties::section::Section;
+use section_properties::section_library::ParametricSection;
+use section_properties::section_library::steel::{AngleSection, ChannelSection, ISection};
+use section_properties::section_properties::SectionProperties;
 
 fn print_section_header(name: &str) {
     println!("\n{}", "=".repeat(70));
@@ -25,26 +25,33 @@ fn run_warping_fem_test(name: &str, section: Section) {
     let props = SectionProperties::from_section(&section);
 
     println!("\n--- FEM Warping Solution ---");
-    let fem_result: FemWarpingSolution = match compute_fem_warping_solution(&section, &props, nu, MeshControl::Fine) {
-        Ok(r) => {
-            println!("✓ FEM calculation SUCCEEDED");
-            r
-        }
-        Err(e) => {
-            println!("✗ FEM calculation FAILED: {:?}", e);
-            println!("  → Would use analytical fallback");
-            return;
-        }
-    };
+    let fem_result: FemWarpingSolution =
+        match compute_fem_warping_solution(&section, &props, nu, MeshControl::Fine) {
+            Ok(r) => {
+                println!("✓ FEM calculation SUCCEEDED");
+                r
+            }
+            Err(e) => {
+                println!("✗ FEM calculation FAILED: {:?}", e);
+                println!("  → Would use analytical fallback");
+                return;
+            }
+        };
 
     // Print FEM results
     println!("\n--- FEM Results ---");
     println!("J (FEM):            {:.6e}", fem_result.j);
     println!("J_raw:              {:.6e}", fem_result.j_raw);
     println!("J_fem:              {:.6e}", fem_result.j_fem);
-    println!("Used analytical fallback: {}", fem_result.used_analytical_fallback);
+    println!(
+        "Used analytical fallback: {}",
+        fem_result.used_analytical_fallback
+    );
     println!("Iw (FEM):           {:.6e}", fem_result.iw);
-    println!("Shear center (FEM): ({:.6}, {:.6})", fem_result.shear_center.x, fem_result.shear_center.y);
+    println!(
+        "Shear center (FEM): ({:.6}, {:.6})",
+        fem_result.shear_center.x, fem_result.shear_center.y
+    );
     println!("βx:                 {:.6e}", fem_result.beta_x_plus);
     println!("βy:                 {:.6e}", fem_result.beta_y_plus);
     println!("β11:                {:.6e}", fem_result.beta_11_plus);
@@ -57,17 +64,23 @@ fn run_warping_fem_test(name: &str, section: Section) {
 
     // Check for negative J (critical issue)
     if fem_result.j <= 0.0 {
-        println!("\n!!! CRITICAL: NEGATIVE J DETECTED: {:.6e} !!!", fem_result.j);
+        println!(
+            "\n!!! CRITICAL: NEGATIVE J DETECTED: {:.6e} !!!",
+            fem_result.j
+        );
     }
 
     // Verify used_analytical_fallback == false for the 4 standard sections
-    let is_standard_section = name.contains("Channel 200x75") 
-        || name.contains("I-section 300x150") 
-        || name.contains("Angle 100x100") 
+    let is_standard_section = name.contains("Channel 200x75")
+        || name.contains("I-section 300x150")
+        || name.contains("Angle 100x100")
         || name.contains("Channel 300x100x3x6");
     if is_standard_section {
-        assert!(!fem_result.used_analytical_fallback, 
-            "{}: used_analytical_fallback should be false for standard section", name);
+        assert!(
+            !fem_result.used_analytical_fallback,
+            "{}: used_analytical_fallback should be false for standard section",
+            name
+        );
         println!("✓ used_analytical_fallback == false (as required)");
     }
 
@@ -156,7 +169,11 @@ fn warping_fem_mesh_convergence() {
                 println!("J: {:.6e}", r.j);
                 if prev_j > 0.0 {
                     let conv = (r.j - prev_j).abs() / prev_j;
-                    println!("Convergence: {:.4}% {}", conv * 100.0, if conv < 0.01 { "✓" } else { "✗" });
+                    println!(
+                        "Convergence: {:.4}% {}",
+                        conv * 100.0,
+                        if conv < 0.01 { "✓" } else { "✗" }
+                    );
                 }
                 prev_j = r.j;
 

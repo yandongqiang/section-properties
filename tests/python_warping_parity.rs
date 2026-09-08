@@ -5,6 +5,7 @@
 //!
 //! Run with: cargo test --test python_warping_parity -- --nocapture
 
+use section_properties::geometry::{CompoundGeometry, Geometry};
 use section_properties::mesh::MeshControl;
 use section_properties::plastic::warping_fem::{FemWarpingSolution, compute_fem_warping_solution};
 use section_properties::section::Section;
@@ -16,7 +17,6 @@ use section_properties::section_library::steel::{
     AngleSection, ChannelSection, ISection, RectangularHollowSection, TeeSection,
 };
 use section_properties::section_properties::SectionProperties;
-use section_properties::geometry::{CompoundGeometry, Geometry};
 use std::collections::HashMap;
 use std::fs::File;
 

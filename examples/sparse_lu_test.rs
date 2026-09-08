@@ -1,5 +1,5 @@
-use section_properties::fea::solvers::SparseLu;
 use section_properties::fea::SparseMatrix;
+use section_properties::fea::solvers::SparseLu;
 
 fn main() {
     // Test 1: Simple 2x2 matrix with zero diagonal
@@ -13,12 +13,12 @@ fn main() {
     let x = lu.solve(&b);
     println!("  Solution: {:?}", x);
     println!("  Expected: [2, 1]");
-    
+
     // Verify PA = LU
     let max_diff = lu.verify_pa_eq_lu(&a);
     println!("  max|PA - LU| = {:.2e}", max_diff);
     assert!(max_diff < 1e-12, "PA != LU: max_diff = {}", max_diff);
-    
+
     // Test 2: Diagonally dominant
     println!("\nTest 2: Diagonally dominant 3x3");
     let mut a2 = SparseMatrix::new(3);
@@ -34,11 +34,11 @@ fn main() {
     let b2 = vec![1.0, 2.0, 3.0];
     let x2 = lu2.solve(&b2);
     println!("  Solution: {:?}", x2);
-    
+
     let max_diff2 = lu2.verify_pa_eq_lu(&a2);
     println!("  max|PA - LU| = {:.2e}", max_diff2);
     assert!(max_diff2 < 1e-12, "PA != LU: max_diff = {}", max_diff2);
-    
+
     // Test 3: Zero diagonal with pivoting needed
     println!("\nTest 3: [[1, 2], [1e-14, 1]] - needs pivoting");
     let mut a3 = SparseMatrix::new(2);
@@ -57,6 +57,6 @@ fn main() {
             println!("  Error: {}", e);
         }
     }
-    
+
     println!("\nAll tests passed!");
 }
