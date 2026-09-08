@@ -282,7 +282,7 @@ fn solve_exact_lagrange(
 }
 
 /// Solve with exact (non-regularized) K for diagnostic comparison.
-/// Returns (omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact, failure_kind)
+/// Returns (omega_exact, omega_reg, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact, failure_kind, exact_solver_failed)
 fn solve_compare_exact_vs_regularized(
     k_global: &SparseMatrix,
     c: &[f64],
@@ -299,13 +299,14 @@ fn solve_compare_exact_vs_regularized(
         f64,
         f64,
         Option<ExactSolverFailure>,
+        bool,
     ),
     crate::mesh::fem::FemError,
 > {
     // Exact K (no regularization)
     let exact_sol = match solve_exact_lagrange(k_global, c, f) {
         Ok(sol) => sol,
-        Err(e) => return Ok((vec![], vec![], 0.0, 0.0, 0.0, 0.0, 0.0, Some(e))),
+        Err(e) => return Ok((vec![], vec![], 0.0, 0.0, 0.0, 0.0, 0.0, Some(e), true)),
     };
     let omega_exact = exact_sol.omega;
     let lambda_exact = exact_sol.lambda;
@@ -324,12 +325,13 @@ fn solve_compare_exact_vs_regularized(
     }
     k_reg.compress();
 
-    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
         &k_reg,
-        c,
+        &c,
         crate::fea::SolverOptions {
-            auto_regularize_singular: true,
+            // K_reg already has εI added explicitly, so disable automatic regularization
+            auto_regularize_singular: false,
         },
     ) {
         Ok(s) => Some(s),
@@ -388,6 +390,7 @@ fn solve_compare_exact_vs_regularized(
         max_rel_diff,
         lambda_exact,
         failure_kind,
+        false,
     ))
 }
 
@@ -701,36 +704,47 @@ pub fn compute_fem_warping_solution(
         }
     }
 
-    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact, exact_failure_kind) =
+    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact, exact_failure_kind, exact_solver_failed) =
         match exact_result {
-            Ok((oe, _, je, jr, mad, mrd, lam, failure_kind)) => {
-                (Some(oe), je, jr, mad, mrd, lam, failure_kind)
+            Ok((oe, _, je, jr, mad, mrd, lam, failure_kind, solver_failed)) => {
+                (Some(oe), je, jr, mad, mrd, lam, failure_kind, solver_failed)
             }
             Err(_) => {
                 eprintln!(
                     "[DIAG] Exact K solver failed (singular), skipping exact vs reg comparison"
                 );
-                (None, 0.0, 0.0, 0.0, 0.0, 0.0, None)
+                (None, 0.0, 0.0, 0.0, 0.0, 0.0, None, true)
             }
         };
 
     if let Some(ref oe) = omega_exact {
-        let omega_dot_f_exact: f64 = oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
-        let je = ixx + iyy - omega_dot_f_exact;
-        eprintln!(
-            "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}, lambda_exact={:.2e}",
-            max_abs_diff,
-            max_rel_diff,
-            je,
-            j_reg,
-            if je.abs() > 1e-15 {
-                (je - j_reg).abs() / je.abs()
-            } else {
-                0.0
-            },
-            lambda_exact
-        );
+        if exact_solver_failed {
+            eprintln!("[DIAG] Exact solver failed, ignoring empty solution");
+        } else {
+            let omega_dot_f_exact: f64 = oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
+            let je = ixx + iyy - omega_dot_f_exact;
+            eprintln!(
+                "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}, lambda_exact={:.2e}",
+                max_abs_diff,
+                max_rel_diff,
+                je,
+                j_reg,
+                if je.abs() > 1e-15 {
+                    (je - j_reg).abs() / je.abs()
+                } else {
+                    0.0
+                },
+                lambda_exact
+            );
+        }
     }
+
+    // Clear omega_exact if exact solver failed (it would be empty vec)
+    let omega_exact = if exact_solver_failed {
+        None
+    } else {
+        omega_exact
+    };
 
     // Prefer exact K if it solves stably (residual check passes), otherwise fall back to regularized
     let k_reg = {
@@ -753,7 +767,8 @@ pub fn compute_fem_warping_solution(
         &k_reg,
         &c_global,
         crate::fea::SolverOptions {
-            auto_regularize_singular: true,
+            // k_reg already has εI added explicitly, so disable automatic regularization
+            auto_regularize_singular: false,
         },
     ) {
         Ok(s) => Some(s),
@@ -821,17 +836,54 @@ pub fn compute_fem_warping_solution(
     };
 
     // Compute regularized solution residual for comparison
+    // Use original K and full Lagrange residual (including lambda and constraint)
     let regularized_residual = if !use_exact {
+        // Need to compute lambda for the regularized solution
+        // Reuse the solver to compute w1 = K_reg^{-1} F and w2 = K_reg^{-1} C
         let mut k_global_compressed = k_global.clone();
         k_global_compressed.compress();
+        
+        // Solve K_reg * w1 = F and K_reg * w2 = C
+        // Since omega was already solved with the regularized system, we can compute lambda
+        // lambda = (C^T * w2) / (C^T * w1) where w1 = K_reg^{-1} F, w2 = K_reg^{-1} C
+        // But omega = w1 - lambda * w2, so we can recover lambda if needed
+        // For verification, we use the original K and compute full residual
+        
+        // First, compute lambda for this omega using the regularized system
+        // We need w1 and w2. Since we have the solver, we can solve for them.
+        let mut k_reg_compressed = k_reg.clone();
+        k_reg_compressed.compress();
+        
+        // Try to create the solver for computing lambda
+        let solver_reg_opt = crate::fea::DirectLagrangeSolver::with_kernel(
+            crate::fea::LagrangeKernel::Skyline,
+            &k_reg_compressed,
+            &c_global,
+            crate::fea::SolverOptions {
+                auto_regularize_singular: false,
+            },
+        ).ok();
+        
+        let lambda_reg = if let Some(solver_reg) = solver_reg_opt {
+            let w1 = solver_reg.solve(&f_torsion).unwrap_or_else(|_| vec![0.0; n]);
+            let w2 = solver_reg.solve(&c_global).unwrap_or_else(|_| vec![0.0; n]);
+            let ct_w1: f64 = c_global.iter().zip(w1.iter()).map(|(&c, &w)| c * w).sum();
+            let ct_w2: f64 = c_global.iter().zip(w2.iter()).map(|(&c, &w)| c * w).sum();
+            if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 }
+        } else {
+            0.0
+        };
+        
+        // Full Lagrange residual with ORIGINAL K
         let prod = k_global_compressed.matvec(&omega);
         let mut worst = 0.0f64;
         let mut f_norm = 0.0f64;
         for i in 0..n {
-            let r1 = prod[i] - f_torsion[i];
+            let r1 = prod[i] + c_global[i] * lambda_reg - f_torsion[i];
             worst = worst.max(r1.abs());
             f_norm = f_norm.max(f_torsion[i].abs());
         }
+        // Constraint residual
         let ct_omega: f64 = c_global
             .iter()
             .zip(omega.iter())
@@ -1797,7 +1849,8 @@ pub fn diagnose_warping_fem(
         &k_reg,
         &c_global,
         crate::fea::SolverOptions {
-            auto_regularize_singular: true,
+            // k_reg already has εI added explicitly, so disable automatic regularization
+            auto_regularize_singular: false,
         },
     )
     .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?;
@@ -3030,7 +3083,8 @@ pub fn run_fem_on_python_mesh(
         &k_reg,
         &c_global,
         crate::fea::SolverOptions {
-            auto_regularize_singular: true,
+            // k_reg already has εI added explicitly, so disable automatic regularization
+            auto_regularize_singular: false,
         },
     )
     .map_err(|_| "Failed to create solver")?;

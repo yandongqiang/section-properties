@@ -303,6 +303,24 @@ fn test_zero_matrix() {
 }
 
 #[test]
+fn test_solve_rhs_length_mismatch() {
+    let a = build_dense(2, &[1.0, 2.0, 3.0, 4.0]);
+    let lu = SparseLu::factor(&a).unwrap();
+    
+    // RHS too short
+    let result = lu.solve(&[1.0]);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("RHS length") || err.contains("length"));
+    
+    // RHS too long
+    let result = lu.solve(&[1.0, 2.0, 3.0]);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("RHS length") || err.contains("length"));
+}
+
+#[test]
 fn test_near_singular() {
     // Near-singular matrices with varying epsilon
     // [1 1]

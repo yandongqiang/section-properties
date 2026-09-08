@@ -531,6 +531,13 @@ impl SparseLu {
     /// Returns x = A^{-1} b or error if diagonal is near-zero.
     pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, String> {
         let n = self.n;
+        if b.len() != n {
+            return Err(format!(
+                "Solve failed: RHS length {} does not match matrix size {}",
+                b.len(),
+                n
+            ));
+        }
         // Apply permutation: Pb
         let mut y = vec![0.0f64; n];
         for i in 0..n {
