@@ -407,7 +407,15 @@ impl SparseLu {
             }
 
             // Check for singularity using scale-aware tolerance (per-column)
-            let col_scale = col_scales[k].max(1.0);
+            // True scale invariance: use actual column scale without artificial floor.
+            // If col_scale == 0, the column is all zeros -> singular.
+            let col_scale = col_scales[k];
+            if col_scale == 0.0 {
+                return Err(format!(
+                    "Singular matrix at column {}: column is all zeros",
+                    k
+                ));
+            }
             let pivot_tol = f64::EPSILON * n as f64 * col_scale * PIVOT_SAFETY_FACTOR;
 
             if max_val <= pivot_tol {

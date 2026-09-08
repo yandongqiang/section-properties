@@ -199,10 +199,10 @@ fn test_indefinite() {
 #[test]
 fn test_scale_invariance() {
     // True scale invariance test: same well-conditioned matrix at different scales
-    // Scales: 1e-12, 1e-9, 1e-6, 1, 1e6, 1e9, 1e12
+    // Scales: 1e-12, 1e-10, 1e-8, 1e-4, 1, 1e4, 1e8, 1e10, 1e12
     let base_data = &[4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0];
     let b = vec![1.0, 2.0, 3.0];
-    let scales = [1e-12, 1e-9, 1e-6, 1.0, 1e6, 1e9, 1e12];
+    let scales = [1e-12, 1e-10, 1e-8, 1e-4, 1.0, 1e4, 1e8, 1e10, 1e12];
 
     // Compute reference solution at scale 1.0
     let a_ref = build_dense(3, base_data);
