@@ -807,7 +807,10 @@ pub fn compute_fem_warping_solution(
         0.0
     };
 
-    let use_exact = exact_residual > 0.0 && exact_residual <= 1e-8;
+    // Use exact solution if: exact solution exists, residual is finite, and residual <= threshold
+    let use_exact = omega_exact.is_some()
+        && exact_residual.is_finite()
+        && exact_residual <= 1e-8;
 
     let (omega_final, used_exact) = if use_exact {
         eprintln!("[DIAG] Using exact (non-regularized) K solution");

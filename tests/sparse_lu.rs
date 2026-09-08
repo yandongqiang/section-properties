@@ -283,3 +283,120 @@ fn test_scale_invariance() {
         }
     }
 }
+
+#[test]
+fn test_singular_matrix() {
+    // Exactly singular matrix
+    let a = build_dense(2, &[1.0, 2.0, 2.0, 4.0]);
+    let result = SparseLu::factor(&a);
+    assert!(result.is_err(), "Singular matrix should return error");
+    let err = result.err().unwrap();
+    assert!(err.contains("singular") || err.contains("Singular"), "Error should mention singular: {}", err);
+}
+
+#[test]
+fn test_zero_matrix() {
+    // Zero matrix - all zeros
+    let a = build_dense(2, &[0.0, 0.0, 0.0, 0.0]);
+    let result = SparseLu::factor(&a);
+    assert!(result.is_err(), "Zero matrix should return error");
+}
+
+#[test]
+fn test_near_singular() {
+    // Near-singular matrices with varying epsilon
+    // [1 1]
+    // [1 1+ε]
+    // For ε -> 0, matrix becomes singular (rows become equal)
+    let epsilons = [1e-8, 1e-10, 1e-12, 1e-14];
+    
+    for &eps in &epsilons {
+        let a = build_dense(2, &[1.0, 1.0, 1.0, 1.0 + eps]);
+        let result = SparseLu::factor(&a);
+        
+        // For ε >= 1e-12, should factorize successfully (column scale ~1, pivot_tol ~ EPS * n * 1 * 100 ~ 2e-14)
+        // For ε = 1e-14, column 2 scale is ~1, max pivot in col 1 is 1, but pivot in col 2 is ~1e-14
+        // The pivot tolerance for col 1 is EPS * 2 * 1 * 100 ~ 4e-14, max pivot = 1 > tol
+        // For col 2: scale = 1, max pivot = eps, pivot_tol = 4e-14
+        // So eps = 1e-14: max pivot = 1e-14 < 4e-14 -> should fail
+        // eps = 1e-12: max pivot = 1e-12 > 4e-14 -> should succeed
+        
+        if eps >= 1e-12 {
+            assert!(result.is_ok(), "Near-singular matrix with eps={:.0e} should factorize (pivot > tol)", eps);
+            let lu = result.unwrap();
+            let b = vec![1.0, 2.0];
+            let x = lu.solve(&b).unwrap();
+            // Verify A*x ≈ b
+            let mut res = vec![0.0; 2];
+            for i in 0..2 {
+                for j in 0..2 {
+                    let v = match (i, j) {
+                        (0, 0) => 1.0, (0, 1) => 1.0,
+                        (1, 0) => 1.0, (1, 1) => 1.0 + eps,
+                        _ => 0.0,
+                    };
+                    res[i] += v * x[j];
+                }
+            }
+            let max_res = res.iter().zip(b.iter()).map(|(&r, &b)| (r - b).abs()).fold(0.0, f64::max);
+            assert!(max_res < 1e-8, "Residual too large for eps={:.0e}: {:.2e}", eps, max_res);
+        } else {
+            // eps = 1e-14: should fail or be very inaccurate
+            // With current pivot_tol = EPS * 2 * 1 * 100 ≈ 4.4e-14, pivot = 1e-14 < 4.4e-14
+            assert!(result.is_err(), "Near-singular matrix with eps={:.0e} should fail (pivot < tol)", eps);
+        }
+    }
+}
+
+#[test]
+fn test_rhs_scaling() {
+    // Test A' = αA, b' = βb -> x' = (β/α) * x
+    let base_data = &[4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0];
+    let base_a = build_dense(3, base_data);
+    let base_b = vec![1.0, 2.0, 3.0];
+    
+    let lu_ref = SparseLu::factor(&base_a).unwrap();
+    let x_ref = lu_ref.solve(&base_b).unwrap();
+    
+    let alphas = [1e-12, 1e-8, 1.0, 1e8, 1e12];
+    let betas = [1e-12, 1e-8, 1.0, 1e8, 1e12];
+    
+    for &alpha in &alphas {
+        for &beta in &betas {
+            let scaled_a_data: Vec<f64> = base_data.iter().map(|v| v * alpha).collect();
+            let scaled_a = build_dense(3, &scaled_a_data);
+            let scaled_b: Vec<f64> = base_b.iter().map(|v| v * beta).collect();
+            
+            let lu = SparseLu::factor(&scaled_a).unwrap();
+            let x = lu.solve(&scaled_b).unwrap();
+            
+            // Expected: x' = (beta/alpha) * x_ref
+            let expected: Vec<f64> = x_ref.iter().map(|v| v * beta / alpha).collect();
+            
+            // Verify A'x = b'
+            let mut res = vec![0.0; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    let v = match (i, j) {
+                        (0, 0) => 4.0 * alpha, (0, 1) => 1.0 * alpha, (0, 2) => 0.0,
+                        (1, 0) => 1.0 * alpha, (1, 1) => 4.0 * alpha, (1, 2) => 1.0 * alpha,
+                        (2, 0) => 0.0, (2, 1) => 1.0 * alpha, (2, 2) => 4.0 * alpha,
+                        _ => 0.0,
+                    };
+                    res[i] += v * x[j];
+                }
+            }
+            let b_norm = scaled_b.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let max_res = res.iter().zip(scaled_b.iter()).map(|(&r, &b)| (r - b).abs()).fold(0.0, f64::max);
+            let rel_res = max_res / b_norm.max(1e-300);
+            assert!(rel_res < 1e-9, "RHS scaling test failed: alpha={:.0e}, beta={:.0e}, rel_res={:.2e}", alpha, beta, rel_res);
+            
+            // Verify solution scaling
+            for i in 0..3 {
+                let rel_diff = (x[i] - expected[i]).abs() / expected[i].abs().max(1e-300);
+                assert!(rel_diff < 1e-9, "Solution scaling failed: alpha={:.0e}, beta={:.0e}, x[{}]={:.2e} vs expected={:.2e} (rel_diff={:.2e})", 
+                    alpha, beta, i, x[i], expected[i], rel_diff);
+            }
+        }
+    }
+}
