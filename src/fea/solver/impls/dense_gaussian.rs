@@ -100,6 +100,9 @@ impl LinearSolver for DenseGaussianSolver {
 
     fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SolverError> {
         let n = self.n;
+        if n == 0 {
+            return Err(SolverError::not_factorized());
+        }
         if rhs.len() != n {
             return Err(SolverError::dimension_mismatch(n, rhs.len()));
         }

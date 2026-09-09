@@ -323,6 +323,15 @@ impl SolverRegistry {
     }
 
     /// Auto-select best solver based on matrix properties
+    ///
+    /// Selection logic:
+    /// - Small matrices (n <= 500): Dense Gaussian (handles all types)
+    /// - Symmetric matrices: Skyline LDL^T (requires SPD, verified during factor)
+    /// - Non-symmetric matrices (n <= 3000): SparseLU
+    /// - Large non-symmetric: Falls back to Skyline if symmetric, else SparseLU
+    ///
+    /// Note: CG/ICCG are NOT auto-selected because they require SPD.
+    /// Users must explicitly choose CG/ICCG when they know the matrix is SPD.
     pub fn auto_select(&self, matrix: &SparseMatrix) -> Option<Box<dyn LinearSolver>> {
         let n = matrix.n;
         let nnz = if matrix.compressed {
@@ -332,22 +341,33 @@ impl SolverRegistry {
         };
         let density = nnz as f64 / (n * n) as f64;
 
-        // Simple heuristic for backend selection
+        // Small matrices: dense handles everything
         if n <= 500 {
-            self.create("dense")
-        } else if matrix.is_symmetric(1e-12) {
+            return self.create("dense");
+        }
+
+        let is_symmetric = matrix.is_symmetric(1e-12);
+
+        if is_symmetric {
+            // Symmetric: Skyline LDL^T (requires SPD)
+            // User must verify SPD if using CG/ICCG explicitly
             if n <= 10000 {
                 self.create("skyline_ldlt")
             } else {
-                self.create("cg")
+                // Large symmetric: still prefer direct solver over CG
+                // CG requires SPD which we cannot verify reliably here
+                self.create("skyline_ldlt")
             }
         } else if n <= 3000 {
+            // Non-symmetric small/medium: SparseLU
             self.create("sparse_lu")
         } else {
+            // Large non-symmetric: no good built-in option
+            // Fall back to SparseLU (may be slow) or return None
             #[cfg(feature = "pardiso")]
             return self.create("pardiso");
             #[cfg(not(feature = "pardiso"))]
-            return self.create("cg");
+            self.create("sparse_lu")
         }
     }
 }
@@ -363,8 +383,9 @@ impl Default for SolverRegistry {
         registry.register(Box::new(CgSolverFactory));
         registry.register(Box::new(IccgSolverFactory));
 
-        #[cfg(feature = "pardiso")]
-        registry.register(Box::new(PardisoSolverFactory));
+        // PARDISO is NOT registered by default - it's a stub for the unified interface.
+        // The real PARDISO implementation in solvers.rs is for augmented Lagrange systems.
+        // Users must explicitly create it if needed.
 
         registry
     }

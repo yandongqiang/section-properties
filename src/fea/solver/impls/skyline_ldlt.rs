@@ -116,17 +116,15 @@ impl LinearSolver for SkylineLdltSolver {
         }
         self.scale = scale.max(1.0);
 
-        // LDL^T factorization
+        // LDL^T factorization - requires SPD (all diagonal entries must be positive)
         let pivot_tol = crate::fea::PIVOT_TOL_BASE * self.scale.max(1.0);
 
         for k in 0..n {
-            // Check pivot
-            if diag[k].abs() <= pivot_tol {
+            // Check pivot: must be positive for SPD (LDL^T requires positive D)
+            if diag[k] <= pivot_tol {
                 return Err(SolverError::singular(format!(
-                    "Skyline pivot {} near zero: {:.2e} <= {:.2e}",
-                    k,
-                    diag[k].abs(),
-                    pivot_tol
+                    "Skyline pivot {} not positive (SPD required): {:.2e} <= {:.2e}",
+                    k, diag[k], pivot_tol
                 )));
             }
 
@@ -156,6 +154,9 @@ impl LinearSolver for SkylineLdltSolver {
 
     fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SolverError> {
         let n = self.n;
+        if n == 0 {
+            return Err(SolverError::not_factorized());
+        }
         if rhs.len() != n {
             return Err(SolverError::dimension_mismatch(n, rhs.len()));
         }
