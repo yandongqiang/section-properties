@@ -904,7 +904,7 @@ pub mod pardiso {
             let csc = super::super::DirectLagrangeSolver::assemble_torsion_lagrange(k, c);
             let leading_n = csc.n_rows - 1; // leading block size
             let n = leading_n + 1; // augmented matrix size
-            
+
             // Compute scale from leading block K (max diagonal)
             let mut scale = 0.0f64;
             let mut k_compressed = k.clone();
@@ -913,7 +913,7 @@ pub mod pardiso {
                 scale = scale.max(k_compressed.matvec_diag(i).abs());
             }
             let scale = scale.max(1.0);
-            
+
             let mut s = Self {
                 leading_n,
                 n,
