@@ -36,7 +36,11 @@ pub use crate::io::{
     to_json, to_nastran, to_svg, to_vtk,
 };
 
-pub use crate::fea::{LagrangeKernel, SkylineLdlt, solvers};
+pub use crate::fea::{
+    LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
+    solver::SolverBackend, solver::SolverCapabilities, solver::SolverError, solver::SolverRegistry,
+    solvers,
+};
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;

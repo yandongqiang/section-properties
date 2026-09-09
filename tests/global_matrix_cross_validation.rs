@@ -19,15 +19,12 @@ use std::io::Read;
 fn load_json(path: &str) -> serde_json::Value {
     let mut file = std::fs::File::open(path).expect("Failed to open file");
     let mut contents = String::new();
-    file.read_to_string(&mut contents).expect("Failed to read file");
+    file.read_to_string(&mut contents)
+        .expect("Failed to read file");
     serde_json::from_str(&contents).expect("Failed to parse JSON")
 }
 
-fn compare_coo_vecs(
-    rust_data: &serde_json::Value,
-    py_data: &serde_json::Value,
-    label: &str,
-) {
+fn compare_coo_vecs(rust_data: &serde_json::Value, py_data: &serde_json::Value, label: &str) {
     let rust_row: Vec<usize> = serde_json::from_value(rust_data["K"]["row"].clone()).unwrap();
     let rust_col: Vec<usize> = serde_json::from_value(rust_data["K"]["col"].clone()).unwrap();
     let rust_vals: Vec<f64> = serde_json::from_value(rust_data["K"]["data"].clone()).unwrap();
@@ -38,14 +35,18 @@ fn compare_coo_vecs(
     // Build value maps keyed by (row, col) so sparse ordering (CSR vs CSC)
     // does not affect the comparison.
     use std::collections::HashMap;
-    let rust_map: HashMap<(usize, usize), f64> =
-        rust_row.iter().zip(rust_col.iter()).zip(rust_vals.iter())
-            .map(|((&r, &c), &v)| ((r, c), v))
-            .collect();
-    let py_map: HashMap<(usize, usize), f64> =
-        py_row.iter().zip(py_col.iter()).zip(py_vals.iter())
-            .map(|((&r, &c), &v)| ((r, c), v))
-            .collect();
+    let rust_map: HashMap<(usize, usize), f64> = rust_row
+        .iter()
+        .zip(rust_col.iter())
+        .zip(rust_vals.iter())
+        .map(|((&r, &c), &v)| ((r, c), v))
+        .collect();
+    let py_map: HashMap<(usize, usize), f64> = py_row
+        .iter()
+        .zip(py_col.iter())
+        .zip(py_vals.iter())
+        .map(|((&r, &c), &v)| ((r, c), v))
+        .collect();
 
     // Union of keys; treat missing side as zero.
     let mut keys: Vec<(usize, usize)> = rust_map.keys().copied().collect();
@@ -100,13 +101,17 @@ fn compare_coo_vecs(
     assert!(
         max_abs < 1e-8,
         "{}: max absolute diff {:.2e} >= 1e-8",
-        label, max_abs
+        label,
+        max_abs
     );
     // Only assert relative diff for entries with magnitude > 1e-8
     assert!(
-        max_rel_meaningful < 1e-8 || max_rel_meaningful.is_infinite() || max_rel_meaningful.is_nan(),
+        max_rel_meaningful < 1e-8
+            || max_rel_meaningful.is_infinite()
+            || max_rel_meaningful.is_nan(),
         "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
-        label, max_rel_meaningful
+        label,
+        max_rel_meaningful
     );
 }
 
@@ -151,13 +156,17 @@ fn compare_vecs(rust_vec: &[f64], py_vec: &[f64], label: &str) {
     assert!(
         max_abs < 1e-8,
         "{}: max absolute diff {:.2e} >= 1e-8",
-        label, max_abs
+        label,
+        max_abs
     );
     // Only assert relative diff for entries with magnitude > 1e-8
     assert!(
-        max_rel_meaningful < 1e-8 || max_rel_meaningful.is_infinite() || max_rel_meaningful.is_nan(),
+        max_rel_meaningful < 1e-8
+            || max_rel_meaningful.is_infinite()
+            || max_rel_meaningful.is_nan(),
         "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
-        label, max_rel_meaningful
+        label,
+        max_rel_meaningful
     );
 }
 
@@ -185,7 +194,11 @@ fn test_section(section_name: &str) {
         "  n_dof: rust={}, py={}{}",
         rust_n,
         py_n,
-        if rust_n == py_n { "" } else { "  <-- MISMATCH!" }
+        if rust_n == py_n {
+            ""
+        } else {
+            "  <-- MISMATCH!"
+        }
     );
 
     let rust_F: Vec<f64> = serde_json::from_value(rust_data["F"].clone()).unwrap();
@@ -214,7 +227,10 @@ fn test_section(section_name: &str) {
     println!("    Ixx_c + Iyy_c = {:.6e}", ixx_plus_iyy);
     println!("    omega^T F (Python) = {:.6e}", omega_dot_f_python);
     println!("    J from Python omega·F = {:.6e}", j_from_python_omega_f);
-    println!("    J_python - J_from_omega·F = {:.2e}", j_python - j_from_python_omega_f);
+    println!(
+        "    J_python - J_from_omega·F = {:.2e}",
+        j_python - j_from_python_omega_f
+    );
 
     // Verify J_python matches Ixx+Iyy - omega·F
     let j_diff = (j_python - j_from_python_omega_f).abs();

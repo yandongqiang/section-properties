@@ -1111,6 +1111,28 @@ impl SparseMatrix {
         max_err
     }
 
+    /// Check if matrix is symmetric within tolerance.
+    pub fn is_symmetric(&self, tol: f64) -> bool {
+        if !self.compressed {
+            panic!("SparseMatrix::compress() must be called before is_symmetric");
+        }
+        for i in 0..self.n {
+            let start = self.row_ptr[i];
+            let end = self.row_ptr[i + 1];
+            for k in start..end {
+                let j = self.csr_cols[k];
+                if j > i {
+                    let val_ij = self.csr_vals[k];
+                    let val_ji = self.get(j, i);
+                    if (val_ij - val_ji).abs() > tol {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Get value at (row, col) - requires compress().
     pub fn get(&self, row: usize, col: usize) -> f64 {
         if !self.compressed {
@@ -2090,6 +2112,7 @@ impl SkylineLdlt {
         Ok(u)
     }
 }
+pub mod solver;
 pub mod solvers;
 #[cfg(test)]
 mod direct_lagrange_tests {
