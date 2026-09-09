@@ -325,7 +325,7 @@ fn solve_compare_exact_vs_regularized(
     }
     k_reg.compress();
 
-let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
+    let solver = match crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
         &k_reg,
         &c,
@@ -704,24 +704,31 @@ pub fn compute_fem_warping_solution(
         }
     }
 
-    let (omega_exact, j_exact, j_reg, max_abs_diff, max_rel_diff, lambda_exact, exact_failure_kind, exact_solver_failed) =
-        match exact_result {
-            Ok((oe, _, je, jr, mad, mrd, lam, failure_kind, solver_failed)) => {
-                (Some(oe), je, jr, mad, mrd, lam, failure_kind, solver_failed)
-            }
-            Err(_) => {
-                eprintln!(
-                    "[DIAG] Exact K solver failed (singular), skipping exact vs reg comparison"
-                );
-                (None, 0.0, 0.0, 0.0, 0.0, 0.0, None, true)
-            }
-        };
+    let (
+        omega_exact,
+        j_exact,
+        j_reg,
+        max_abs_diff,
+        max_rel_diff,
+        lambda_exact,
+        exact_failure_kind,
+        exact_solver_failed,
+    ) = match exact_result {
+        Ok((oe, _, je, jr, mad, mrd, lam, failure_kind, solver_failed)) => {
+            (Some(oe), je, jr, mad, mrd, lam, failure_kind, solver_failed)
+        }
+        Err(_) => {
+            eprintln!("[DIAG] Exact K solver failed (singular), skipping exact vs reg comparison");
+            (None, 0.0, 0.0, 0.0, 0.0, 0.0, None, true)
+        }
+    };
 
     if let Some(ref oe) = omega_exact {
         if exact_solver_failed {
             eprintln!("[DIAG] Exact solver failed, ignoring empty solution");
         } else {
-            let omega_dot_f_exact: f64 = oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
+            let omega_dot_f_exact: f64 =
+                oe.iter().zip(f_torsion.iter()).map(|(&a, &b)| a * b).sum();
             let je = ixx + iyy - omega_dot_f_exact;
             eprintln!(
                 "[DIAG] omega exact vs reg: max_abs_diff={:.2e}, max_rel_diff={:.2e}, J_exact={:.6e}, J_reg={:.6e}, J_diff_rel={:.2e}, lambda_exact={:.2e}",
@@ -823,9 +830,7 @@ pub fn compute_fem_warping_solution(
     };
 
     // Use exact solution if: exact solution exists, residual is finite, and residual <= threshold
-    let use_exact = omega_exact.is_some()
-        && exact_residual.is_finite()
-        && exact_residual <= 1e-8;
+    let use_exact = omega_exact.is_some() && exact_residual.is_finite() && exact_residual <= 1e-8;
 
     let (omega_final, used_exact) = if use_exact {
         eprintln!("[DIAG] Using exact (non-regularized) K solution");
@@ -842,18 +847,18 @@ pub fn compute_fem_warping_solution(
         // Reuse the solver to compute w1 = K_reg^{-1} F and w2 = K_reg^{-1} C
         let mut k_global_compressed = k_global.clone();
         k_global_compressed.compress();
-        
+
         // Solve K_reg * w1 = F and K_reg * w2 = C
         // Since omega was already solved with the regularized system, we can compute lambda
         // lambda = (C^T * w2) / (C^T * w1) where w1 = K_reg^{-1} F, w2 = K_reg^{-1} C
         // But omega = w1 - lambda * w2, so we can recover lambda if needed
         // For verification, we use the original K and compute full residual
-        
+
         // First, compute lambda for this omega using the regularized system
         // We need w1 and w2. Since we have the solver, we can solve for them.
         let mut k_reg_compressed = k_reg.clone();
         k_reg_compressed.compress();
-        
+
         // Try to create the solver for computing lambda
         let solver_reg_opt = crate::fea::DirectLagrangeSolver::with_kernel(
             crate::fea::LagrangeKernel::Skyline,
@@ -862,18 +867,25 @@ pub fn compute_fem_warping_solution(
             crate::fea::SolverOptions {
                 auto_regularize_singular: false,
             },
-        ).ok();
-        
+        )
+        .ok();
+
         let lambda_reg = if let Some(solver_reg) = solver_reg_opt {
-            let w1 = solver_reg.solve(&f_torsion).unwrap_or_else(|_| vec![0.0; n]);
+            let w1 = solver_reg
+                .solve(&f_torsion)
+                .unwrap_or_else(|_| vec![0.0; n]);
             let w2 = solver_reg.solve(&c_global).unwrap_or_else(|_| vec![0.0; n]);
             let ct_w1: f64 = c_global.iter().zip(w1.iter()).map(|(&c, &w)| c * w).sum();
             let ct_w2: f64 = c_global.iter().zip(w2.iter()).map(|(&c, &w)| c * w).sum();
-            if ct_w1.abs() > 1e-15 { ct_w2 / ct_w1 } else { 0.0 }
+            if ct_w1.abs() > 1e-15 {
+                ct_w2 / ct_w1
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
-        
+
         // Full Lagrange residual with ORIGINAL K
         let prod = k_global_compressed.matvec(&omega);
         let mut worst = 0.0f64;

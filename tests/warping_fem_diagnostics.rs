@@ -6,7 +6,9 @@
 //! Run with: cargo test --test warping_fem_diagnostics -- --nocapture
 
 use section_properties::mesh::MeshControl;
-use section_properties::plastic::warping_fem::{FemWarpingSolution, WarpingDiagnostics, compute_fem_warping_solution, diagnose_warping_fem};
+use section_properties::plastic::warping_fem::{
+    FemWarpingSolution, WarpingDiagnostics, compute_fem_warping_solution, diagnose_warping_fem,
+};
 use section_properties::section::Section;
 use section_properties::section_library::ParametricSection;
 use section_properties::section_library::steel::{AngleSection, ChannelSection, ISection};
@@ -168,29 +170,40 @@ fn exact_solver_failure_fallback() {
     let channel = ChannelSection::new(300.0, 100.0, 3.0, 6.0, 8.0, 0.0);
     let section = channel.build();
     let props = SectionProperties::from_section(&section);
-    
+
     // Run FEM warping solution - this should trigger exact solver failure and fallback
     let result = compute_fem_warping_solution(&section, &props, 0.3, MeshControl::Fine);
-    
+
     match result {
         Ok(fem) => {
             // If exact solver failed, we should fall back to regularized
             // The solution should still be valid
             assert!(fem.j > 0.0, "J should be positive");
             assert!(fem.iw >= 0.0, "Iw should be non-negative");
-            
+
             // Check that solver status is correctly tracked
             // If exact failed, used_exact_solver should be false and used_regularization true
             if !fem.used_exact_solver {
-                assert!(fem.used_regularization, "If exact solver failed, regularization should be used");
-                assert!(!fem.exact_residual.is_finite() || fem.exact_residual == 0.0, 
-                    "Exact residual should be 0 or non-finite when exact solver failed");
+                assert!(
+                    fem.used_regularization,
+                    "If exact solver failed, regularization should be used"
+                );
+                assert!(
+                    !fem.exact_residual.is_finite() || fem.exact_residual == 0.0,
+                    "Exact residual should be 0 or non-finite when exact solver failed"
+                );
             } else {
                 // Exact solver succeeded
-                assert!(!fem.used_regularization, "If exact solver succeeded, regularization should not be used");
-                assert!(fem.exact_residual.is_finite(), "Exact residual should be finite when exact solver used");
+                assert!(
+                    !fem.used_regularization,
+                    "If exact solver succeeded, regularization should not be used"
+                );
+                assert!(
+                    fem.exact_residual.is_finite(),
+                    "Exact residual should be finite when exact solver used"
+                );
             }
-            
+
             println!("Exact solver used: {}", fem.used_exact_solver);
             println!("Regularization used: {}", fem.used_regularization);
             println!("Exact residual: {:.2e}", fem.exact_residual);

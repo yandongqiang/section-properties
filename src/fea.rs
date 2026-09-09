@@ -20,11 +20,21 @@ pub const JACOBIAN_TOL: f64 = 1e-20;
 /// Tolerance for iterative solver convergence (CG, ICCG, etc.).
 pub const SOLVER_TOL: f64 = 1e-12;
 
-/// Tolerance for pivot checks in direct solvers (LDL^T, Cholesky).
-pub const PIVOT_TOL: f64 = 1e-15;
+/// Base tolerance for pivot checks in direct solvers (LDL^T, Cholesky).
+/// This is multiplied by a scale factor (matrix norm) for scale-invariant behavior.
+pub const PIVOT_TOL_BASE: f64 = 1e-15;
 
-/// Tolerance for near-zero checks in warping/stress calculations.
-pub const NEAR_ZERO_TOL: f64 = 1e-15;
+/// Base tolerance for near-zero checks in warping/stress calculations.
+/// This is multiplied by a scale factor for scale-invariant behavior.
+pub const NEAR_ZERO_TOL_BASE: f64 = 1e-15;
+
+/// @deprecated Use `PIVOT_TOL_BASE` instead. Kept for backwards compatibility.
+#[deprecated(since = "0.2.0", note = "Use PIVOT_TOL_BASE")]
+pub const PIVOT_TOL: f64 = PIVOT_TOL_BASE;
+
+/// @deprecated Use `NEAR_ZERO_TOL_BASE` instead. Kept for backwards compatibility.
+#[deprecated(since = "0.2.0", note = "Use NEAR_ZERO_TOL_BASE")]
+pub const NEAR_ZERO_TOL: f64 = NEAR_ZERO_TOL_BASE;
 
 // ---------------------------------------------------------------------------
 // Gaussian quadrature for Tri6
@@ -1403,6 +1413,14 @@ pub fn solve_lagrange(
 /// Returns `Err(FemError::SingularMatrix)` if the matrix is singular.
 pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh::fem::FemError> {
     let n = a.len();
+    // Compute matrix scale for scale-invariant tolerance
+    let mut scale = 0.0f64;
+    for i in 0..n {
+        for j in 0..n {
+            scale = scale.max(a[i][j].abs());
+        }
+    }
+    let pivot_tol = PIVOT_TOL_BASE * scale.max(1.0);
     for k in 0..n {
         // Partial pivoting
         let mut max_row = k;
@@ -1418,7 +1436,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
             b.swap(k, max_row);
         }
         let pivot = a[k][k];
-        if pivot.abs() < PIVOT_TOL {
+        if pivot.abs() < pivot_tol {
             return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         for i in (k + 1)..n {
@@ -1432,7 +1450,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
     // Back substitution
     for k in (0..n).rev() {
         let pivot = a[k][k];
-        if pivot.abs() < PIVOT_TOL {
+        if pivot.abs() < pivot_tol {
             return Err(crate::mesh::fem::FemError::SingularMatrix);
         }
         let mut sum = 0.0;
@@ -1853,9 +1871,16 @@ pub struct SkylineLdlt {
     row_start: Vec<usize>,
     /// RCM permutation: perm[new_index] = original_index.
     perm: Vec<usize>,
+    /// Scale factor for scale-invariant tolerance (max diagonal entry).
+    scale: f64,
 }
 
 impl SkylineLdlt {
+    /// Get the scale factor used for scale-invariant tolerances (max diagonal entry).
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
     pub fn factor(matrix: &SparseMatrix) -> Result<Self, crate::mesh::fem::FemError> {
         use std::collections::HashMap;
 
@@ -1945,7 +1970,8 @@ impl SkylineLdlt {
                 for j in j0..k {
                     s -= lower[rs_i + (j - first[i])] * lower[rs_k + (j - first[k])] * diag[j];
                 }
-                if diag[k].abs() < 1e-300 {
+                // Scale-invariant check: compare with max diagonal * base tolerance
+                if diag[k].abs() < diag[k].abs().max(PIVOT_TOL_BASE) * 1e-12 {
                     return Err(crate::mesh::fem::FemError::SingularMatrix);
                 }
                 lower[rs_i + (k - first[i])] = s / diag[k];
@@ -1961,6 +1987,9 @@ impl SkylineLdlt {
             diag[i] = d;
         }
 
+        // Compute scale factor for scale-invariant tolerances (max diagonal)
+        let scale = diag.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+
         Ok(Self {
             n,
             diag,
@@ -1968,6 +1997,7 @@ impl SkylineLdlt {
             lower,
             row_start,
             perm,
+            scale,
         })
     }
 
@@ -1988,9 +2018,10 @@ impl SkylineLdlt {
             }
             x[i] = s;
         }
-        // Diagonal scaling.
+        // Diagonal scaling with scale-invariant tolerance.
+        let pivot_tol = PIVOT_TOL_BASE * self.scale.max(1.0);
         for i in 0..n {
-            if self.diag[i].abs() < PIVOT_TOL {
+            if self.diag[i].abs() < pivot_tol {
                 return Err(crate::mesh::fem::FemError::SingularMatrix);
             }
             x[i] /= self.diag[i];
@@ -2025,7 +2056,9 @@ impl SkylineLdlt {
         let w2 = self.solve(c)?;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = if ct_w2.abs() > NEAR_ZERO_TOL {
+        // Scale-invariant tolerance for Lagrange multiplier computation
+        let near_zero_tol = NEAR_ZERO_TOL_BASE * self.scale.max(1.0);
+        let lambda = if ct_w2.abs() > near_zero_tol {
             ct_w1 / ct_w2
         } else {
             0.0

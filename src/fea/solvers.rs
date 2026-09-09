@@ -1,6 +1,6 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
-use super::{CgResult, CgStatus, PIVOT_TOL, SkylineLdlt, SparseMatrix, cg_solve};
+use super::{CgResult, CgStatus, PIVOT_TOL_BASE, SkylineLdlt, SparseMatrix, cg_solve};
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,7 +541,10 @@ impl SparseLu {
         // Check for NaN/Inf in RHS
         for (i, &val) in b.iter().enumerate() {
             if !val.is_finite() {
-                return Err(format!("Solve failed: RHS contains non-finite value at index {}: {}", i, val));
+                return Err(format!(
+                    "Solve failed: RHS contains non-finite value at index {}: {}",
+                    i, val
+                ));
             }
         }
         // Apply permutation: Pb
@@ -1072,10 +1075,16 @@ pub mod pardiso {
                 Ok(l) => l,
                 Err(_) => return f64::INFINITY,
             };
-            let w1 = ldlt.solve(f);
-            let w2 = ldlt.solve(c);
-            let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
-            let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
+            let w1 = ldlt.solve(f).unwrap_or_else(|_| vec![0.0; c.len()]);
+            let w2 = ldlt.solve(c).unwrap_or_else(|_| vec![0.0; c.len()]);
+            let mut ct_w2 = 0.0f64;
+            for (ci, wi) in c.iter().zip(w2.iter()) {
+                ct_w2 += ci * wi;
+            }
+            let mut ct_w1 = 0.0f64;
+            for (ci, wi) in c.iter().zip(w1.iter()) {
+                ct_w1 += ci * wi;
+            }
             let lambda = if ct_w1.abs() > NEAR_ZERO_TOL {
                 ct_w2 / ct_w1
             } else {
@@ -1149,18 +1158,16 @@ mod pardiso_tests {
         let u = s.solve_direct_lagrange(&f).expect("pardiso solve");
         assert_eq!(u.len(), n);
         // residual check
-        let mut kmat = SparseMatrix {
-            n,
-            rows: vec![],
-            cols: vec![],
-            vals: vec![],
-        };
-        kmat.rows = k.rows.clone();
-        kmat.cols = k.cols.clone();
-        kmat.vals = k.vals.clone();
-        let mut kmat2 = kmat;
-        kmat2.compress();
-        let prod = kmat2.matvec(&u);
+        let mut kmat = SparseMatrix::new(n);
+        for i in 0..n {
+            kmat.add(i, i, 2.0);
+            if i + 1 < n {
+                kmat.add(i, i + 1, -1.0);
+                kmat.add(i + 1, i, -1.0);
+            }
+        }
+        kmat.compress();
+        let prod = kmat.matvec(&u);
         for i in 0..n {
             assert!(
                 (prod[i] - f[i] + c[i]).abs() < 1e-6 || (prod[i] - f[i]).abs() < 1e-6,
