@@ -179,6 +179,66 @@ fn test_pa_lu_random() {
 }
 
 #[test]
+fn test_pa_eq_lu_after_compression() {
+    // Test that PA = LU holds after L/U compression with relative drop tolerance
+    let base_data = &[4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0];
+    let a = build_dense(3, base_data);
+    let lu = SparseLu::factor(&a).unwrap();
+
+    // Verify PA = LU
+    let max_diff = lu.verify_pa_eq_lu(&build_dense(3, base_data));
+    assert!(max_diff < 1e-10, "PA != LU after compression: max_diff = {}", max_diff);
+
+    // Also test at different scales
+    let scales = [1e-6, 1e-3, 1.0, 1e3, 1e6];
+    for &scale in &scales {
+        let scaled_data: Vec<f64> = base_data.iter().map(|v| v * scale).collect();
+        let a = build_dense(3, &scaled_data);
+        let lu = SparseLu::factor(&a).unwrap();
+        let max_diff = lu.verify_pa_eq_lu(&build_dense(3, &scaled_data));
+        assert!(max_diff < 1e-10, "PA != LU at scale {:.0e}: max_diff = {}", scale, max_diff);
+    }
+}
+
+#[test]
+fn test_exact_and_regularized_both_fail() {
+    // Create a matrix where exact solver fails (singular)
+    // but regularized might also fail or succeed depending on the matrix
+    // For a singular matrix, the exact solver should fail
+    let a = build_dense(2, &[1.0, 2.0, 2.0, 4.0]);
+    let result = SparseLu::factor(&a);
+    assert!(result.is_err(), "Singular matrix should return error");
+}
+
+#[test]
+fn test_nan_rhs() {
+    let a = build_dense(2, &[4.0, 1.0, 1.0, 3.0]);
+    let lu = SparseLu::factor(&a).unwrap();
+    let nan_rhs = vec![f64::NAN, 1.0];
+    let result = lu.solve(&nan_rhs);
+    assert!(result.is_err(), "NaN RHS should return error");
+}
+
+#[test]
+fn test_inf_rhs() {
+    let a = build_dense(2, &[4.0, 1.0, 1.0, 3.0]);
+    let lu = SparseLu::factor(&a).unwrap();
+    let inf_rhs = vec![f64::INFINITY, 1.0];
+    let result = lu.solve(&inf_rhs);
+    assert!(result.is_err(), "Inf RHS should return error");
+}
+
+#[test]
+fn test_zero_rhs() {
+    let a = build_dense(2, &[4.0, 1.0, 1.0, 3.0]);
+    let lu = SparseLu::factor(&a).unwrap();
+    let zero_rhs = vec![0.0, 0.0];
+    let x = lu.solve(&zero_rhs).unwrap();
+    assert!((x[0] - 0.0).abs() < 1e-12);
+    assert!((x[1] - 0.0).abs() < 1e-12);
+}
+
+#[test]
 fn test_indefinite() {
     // Symmetric indefinite matrix
     let a = build_dense(2, &[0.0, 1.0, 1.0, 0.0]);

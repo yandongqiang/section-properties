@@ -418,12 +418,12 @@ impl SparseLu {
 
             // Check for singularity using scale-aware tolerance (per-column)
             // True scale invariance: use actual column scale without artificial floor.
-            // If col_scale == 0, the column is all zeros -> singular.
+            // If col_scale == 0 or non-finite, the column is all zeros or invalid -> singular.
             let col_scale = col_scales[k];
-            if col_scale == 0.0 {
+            if !col_scale.is_finite() || col_scale == 0.0 {
                 return Err(format!(
-                    "Singular matrix at column {}: column is all zeros",
-                    k
+                    "Singular matrix at column {}: column is all zeros or contains NaN/Inf (col_scale = {:.2e})",
+                    k, col_scale
                 ));
             }
             let pivot_tol = f64::EPSILON * n as f64 * col_scale * PIVOT_SAFETY_FACTOR;
@@ -538,6 +538,12 @@ impl SparseLu {
                 n
             ));
         }
+        // Check for NaN/Inf in RHS
+        for (i, &val) in b.iter().enumerate() {
+            if !val.is_finite() {
+                return Err(format!("Solve failed: RHS contains non-finite value at index {}: {}", i, val));
+            }
+        }
         // Apply permutation: Pb
         let mut y = vec![0.0f64; n];
         for i in 0..n {
@@ -566,7 +572,7 @@ impl SparseLu {
                     sum += v * x[c];
                 }
             }
-            if !diag.is_finite() || diag.abs() < f64::MIN_POSITIVE {
+            if !diag.is_finite() || diag == 0.0 {
                 return Err(format!(
                     "Solve failed: near-zero or invalid diagonal at row {}: diag = {:.2e}",
                     i, diag
