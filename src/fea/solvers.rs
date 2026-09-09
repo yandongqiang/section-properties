@@ -888,6 +888,10 @@ pub mod pardiso {
         ja: Vec<i32>,
         vals: Vec<f64>,
         factorised: bool,
+        /// Constraint vector c for Lagrange multiplier computation.
+        c: Vec<f64>,
+        /// Scale factor for scale-invariant tolerances (max diagonal entry of leading block).
+        scale: f64,
     }
 
     unsafe impl Send for PardisoSolver {}
@@ -895,8 +899,19 @@ pub mod pardiso {
     impl PardisoSolver {
         pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, String> {
             let csc = super::super::DirectLagrangeSolver::assemble_torsion_lagrange(k, c);
+            let n = csc.n_rows - 1; // leading block size
+            
+            // Compute scale from leading block K (max diagonal)
+            let mut scale = 0.0f64;
+            let mut k_compressed = k.clone();
+            k_compressed.compress();
+            for i in 0..n {
+                scale = scale.max(k_compressed.matvec_diag(i).abs());
+            }
+            let scale = scale.max(1.0);
+            
             let mut s = Self {
-                n: csc.n_rows,
+                n,
                 pt: vec![0u64; 64],
                 iparm: vec![0i32; 64],
                 csc,
@@ -904,6 +919,8 @@ pub mod pardiso {
                 ja: Vec::new(),
                 vals: Vec::new(),
                 factorised: false,
+                c: c.to_vec(),
+                scale,
             };
             unsafe {
                 let mut err: i32 = 0;
@@ -1085,7 +1102,9 @@ pub mod pardiso {
             for (ci, wi) in c.iter().zip(w1.iter()) {
                 ct_w1 += ci * wi;
             }
-            let lambda = if ct_w1.abs() > NEAR_ZERO_TOL {
+            // Scale-invariant tolerance for Lagrange multiplier
+            let near_zero_tol = NEAR_ZERO_TOL_BASE * self.scale.max(1.0);
+            let lambda = if ct_w1.abs() > near_zero_tol {
                 ct_w2 / ct_w1
             } else {
                 0.0

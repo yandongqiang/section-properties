@@ -1961,6 +1961,25 @@ impl SkylineLdlt {
         }
 
         // In-place Crout LDL^T factorisation.
+        // First pass: compute diagonal scale for scale-invariant pivot tolerance
+        let mut diag_for_scale = vec![0.0f64; n];
+        for i in 0..n {
+            let mut d = 0.0;
+            for k in first[i]..i {
+                let l_ik = 0.0; // L not yet computed, but we only need diag for scale
+            }
+            // We need a preliminary diagonal. Use matrix diagonal as approximation.
+            // The actual diagonal will be computed during factorization.
+            diag_for_scale[i] = 1.0; // placeholder, will use actual scale later
+        }
+        // Use matrix Frobenius norm as scale proxy for pivot tolerance
+        let mut matrix_scale = 0.0f64;
+        for (&(r, c), &v) in map.iter() {
+            matrix_scale = matrix_scale.max(v.abs());
+        }
+        let pivot_tol = PIVOT_TOL_BASE * matrix_scale.max(1.0);
+
+        // In-place Crout LDL^T factorisation.
         for i in 0..n {
             let rs_i = row_start[i];
             for k in first[i]..i {
@@ -1970,8 +1989,8 @@ impl SkylineLdlt {
                 for j in j0..k {
                     s -= lower[rs_i + (j - first[i])] * lower[rs_k + (j - first[k])] * diag[j];
                 }
-                // Scale-invariant check: compare with max diagonal * base tolerance
-                if diag[k].abs() < diag[k].abs().max(PIVOT_TOL_BASE) * 1e-12 {
+                // Scale-invariant pivot check
+                if diag[k].abs() < pivot_tol {
                     return Err(crate::mesh::fem::FemError::SingularMatrix);
                 }
                 lower[rs_i + (k - first[i])] = s / diag[k];
