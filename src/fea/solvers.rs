@@ -840,7 +840,7 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
 pub mod pardiso {
     //! Direct solve via Intel MKL PARDISO (`mkl_rt`). Enable with
     //! `--features pardiso`; requires `mkl_rt.3.dll` (or equivalent) on PATH.
-    use super::super::{CscMatrix, NEAR_ZERO_TOL, SkylineLdlt, SparseMatrix};
+    use super::super::{CscMatrix, NEAR_ZERO_TOL, NEAR_ZERO_TOL_BASE, SkylineLdlt, SparseMatrix};
     use std::os::raw::c_void;
 
     #[link(name = "mkl_rt.2", kind = "raw-dylib")]
@@ -880,6 +880,9 @@ pub mod pardiso {
 
     /// PARDISO-backed direct solver for the augmented Lagrangian system.
     pub struct PardisoSolver {
+        /// Leading block size (K is leading_n x leading_n)
+        leading_n: usize,
+        /// Augmented matrix size (leading_n + 1)
         n: usize,
         pt: Vec<u64>,
         iparm: Vec<i32>,
@@ -899,18 +902,20 @@ pub mod pardiso {
     impl PardisoSolver {
         pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, String> {
             let csc = super::super::DirectLagrangeSolver::assemble_torsion_lagrange(k, c);
-            let n = csc.n_rows - 1; // leading block size
+            let leading_n = csc.n_rows - 1; // leading block size
+            let n = leading_n + 1; // augmented matrix size
             
             // Compute scale from leading block K (max diagonal)
             let mut scale = 0.0f64;
             let mut k_compressed = k.clone();
             k_compressed.compress();
-            for i in 0..n {
+            for i in 0..leading_n {
                 scale = scale.max(k_compressed.matvec_diag(i).abs());
             }
             let scale = scale.max(1.0);
             
             let mut s = Self {
+                leading_n,
                 n,
                 pt: vec![0u64; 64],
                 iparm: vec![0i32; 64],
@@ -987,15 +992,15 @@ pub mod pardiso {
         /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns (u, lam).
         pub fn solve_with_multiplier(&mut self, f: &[f64]) -> Result<(Vec<f64>, f64), String> {
             self.ensure_factorised()?;
-            let n = self.n;
+            let n = self.n; // augmented matrix size
             let mut b = f.to_vec();
-            b.push(0.0);
-            let mut x = vec![0.0f64; n + 1];
+            b.push(0.0); // size becomes n
+            let mut x = vec![0.0f64; n];
 
             unsafe {
                 let mut err: i32 = 0;
                 let phase: i32 = 33; // solve + iterative refinement
-                let nn = (n + 1) as i32;
+                let nn = n as i32; // pass augmented size directly
                 let nrhs: i32 = 1;
                 let msglvl: i32 = 0;
                 pardiso(
@@ -1028,15 +1033,15 @@ pub mod pardiso {
         /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns u.
         pub fn solve_direct_lagrange(&mut self, f: &[f64]) -> Result<Vec<f64>, String> {
             self.ensure_factorised()?;
-            let n = self.n;
+            let n = self.n; // augmented matrix size
             let mut b = f.to_vec();
-            b.push(0.0);
-            let mut x = vec![0.0f64; n + 1];
+            b.push(0.0); // size becomes n
+            let mut x = vec![0.0f64; n];
 
             unsafe {
                 let mut err: i32 = 0;
                 let phase: i32 = 33; // solve + iterative refinement
-                let nn = (n + 1) as i32;
+                let nn = n as i32;
                 let nrhs: i32 = 1;
                 let msglvl: i32 = 0;
                 pardiso(
@@ -1073,13 +1078,13 @@ pub mod pardiso {
             // the skyline implementation by refactoring K once more.
             let ldlt = match SkylineLdlt::factor(&{
                 let m = {
-                    // leading block from CSC columns 0..n
-                    let n = self.n;
-                    let mut sm = SparseMatrix::new(n);
-                    for col in 0..n {
+                    // leading block from CSC columns 0..leading_n
+                    let leading_n = self.leading_n;
+                    let mut sm = SparseMatrix::new(leading_n);
+                    for col in 0..leading_n {
                         for k in self.csc.col_ptr[col]..self.csc.col_ptr[col + 1] {
                             let r = self.csc.rows[k];
-                            if r < n && col < n {
+                            if r < leading_n && col < leading_n {
                                 sm.add(r, col, self.csc.vals[k]);
                             }
                         }
