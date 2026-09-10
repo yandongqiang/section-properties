@@ -357,7 +357,7 @@ impl BeamElement {
         let f_theta_j_moment = mz * (3.0 * xi2 - 2.0 * xi3);
 
         let xi2 = xi * xi;
-        let xi3 = xi2 * xi;
+        let _xi3 = xi2 * xi;
 
         Ok([
             f_u_i,                           // u_i: axial
@@ -1021,7 +1021,7 @@ impl BeamSolver {
                 free_dofs.push(i);
                 free_to_global.push(i);
             } else {
-                let constrained_idx = constrained_dofs.len();
+                let _constrained_idx = constrained_dofs.len();
                 constrained_dofs.push(i);
                 constrained_values.push(prescribed[i].unwrap_or(0.0));
             }
@@ -1200,6 +1200,7 @@ impl BeamSolver {
     /// Returns a vector of 6 forces per element in local coordinates:
     /// [N_i, V_i, M_i, N_j, V_j, M_j]
     /// where N = axial force (positive = tension), V = shear force (positive = upward), M = moment (positive = CCW)
+    /// These are INTERNAL forces (forces the element applies to nodes, excluding equivalent nodal forces from applied loads on the element)
     pub fn element_end_forces(&self) -> Vec<[f64; 6]> {
         let mut results = Vec::new();
         
@@ -1238,29 +1239,83 @@ impl BeamSolver {
             // Get local stiffness matrix
             let k_local = element.local_stiffness(node_i, node_j);
             
-            // Compute local forces: f_local = K_local * u_local
-            let mut f_local = [0.0; 6];
+            // Compute local stiffness forces: f_stiffness = K_local * u_local
+            let mut f_stiffness = [0.0; 6];
             for i in 0..6 {
                 for j in 0..6 {
-                    f_local[i] += k_local[i][j] * u_local[j];
+                    f_stiffness[i] += k_local[i][j] * u_local[j];
                 }
             }
             
-            // Element end forces: forces applied by element on nodes (positive tension, positive shear upward, positive moment CCW)
-            // f_local = K_local * u_local gives forces applied BY element ON nodes
+            // Compute equivalent nodal forces from applied loads on this element
+            let f_equiv = Self::element_equivalent_nodal_forces(&self.model, element, node_i, node_j);
+            
+            // Element end forces (INTERNAL): f_internal = f_stiffness - f_equiv
+            // For moments (indices 2, 5), internal moment sign convention is opposite: M_internal = f_equiv - f_stiffness
             let end_forces = [
-                f_local[0],  // N_i: axial at node i (tension positive)
-                f_local[1],  // V_i: shear at node i (upward positive)
-                f_local[2],  // M_i: moment at node i (CCW positive)
-                f_local[3],  // N_j: axial at node j (tension positive)
-                f_local[4],  // V_j: shear at node j (upward positive)
-                f_local[5],  // M_j: moment at node j (CCW positive)
+                f_stiffness[0] - f_equiv[0],  // N_i: axial at node i (tension positive)
+                f_stiffness[1] - f_equiv[1],  // V_i: shear at node i (upward positive)
+                f_equiv[2] - f_stiffness[2],  // M_i: moment at node i (CCW positive, internal = f_equiv - f_stiffness)
+                f_stiffness[3] - f_equiv[3],  // N_j: axial at node j (tension positive)
+                f_stiffness[4] - f_equiv[4],  // V_j: shear at node j (upward positive)
+                f_equiv[5] - f_stiffness[5],  // M_j: moment at node j (CCW positive, internal = f_equiv - f_stiffness)
             ];
             
             results.push(end_forces);
         }
         
         results
+    }
+    
+    /// Compute equivalent nodal forces (in LOCAL coordinates) for an element from DISTRIBUTED and POINT loads
+    /// (NOT including applied moments at nodes, which are external concentrated loads)
+    /// Returns [N_i, V_i, M_i, N_j, V_j, M_j] in local coordinates
+    fn element_equivalent_nodal_forces(
+        model: &BeamModel,
+        element: &BeamElement,
+        node_i: Point,
+        node_j: Point,
+    ) -> [f64; 6] {
+        let mut f_equiv = [0.0; 6];
+        let elem_idx = model.elements.iter().position(|e| std::ptr::eq(e, element)).unwrap();
+        
+        // Distributed loads on this element
+        for dl in &model.distributed_loads {
+            if dl.element_idx == elem_idx {
+                let L = element.length(node_i, node_j);
+                // Consistent nodal load for uniform distributed load in LOCAL coordinates
+                // f_u_i = qx * L / 2, f_u_j = qx * L / 2
+                // f_v_i = qy * L / 2, f_theta_i = qy * L^2 / 12
+                // f_v_j = qy * L / 2, f_theta_j = -qy * L^2 / 12
+                let qx = dl.qx;
+                let qy = dl.qy;
+                let qx_L2 = qx * L / 2.0;
+                let qy_L2 = qy * L / 2.0;
+                let qy_L2_12 = qy * L * L / 12.0;
+                
+                f_equiv[0] += qx_L2;     // N_i
+                f_equiv[1] += qy_L2;     // V_i
+                f_equiv[2] += qy_L2_12;  // M_i (CCW positive)
+                f_equiv[3] += qx_L2;     // N_j
+                f_equiv[4] += qy_L2;     // V_j
+                f_equiv[5] -= qy_L2_12;  // M_j (CW negative for qy > 0 upward)
+            }
+        }
+        
+        // Point loads on this element
+        for pl in &model.point_loads {
+            if pl.element_idx == elem_idx {
+                let f_local = element.consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz).unwrap_or([0.0; 6]);
+                for i in 0..6 {
+                    f_equiv[i] += f_local[i];
+                }
+            }
+        }
+        
+        // NOTE: Applied moments at nodes are EXTERNAL concentrated loads, NOT equivalent nodal forces from element loads.
+        // They are handled in the global force vector and reaction computation, not as equivalent nodal forces.
+        
+        f_equiv
     }
 
     /// Compute element end forces in GLOBAL coordinates
@@ -1317,7 +1372,7 @@ pub struct BeamAnalysis;
 
 impl BeamAnalysis {
     /// Analyze a cantilever beam with tip load
-    pub fn cantilever_tip_load(L: f64, E: f64, A: f64, I: f64, P: f64) -> (f64, f64, f64) {
+    pub fn cantilever_tip_load(L: f64, E: f64, _A: f64, I: f64, P: f64) -> (f64, f64, f64) {
         // Analytical solutions for cantilever with tip load P at free end
         // Fixed at x=0, load P downward (transverse) at x=L
         let u_tip = 0.0; // No axial displacement for transverse load
