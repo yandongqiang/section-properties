@@ -3,7 +3,11 @@
 //! Implements a 2D frame/beam element with 3 DOF per node: [u, v, θ]
 //! where u = axial displacement, v = transverse displacement, θ = rotation.
 //!
-//! The element has 6 DOF total: [u_i, v_i, θ_i, u_j, v_j, θ_j]
+//! The element has 6 DOF total: [u_i, v_j, θ_i, u_j, v_j, θ_j]
+//!
+//! Uses engineering-mnemonic local variable names (`L`, `E`, `A`, `I`, `P`,
+//! `T`, `N1`..`N4`, etc.) throughout, so `non_snake_case` is allowed here.
+#![allow(non_snake_case)]
 
 use crate::fea::{
     SparseMatrix,
@@ -360,12 +364,12 @@ impl BeamElement {
         let _xi3 = xi2 * xi;
 
         Ok([
-            f_u_i,                           // u_i: axial
-            f_v_i + f_v_i_moment,            // v_i: transverse + moment
-            f_theta_i + f_theta_i_moment,    // θ_i: rotation + moment
-            f_u_j,                           // u_j: axial
-            f_v_j + f_v_j_moment,            // v_j: transverse + moment
-            f_theta_j + f_theta_j_moment,    // θ_j: rotation + moment
+            f_u_i,                        // u_i: axial
+            f_v_i + f_v_i_moment,         // v_i: transverse + moment
+            f_theta_i + f_theta_i_moment, // θ_i: rotation + moment
+            f_u_j,                        // u_j: axial
+            f_v_j + f_v_j_moment,         // v_j: transverse + moment
+            f_theta_j + f_theta_j_moment, // θ_j: rotation + moment
         ])
     }
 }
@@ -694,11 +698,7 @@ impl BeamModel {
     }
 
     /// Add an applied moment at a node (in GLOBAL coordinates)
-    pub fn add_applied_moment(
-        &mut self,
-        node_idx: usize,
-        value: f64,
-    ) -> Result<(), FemError> {
+    pub fn add_applied_moment(&mut self, node_idx: usize, value: f64) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
             return Err(FemError::InvalidInput(format!(
                 "Invalid node index: {} (max: {})",
@@ -919,7 +919,14 @@ impl BeamSolver {
             }
 
             // Compute consistent nodal load in local coordinates
-            let f_local = element.consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz)?;
+            let f_local = element.consistent_nodal_load_point(
+                node_i,
+                node_j,
+                pl.position,
+                pl.fx,
+                pl.fy,
+                pl.mz,
+            )?;
 
             // Get transformation matrix
             let T = element.transformation_matrix(node_i, node_j);
@@ -1094,6 +1101,7 @@ impl BeamSolver {
         )
     }
 
+    #[allow(dead_code)]
     fn find_diagonal_index(&self, matrix: &SparseMatrix, row: usize) -> Option<usize> {
         let row_ptr = matrix.row_ptr();
         let csr_cols = matrix.csr_cols();
@@ -1203,11 +1211,11 @@ impl BeamSolver {
     /// These are INTERNAL forces (forces the element applies to nodes, excluding equivalent nodal forces from applied loads on the element)
     pub fn element_end_forces(&self) -> Vec<[f64; 6]> {
         let mut results = Vec::new();
-        
+
         for element in &self.model.elements {
             let node_i = self.model.nodes[element.node_i].point();
             let node_j = self.model.nodes[element.node_j].point();
-            
+
             // Get element displacement in global coordinates
             let dof_map = [
                 self.model.dof_index(element.node_i, 0), // u_i
@@ -1217,7 +1225,7 @@ impl BeamSolver {
                 self.model.dof_index(element.node_j, 1), // v_j
                 self.model.dof_index(element.node_j, 2), // θ_j
             ];
-            
+
             let u_global_elem = [
                 self.u_global[dof_map[0]],
                 self.u_global[dof_map[1]],
@@ -1226,7 +1234,7 @@ impl BeamSolver {
                 self.u_global[dof_map[4]],
                 self.u_global[dof_map[5]],
             ];
-            
+
             // Transform global displacements to local: u_local = T * u_global
             let T = element.transformation_matrix(node_i, node_j);
             let mut u_local = [0.0; 6];
@@ -1235,10 +1243,10 @@ impl BeamSolver {
                     u_local[i] += T[i][j] * u_global_elem[j];
                 }
             }
-            
+
             // Get local stiffness matrix
             let k_local = element.local_stiffness(node_i, node_j);
-            
+
             // Compute local stiffness forces: f_stiffness = K_local * u_local
             let mut f_stiffness = [0.0; 6];
             for i in 0..6 {
@@ -1246,27 +1254,28 @@ impl BeamSolver {
                     f_stiffness[i] += k_local[i][j] * u_local[j];
                 }
             }
-            
+
             // Compute equivalent nodal forces from applied loads on this element
-            let f_equiv = Self::element_equivalent_nodal_forces(&self.model, element, node_i, node_j);
-            
+            let f_equiv =
+                Self::element_equivalent_nodal_forces(&self.model, element, node_i, node_j);
+
             // Element end forces (INTERNAL): f_internal = f_stiffness - f_equiv
             // For moments (indices 2, 5), internal moment sign convention is opposite: M_internal = f_equiv - f_stiffness
             let end_forces = [
-                f_stiffness[0] - f_equiv[0],  // N_i: axial at node i (tension positive)
-                f_stiffness[1] - f_equiv[1],  // V_i: shear at node i (upward positive)
-                f_equiv[2] - f_stiffness[2],  // M_i: moment at node i (CCW positive, internal = f_equiv - f_stiffness)
-                f_stiffness[3] - f_equiv[3],  // N_j: axial at node j (tension positive)
-                f_stiffness[4] - f_equiv[4],  // V_j: shear at node j (upward positive)
-                f_equiv[5] - f_stiffness[5],  // M_j: moment at node j (CCW positive, internal = f_equiv - f_stiffness)
+                f_stiffness[0] - f_equiv[0], // N_i: axial at node i (tension positive)
+                f_stiffness[1] - f_equiv[1], // V_i: shear at node i (upward positive)
+                f_equiv[2] - f_stiffness[2], // M_i: moment at node i (CCW positive, internal = f_equiv - f_stiffness)
+                f_stiffness[3] - f_equiv[3], // N_j: axial at node j (tension positive)
+                f_stiffness[4] - f_equiv[4], // V_j: shear at node j (upward positive)
+                f_equiv[5] - f_stiffness[5], // M_j: moment at node j (CCW positive, internal = f_equiv - f_stiffness)
             ];
-            
+
             results.push(end_forces);
         }
-        
+
         results
     }
-    
+
     /// Compute equivalent nodal forces (in LOCAL coordinates) for an element from DISTRIBUTED and POINT loads
     /// (NOT including applied moments at nodes, which are external concentrated loads)
     /// Returns [N_i, V_i, M_i, N_j, V_j, M_j] in local coordinates
@@ -1277,8 +1286,12 @@ impl BeamSolver {
         node_j: Point,
     ) -> [f64; 6] {
         let mut f_equiv = [0.0; 6];
-        let elem_idx = model.elements.iter().position(|e| std::ptr::eq(e, element)).unwrap();
-        
+        let elem_idx = model
+            .elements
+            .iter()
+            .position(|e| std::ptr::eq(e, element))
+            .unwrap();
+
         // Distributed loads on this element
         for dl in &model.distributed_loads {
             if dl.element_idx == elem_idx {
@@ -1292,29 +1305,31 @@ impl BeamSolver {
                 let qx_L2 = qx * L / 2.0;
                 let qy_L2 = qy * L / 2.0;
                 let qy_L2_12 = qy * L * L / 12.0;
-                
-                f_equiv[0] += qx_L2;     // N_i
-                f_equiv[1] += qy_L2;     // V_i
-                f_equiv[2] += qy_L2_12;  // M_i (CCW positive)
-                f_equiv[3] += qx_L2;     // N_j
-                f_equiv[4] += qy_L2;     // V_j
-                f_equiv[5] -= qy_L2_12;  // M_j (CW negative for qy > 0 upward)
+
+                f_equiv[0] += qx_L2; // N_i
+                f_equiv[1] += qy_L2; // V_i
+                f_equiv[2] += qy_L2_12; // M_i (CCW positive)
+                f_equiv[3] += qx_L2; // N_j
+                f_equiv[4] += qy_L2; // V_j
+                f_equiv[5] -= qy_L2_12; // M_j (CW negative for qy > 0 upward)
             }
         }
-        
+
         // Point loads on this element
         for pl in &model.point_loads {
             if pl.element_idx == elem_idx {
-                let f_local = element.consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz).unwrap_or([0.0; 6]);
+                let f_local = element
+                    .consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz)
+                    .unwrap_or([0.0; 6]);
                 for i in 0..6 {
                     f_equiv[i] += f_local[i];
                 }
             }
         }
-        
+
         // NOTE: Applied moments at nodes are EXTERNAL concentrated loads, NOT equivalent nodal forces from element loads.
         // They are handled in the global force vector and reaction computation, not as equivalent nodal forces.
-        
+
         f_equiv
     }
 
@@ -1325,14 +1340,14 @@ impl BeamSolver {
     pub fn element_end_forces_global(&self) -> Vec<[f64; 6]> {
         let local_forces = self.element_end_forces();
         let mut results = Vec::new();
-        
+
         for (idx, forces) in local_forces.iter().enumerate() {
             let element = &self.model.elements[idx];
             let node_i = self.model.nodes[element.node_i].point();
             let node_j = self.model.nodes[element.node_j].point();
-            
+
             let T = element.transformation_matrix(node_i, node_j);
-            
+
             // Transform local forces to global: f_global = T^T * f_local
             let mut f_global_elem = [0.0; 6];
             for i in 0..6 {
@@ -1340,10 +1355,10 @@ impl BeamSolver {
                     f_global_elem[i] += T[j][i] * forces[j];
                 }
             }
-            
+
             results.push(f_global_elem);
         }
-        
+
         results
     }
 }
