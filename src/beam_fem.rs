@@ -5,9 +5,12 @@
 //!
 //! The element has 6 DOF total: [u_i, v_i, θ_i, u_j, v_j, θ_j]
 
-use crate::material::Material;
-use crate::fea::{SparseMatrix, solver::{LinearSolver, SolverError}};
+use crate::fea::{
+    SparseMatrix,
+    solver::{LinearSolver, SolverError},
+};
 use crate::geometry::Point;
+use crate::material::Material;
 
 /// Beam cross-section properties for 2D Euler-Bernoulli beam
 #[derive(Debug, Clone, Copy)]
@@ -40,7 +43,8 @@ impl BeamSection {
 
     /// Create from a circular hollow section
     pub fn circle_hollow(outer_radius: f64, inner_radius: f64) -> Self {
-        let area = std::f64::consts::PI * (outer_radius * outer_radius - inner_radius * inner_radius);
+        let area =
+            std::f64::consts::PI * (outer_radius * outer_radius - inner_radius * inner_radius);
         let i = std::f64::consts::PI * (outer_radius.powi(4) - inner_radius.powi(4)) / 4.0;
         Self { area, i }
     }
@@ -61,13 +65,23 @@ pub struct BeamElement {
 
 impl BeamElement {
     /// Create a new beam element
-    pub fn new(node_i: usize, node_j: usize, material: Material, section: BeamSection) -> Self {
-        Self {
+    pub fn new(
+        node_i: usize,
+        node_j: usize,
+        material: Material,
+        section: BeamSection,
+    ) -> Result<Self, FemError> {
+        if node_i == node_j {
+            return Err(FemError::InvalidModel(
+                "Beam element cannot have same start and end node".to_string(),
+            ));
+        }
+        Ok(Self {
             node_i,
             node_j,
             material,
             section,
-        }
+        })
     }
 
     /// Get element length from node coordinates
@@ -230,10 +244,12 @@ pub struct BeamModel {
     pub nodes: Vec<BeamNode>,
     /// Elements
     pub elements: Vec<BeamElement>,
-    /// Nodal forces: (node_id, dof, value)
+    /// Nodal forces: (node_idx, dof, value)
     /// dof: 0=u, 1=v, 2=θ
+    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub nodal_forces: Vec<(usize, usize, f64)>,
-    /// Fixed DOFs: (node_id, dof, value) - value is usually 0.0 for fixed
+    /// Fixed DOFs: (node_idx, dof, value) - value is the prescribed displacement (usually 0.0)
+    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fixed_dofs: Vec<(usize, usize, f64)>,
 }
 
@@ -257,21 +273,24 @@ impl BeamModel {
 
     /// Add nodal force
     /// dof: 0=u, 1=v, 2=θ
-    pub fn add_nodal_force(&mut self, node_id: usize, dof: usize, value: f64) {
-        self.nodal_forces.push((node_id, dof, value));
+    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    pub fn add_nodal_force(&mut self, node_idx: usize, dof: usize, value: f64) {
+        self.nodal_forces.push((node_idx, dof, value));
     }
 
-    /// Fix a DOF (usually to 0.0)
+    /// Fix a DOF to a prescribed value
     /// dof: 0=u, 1=v, 2=θ
-    pub fn fix_dof(&mut self, node_id: usize, dof: usize, value: f64) {
-        self.fixed_dofs.push((node_id, dof, value));
+    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    pub fn fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) {
+        self.fixed_dofs.push((node_idx, dof, value));
     }
 
     /// Fix a node completely (all 3 DOFs to 0)
-    pub fn fix_node(&mut self, node_id: usize) {
-        self.fix_dof(node_id, 0, 0.0);
-        self.fix_dof(node_id, 1, 0.0);
-        self.fix_dof(node_id, 2, 0.0);
+    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    pub fn fix_node(&mut self, node_idx: usize) {
+        self.fix_dof(node_idx, 0, 0.0);
+        self.fix_dof(node_idx, 1, 0.0);
+        self.fix_dof(node_idx, 2, 0.0);
     }
 
     /// Get total number of DOFs
@@ -279,9 +298,13 @@ impl BeamModel {
         self.nodes.len() * 3
     }
 
-    /// Map (node_id, dof) to global DOF index
-    pub fn dof_index(&self, node_id: usize, dof: usize) -> usize {
-        node_id * 3 + dof
+    /// Map (node_idx, dof) to global DOF index
+    ///
+    /// Note: node_idx must be the index in the nodes Vec (0, 1, 2, ...).
+    /// This is NOT an arbitrary user-defined ID. Node IDs are implicitly their
+    /// position in the nodes vector.
+    pub fn dof_index(&self, node_idx: usize, dof: usize) -> usize {
+        node_idx * 3 + dof
     }
 }
 
@@ -293,8 +316,10 @@ pub struct BeamSolver {
     f_global: Vec<f64>,
     /// Displacement solution
     u_global: Vec<f64>,
-    /// Fixed DOFs
+    /// Fixed DOFs (true if constrained)
     fixed_dofs: Vec<bool>,
+    /// Prescribed values for constrained DOFs (None = 0.0, Some(value) = prescribed)
+    prescribed_values: Vec<Option<f64>>,
     /// Original stiffness matrix (for reaction computation)
     k_original: SparseMatrix,
     /// Number of DOFs
@@ -319,6 +344,23 @@ impl BeamSolver {
             let node_i = model.nodes[element.node_i].point();
             let node_j = model.nodes[element.node_j].point();
 
+            // Check for zero-length beam
+            let dx = node_j.x - node_i.x;
+            let dy = node_j.y - node_i.y;
+            let L = (dx * dx + dy * dy).sqrt();
+            if L <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Beam element {} has zero or negative length (nodes {} and {} at same position)",
+                    model
+                        .elements
+                        .iter()
+                        .position(|e| e.node_i == element.node_i && e.node_j == element.node_j)
+                        .unwrap_or(0),
+                    element.node_i,
+                    element.node_j
+                )));
+            }
+
             let k_global_elem = element.global_stiffness(node_i, node_j);
 
             // Map element DOFs to global DOFs
@@ -335,9 +377,7 @@ impl BeamSolver {
             for a in 0..6 {
                 for b in 0..6 {
                     let val = k_global_elem[a][b];
-                    if val.abs() > 1e-15 {
-                        k_global.add(dof_map[a], dof_map[b], val);
-                    }
+                    k_global.add(dof_map[a], dof_map[b], val);
                 }
             }
         }
@@ -351,12 +391,14 @@ impl BeamSolver {
             }
         }
 
-        // Fixed DOFs
+        // Fixed DOFs and prescribed values
         let mut fixed_dofs = vec![false; n_dof];
-        for (node_id, dof, _) in &model.fixed_dofs {
+        let mut prescribed_values = vec![None; n_dof];
+        for (node_id, dof, value) in &model.fixed_dofs {
             if *node_id < model.nodes.len() && *dof < 3 {
                 let idx = model.dof_index(*node_id, *dof);
                 fixed_dofs[idx] = true;
+                prescribed_values[idx] = Some(*value);
             }
         }
 
@@ -368,20 +410,26 @@ impl BeamSolver {
             f_global,
             u_global: vec![0.0; n_dof],
             fixed_dofs,
+            prescribed_values,
             k_original,
             n_dof,
             model: model.clone(),
         })
     }
 
-/// Apply boundary conditions using static condensation (exact enforcement)
-    /// Returns (reduced stiffness matrix, reduced force vector, free_to_global mapping)
-    fn apply_boundary_conditions(&self) -> (SparseMatrix, Vec<f64>, Vec<usize>) {
+    /// Apply boundary conditions using static condensation (exact enforcement)
+    /// Returns (reduced stiffness matrix, reduced force vector, free_to_global mapping, constrained_indices, constrained_values)
+    fn apply_boundary_conditions(
+        &self,
+    ) -> (SparseMatrix, Vec<f64>, Vec<usize>, Vec<usize>, Vec<f64>) {
         let n = self.n_dof;
         let fixed = &self.fixed_dofs;
+        let prescribed = &self.prescribed_values;
 
-        // Identify free DOFs
+        // Identify free and constrained DOFs
         let mut free_dofs = Vec::new();
+        let mut constrained_dofs = Vec::new();
+        let mut constrained_values = Vec::new();
         let mut free_to_global = Vec::new();
         let mut global_to_free = vec![None; n];
 
@@ -390,24 +438,35 @@ impl BeamSolver {
                 global_to_free[i] = Some(free_dofs.len());
                 free_dofs.push(i);
                 free_to_global.push(i);
+            } else {
+                let constrained_idx = constrained_dofs.len();
+                constrained_dofs.push(i);
+                constrained_values.push(prescribed[i].unwrap_or(0.0));
             }
         }
 
         let n_free = free_dofs.len();
         if n_free == 0 {
             // All DOFs fixed - return empty system
-            return (SparseMatrix::new(0), Vec::new(), Vec::new());
+            return (
+                SparseMatrix::new(0),
+                Vec::new(),
+                Vec::new(),
+                constrained_dofs,
+                constrained_values,
+            );
         }
 
-        // Extract free-free submatrix K_ff and force vector f_f
+        // Extract free-free submatrix K_ff, free-constrained K_fc, and force vector f_f
         let mut k_ff = SparseMatrix::new(n_free);
+        let mut k_fc = SparseMatrix::new(n_free); // Only n_free rows, n columns but we'll only use constrained cols
         let mut f_f = vec![0.0; n_free];
 
         // Compress original matrix to access CSR data
         let mut k_orig = self.k_global.clone();
         k_orig.compress();
 
-        // Extract K_ff
+        // Extract K_ff and K_fc
         for (free_idx, &global_i) in free_dofs.iter().enumerate() {
             // Force vector
             f_f[free_idx] = self.f_global[global_i];
@@ -422,14 +481,43 @@ impl BeamSolver {
                 let val = csr_vals[idx];
 
                 if let Some(free_j) = global_to_free[global_j] {
+                    // free-free
                     k_ff.add(free_idx, free_j, val);
+                } else if fixed[global_j] {
+                    // free-constrained
+                    let constr_idx = constrained_dofs
+                        .iter()
+                        .position(|&x| x == global_j)
+                        .unwrap();
+                    k_fc.add(free_idx, constr_idx, val);
                 }
             }
         }
 
         k_ff.compress();
+        k_fc.compress();
 
-        (k_ff, f_f, free_to_global)
+        // Compute reduced RHS: F_reduced = F_f - K_fc * U_c
+        let mut f_reduced = f_f;
+        for (free_idx, _) in free_dofs.iter().enumerate() {
+            let mut sum = 0.0;
+            let row_ptr = k_fc.row_ptr();
+            let csr_cols = k_fc.csr_cols();
+            let csr_vals = k_fc.csr_vals();
+            for idx in row_ptr[free_idx]..row_ptr[free_idx + 1] {
+                let constr_j = csr_cols[idx];
+                sum += csr_vals[idx] * constrained_values[constr_j];
+            }
+            f_reduced[free_idx] -= sum;
+        }
+
+        (
+            k_ff,
+            f_reduced,
+            free_to_global,
+            constrained_dofs,
+            constrained_values,
+        )
     }
 
     fn find_diagonal_index(&self, matrix: &SparseMatrix, row: usize) -> Option<usize> {
@@ -446,11 +534,15 @@ impl BeamSolver {
     /// Solve the system using the provided LinearSolver
     pub fn solve(&mut self, solver: &mut dyn LinearSolver) -> Result<(), FemError> {
         // Apply boundary conditions using static condensation
-        let (k_ff, f_f, free_to_global) = self.apply_boundary_conditions();
+        let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
+            self.apply_boundary_conditions();
 
         if k_ff.n == 0 {
-            // All DOFs fixed
+            // All DOFs fixed - just set prescribed values
             self.u_global = vec![0.0; self.n_dof];
+            for (i, &global_idx) in constrained_dofs.iter().enumerate() {
+                self.u_global[global_idx] = constrained_values[i];
+            }
             return Ok(());
         }
 
@@ -459,23 +551,31 @@ impl BeamSolver {
         k_compressed.compress();
 
         // Factorize
-        solver.factor(&k_compressed).map_err(|e| FemError::SolverError(e.to_string()))?;
+        solver
+            .factor(&k_compressed)
+            .map_err(|e| FemError::SolverError(e.to_string()))?;
 
         // Solve reduced system
-        let u_free = solver.solve(&f_f).map_err(|e| FemError::SolverError(e.to_string()))?;
+        let u_free = solver
+            .solve(&f_reduced)
+            .map_err(|e| FemError::SolverError(e.to_string()))?;
 
         // Expand solution back to full DOF space
         self.u_global = vec![0.0; self.n_dof];
         for (free_idx, &global_idx) in free_to_global.iter().enumerate() {
             self.u_global[global_idx] = u_free[free_idx];
         }
+        // Set prescribed values for constrained DOFs
+        for (i, &global_idx) in constrained_dofs.iter().enumerate() {
+            self.u_global[global_idx] = constrained_values[i];
+        }
 
         Ok(())
     }
 
     /// Get displacement at a specific DOF
-    pub fn displacement(&self, node_id: usize, dof: usize) -> f64 {
-        let idx = self.model.dof_index(node_id, dof);
+    pub fn displacement(&self, node_idx: usize, dof: usize) -> f64 {
+        let idx = self.model.dof_index(node_idx, dof);
         if idx < self.u_global.len() {
             self.u_global[idx]
         } else {
@@ -512,8 +612,8 @@ impl BeamSolver {
     }
 
     /// Get reaction at a specific DOF
-    pub fn reaction(&self, node_id: usize, dof: usize) -> f64 {
-        let idx = self.model.dof_index(node_id, dof);
+    pub fn reaction(&self, node_idx: usize, dof: usize) -> f64 {
+        let idx = self.model.dof_index(node_idx, dof);
         if idx < self.reactions().len() {
             self.reactions()[idx]
         } else {
@@ -546,29 +646,18 @@ pub struct BeamAnalysis;
 
 impl BeamAnalysis {
     /// Analyze a cantilever beam with tip load
-    pub fn cantilever_tip_load(
-        L: f64,
-        E: f64,
-        A: f64,
-        I: f64,
-        P: f64,
-    ) -> (f64, f64, f64) {
+    pub fn cantilever_tip_load(L: f64, E: f64, A: f64, I: f64, P: f64) -> (f64, f64, f64) {
         // Analytical solutions for cantilever with tip load P at free end
         // Fixed at x=0, load P downward (transverse) at x=L
         let u_tip = 0.0; // No axial displacement for transverse load
-        let v_tip = P * L.powi(3) / (3.0 * E * I);  // Transverse deflection
+        let v_tip = P * L.powi(3) / (3.0 * E * I); // Transverse deflection
         let theta_tip = P * L.powi(2) / (2.0 * E * I); // Rotation
 
         (u_tip, v_tip, theta_tip)
     }
 
     /// Analyze a simply supported beam with central point load
-    pub fn simply_supported_central_load(
-        L: f64,
-        E: f64,
-        I: f64,
-        P: f64,
-    ) -> (f64, f64) {
+    pub fn simply_supported_central_load(L: f64, E: f64, I: f64, P: f64) -> (f64, f64) {
         // Central deflection and rotation at support
         let v_mid = P * L.powi(3) / (48.0 * E * I);
         let theta_support = P * L.powi(2) / (16.0 * E * I);
@@ -609,7 +698,12 @@ mod tests {
         // Check symmetry
         for i in 0..6 {
             for j in 0..6 {
-                assert!((k[i][j] - k[j][i]).abs() < 1e-10, "Matrix not symmetric at ({},{})", i, j);
+                assert!(
+                    (k[i][j] - k[j][i]).abs() < 1e-10,
+                    "Matrix not symmetric at ({},{})",
+                    i,
+                    j
+                );
             }
         }
 

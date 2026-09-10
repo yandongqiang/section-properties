@@ -52,7 +52,10 @@ impl LinearSolver for DenseGaussianSolver {
                 scale = scale.max(a[i][j].abs());
             }
         }
-        self.scale = scale.max(1.0);
+        self.scale = scale;
+
+        // Use scale for pivot tolerance; if scale is 0, use PIVOT_TOL_BASE directly
+        let pivot_scale = if scale == 0.0 { 1.0 } else { scale };
 
         // Gaussian elimination with partial pivoting (in-place LU factorization)
         let mut pivot = (0..n).collect::<Vec<usize>>();
@@ -69,7 +72,7 @@ impl LinearSolver for DenseGaussianSolver {
                 }
             }
 
-            let pivot_tol = crate::fea::PIVOT_TOL_BASE * self.scale.max(1.0);
+            let pivot_tol = crate::fea::PIVOT_TOL_BASE * pivot_scale;
             if max_val <= pivot_tol {
                 return Err(SolverError::singular(format!(
                     "Singular or near-singular matrix at column {}: max pivot = {:.2e}, tolerance = {:.2e}",

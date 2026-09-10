@@ -37,6 +37,9 @@ pub use crate::io::{
     to_json, to_nastran, to_svg, to_vtk,
 };
 
+pub use crate::beam_fem::{
+    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
+};
 pub use crate::fea::{
     LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
     solver::SolverBackend, solver::SolverCapabilities, solver::SolverError, solver::SolverRegistry,
@@ -60,9 +63,6 @@ pub use crate::section::{FrameProperties, MaterialError, Section, TransformedFra
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{
     GeometricProperties, GyrationProperties, PrincipalProperties, SectionProperties,
-};
-pub use crate::beam_fem::{
-    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
 };
 pub use crate::stress::{
     SectionLoads, StressAnalysis, StressAnalysisResult, StressAtPoint, YieldCheckResult,
