@@ -1,3 +1,4 @@
+pub mod beam_fem;
 pub mod cold_formed_analysis;
 pub mod database;
 pub mod fea;
@@ -59,6 +60,9 @@ pub use crate::section::{FrameProperties, MaterialError, Section, TransformedFra
 pub use crate::section_library::{CompositeSection, ParametricSection};
 pub use crate::section_properties::{
     GeometricProperties, GyrationProperties, PrincipalProperties, SectionProperties,
+};
+pub use crate::beam_fem::{
+    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
 };
 pub use crate::stress::{
     SectionLoads, StressAnalysis, StressAnalysisResult, StressAtPoint, YieldCheckResult,

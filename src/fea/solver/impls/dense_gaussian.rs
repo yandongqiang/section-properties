@@ -54,7 +54,7 @@ impl LinearSolver for DenseGaussianSolver {
         }
         self.scale = scale.max(1.0);
 
-        // Gaussian elimination with partial pivoting
+        // Gaussian elimination with partial pivoting (in-place LU factorization)
         let mut pivot = (0..n).collect::<Vec<usize>>();
 
         for k in 0..n {
@@ -82,10 +82,11 @@ impl LinearSolver for DenseGaussianSolver {
                 pivot.swap(k, max_row);
             }
 
-            // Eliminate
+            // Eliminate: store multipliers in lower triangular, upper triangular becomes U
             for i in (k + 1)..n {
                 let factor = a[i][k] / a[k][k];
-                for j in k..n {
+                a[i][k] = factor; // Store L multiplier
+                for j in (k + 1)..n {
                     a[i][j] -= factor * a[k][j];
                 }
             }
