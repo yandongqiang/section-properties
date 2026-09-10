@@ -274,6 +274,100 @@ impl BeamElement {
             -qy_L2_12, // θ_j: moment (CW negative)
         ])
     }
+
+    /// Compute consistent nodal load vector for a point load at given position (6 DOF) in LOCAL coordinates
+    ///
+    /// Local DOF ordering: [u_i, v_i, θ_i, u_j, v_j, θ_j]
+    /// Position is measured from node_i (0.0) to node_j (1.0)
+    /// Sign convention:
+    /// - fx > 0: tensile axial force (pulling in +x direction)
+    /// - fy > 0: upward transverse force (in +y direction)
+    /// - mz > 0: counterclockwise moment about z-axis (positive θ direction)
+    ///
+    /// Uses shape functions:
+    /// - Axial: linear shape functions N1 = 1-ξ, N2 = ξ
+    /// - Transverse: Hermite cubic shape functions
+    /// - Moment: shape functions for moment
+    pub fn consistent_nodal_load_point(
+        &self,
+        node_i: Point,
+        node_j: Point,
+        position: f64,
+        fx: f64,
+        fy: f64,
+        mz: f64,
+    ) -> Result<[f64; 6], FemError> {
+        let L = self.length(node_i, node_j);
+        if L <= 0.0 {
+            return Err(FemError::InvalidInput(
+                "Beam element has zero or negative length for point load".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&position) {
+            return Err(FemError::InvalidInput(format!(
+                "Point load position must be in [0, 1], got {}",
+                position
+            )));
+        }
+
+        let xi = position; // normalized position
+        let one_minus_xi = 1.0 - xi;
+
+        // Axial: linear shape functions
+        // N1 = 1-ξ, N2 = ξ
+        // f_u_i = fx * (1-ξ), f_u_j = fx * ξ
+        let f_u_i = fx * one_minus_xi;
+        let f_u_j = fx * xi;
+
+        // Transverse: Hermite cubic shape functions
+        // N1 = 1 - 3ξ² + 2ξ³
+        // N2 = L(ξ - 2ξ² + ξ³)
+        // N3 = 3ξ² - 2ξ³
+        // N4 = L(-ξ² + ξ³)
+        let xi2 = xi * xi;
+        let xi3 = xi2 * xi;
+
+        let N1 = 1.0 - 3.0 * xi2 + 2.0 * xi3;
+        let N2 = L * (xi - 2.0 * xi2 + xi3);
+        let N3 = 3.0 * xi2 - 2.0 * xi3;
+        let N4 = L * (-xi2 + xi3);
+
+        // f_v_i = fy * N1, f_θ_i = fy * N2
+        // f_v_j = fy * N3, f_θ_j = fy * N4
+        let f_v_i = fy * N1;
+        let f_theta_i = fy * N2;
+        let f_v_j = fy * N3;
+        let f_theta_j = fy * N4;
+
+        // Moment: shape functions for applied moment
+        // M1 = 1 - 3ξ² + 2ξ³ (same as N1 for transverse displacement due to moment)
+        // M2 = L(ξ - ξ²) (moment shape function for θ_i)
+        // M3 = 3ξ² - 2ξ³ (same as N3 for transverse displacement due to moment)
+        // M4 = L(-ξ² + ξ³) (same as N4 for θ_j)
+        // For a point moment mz at ξ, the equivalent nodal moments are:
+        // f_θ_i = mz * (1 - 3ξ² + 2ξ³) = mz * N1
+        // f_θ_j = mz * (3ξ² - 2ξ³) = mz * N3
+        // And the equivalent transverse forces:
+        // f_v_i = mz * (6ξ/L * (ξ - 1)) = mz * (-6ξ/L * one_minus_xi)
+        // f_v_j = mz * (-6ξ/L * one_minus_xi)
+        let one_minus_xi = 1.0 - xi;
+        let f_v_i_moment = mz * (-6.0 * xi * one_minus_xi / L);
+        let f_theta_i_moment = mz * (1.0 - 3.0 * xi2 + 2.0 * xi3);
+        let f_v_j_moment = mz * (6.0 * xi * one_minus_xi / L);
+        let f_theta_j_moment = mz * (3.0 * xi2 - 2.0 * xi3);
+
+        let xi2 = xi * xi;
+        let xi3 = xi2 * xi;
+
+        Ok([
+            f_u_i,                           // u_i: axial
+            f_v_i + f_v_i_moment,            // v_i: transverse + moment
+            f_theta_i + f_theta_i_moment,    // θ_i: rotation + moment
+            f_u_j,                           // u_j: axial
+            f_v_j + f_v_j_moment,            // v_j: transverse + moment
+            f_theta_j + f_theta_j_moment,    // θ_j: rotation + moment
+        ])
+    }
 }
 
 /// Beam node with 3 DOF: [u, v, θ]
@@ -346,6 +440,97 @@ impl DistributedLoad {
     }
 }
 
+/// Point load applied at a specific position along an element in LOCAL coordinates
+///
+/// Local coordinate system:
+/// - x axis: along beam from node_i to node_j (axial direction)
+/// - y axis: transverse direction (positive v)
+/// - z axis: out of plane (rotation θ about z)
+///
+/// Position is measured from node_i (x=0) to node_j (x=L)
+///
+/// Sign convention:
+/// - fx > 0: tensile axial force (pulling in +x direction)
+/// - fy > 0: upward transverse force (in +y direction)
+/// - mz > 0: counterclockwise moment about z-axis (positive θ direction)
+#[derive(Debug, Clone, Copy)]
+pub struct PointLoad {
+    /// Element index (index in elements Vec)
+    pub element_idx: usize,
+    /// Position along element from node_i (0.0 = node_i, 1.0 = node_j)
+    pub position: f64,
+    /// Axial force [N] in local x direction
+    pub fx: f64,
+    /// Transverse force [N] in local y direction
+    pub fy: f64,
+    /// Moment [Nm] about local z axis (positive = CCW)
+    pub mz: f64,
+}
+
+impl PointLoad {
+    /// Create a new point load on an element
+    pub fn new(element_idx: usize, position: f64, fx: f64, fy: f64, mz: f64) -> Self {
+        Self {
+            element_idx,
+            position,
+            fx,
+            fy,
+            mz,
+        }
+    }
+
+    /// Create a transverse point force only
+    pub fn transverse_force(element_idx: usize, position: f64, fy: f64) -> Self {
+        Self {
+            element_idx,
+            position,
+            fx: 0.0,
+            fy,
+            mz: 0.0,
+        }
+    }
+
+    /// Create an axial point force only
+    pub fn axial_force(element_idx: usize, position: f64, fx: f64) -> Self {
+        Self {
+            element_idx,
+            position,
+            fx,
+            fy: 0.0,
+            mz: 0.0,
+        }
+    }
+
+    /// Create a moment only
+    pub fn moment(element_idx: usize, position: f64, mz: f64) -> Self {
+        Self {
+            element_idx,
+            position,
+            fx: 0.0,
+            fy: 0.0,
+            mz,
+        }
+    }
+}
+
+/// Applied moment at a specific node (in GLOBAL coordinates)
+///
+/// Sign convention:
+/// - value > 0: counterclockwise moment (positive θ direction)
+#[derive(Debug, Clone, Copy)]
+pub struct AppliedMoment {
+    /// Node index (index in nodes Vec)
+    pub node_idx: usize,
+    /// Moment value [Nm] in global coordinates (positive = CCW)
+    pub value: f64,
+}
+
+impl AppliedMoment {
+    pub fn new(node_idx: usize, value: f64) -> Self {
+        Self { node_idx, value }
+    }
+}
+
 /// Beam model with nodes, elements, loads, and boundary conditions
 #[derive(Debug, Clone)]
 pub struct BeamModel {
@@ -359,6 +544,10 @@ pub struct BeamModel {
     pub nodal_forces: Vec<(usize, usize, f64)>,
     /// Distributed loads on elements (in LOCAL coordinates)
     pub distributed_loads: Vec<DistributedLoad>,
+    /// Point loads on elements (in LOCAL coordinates)
+    pub point_loads: Vec<PointLoad>,
+    /// Applied moments at nodes (in GLOBAL coordinates)
+    pub applied_moments: Vec<AppliedMoment>,
     /// Fixed DOFs: (node_idx, dof, value) - value is the prescribed displacement (usually 0.0)
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fixed_dofs: Vec<(usize, usize, f64)>,
@@ -371,6 +560,8 @@ impl BeamModel {
             elements: Vec::new(),
             nodal_forces: Vec::new(),
             distributed_loads: Vec::new(),
+            point_loads: Vec::new(),
+            applied_moments: Vec::new(),
             fixed_dofs: Vec::new(),
         }
     }
@@ -449,6 +640,74 @@ impl BeamModel {
         }
         self.distributed_loads
             .push(DistributedLoad::new(element_idx, qx, qy));
+        Ok(())
+    }
+
+    /// Add a point load on an element (in LOCAL coordinates)
+    /// element_idx is the index in the elements Vec (0, 1, 2, ...)
+    /// position is measured from node_i (0.0) to node_j (1.0)
+    pub fn add_point_load(
+        &mut self,
+        element_idx: usize,
+        position: f64,
+        fx: f64,
+        fy: f64,
+        mz: f64,
+    ) -> Result<(), FemError> {
+        if element_idx >= self.elements.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.elements.len().saturating_sub(1)
+            )));
+        }
+        if !(0.0..=1.0).contains(&position) {
+            return Err(FemError::InvalidInput(format!(
+                "Point load position must be in [0, 1], got {}",
+                position
+            )));
+        }
+        self.point_loads
+            .push(PointLoad::new(element_idx, position, fx, fy, mz));
+        Ok(())
+    }
+
+    /// Add a point force only (transverse or axial) on an element
+    pub fn add_point_force(
+        &mut self,
+        element_idx: usize,
+        position: f64,
+        fx: f64,
+        fy: f64,
+    ) -> Result<(), FemError> {
+        self.add_point_load(element_idx, position, fx, fy, 0.0)
+    }
+
+    /// Add a point moment only on an element
+    pub fn add_point_moment(
+        &mut self,
+        element_idx: usize,
+        position: f64,
+        mz: f64,
+    ) -> Result<(), FemError> {
+        self.add_point_load(element_idx, position, 0.0, 0.0, mz)
+    }
+
+    /// Add an applied moment at a node (in GLOBAL coordinates)
+    pub fn add_applied_moment(
+        &mut self,
+        node_idx: usize,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if node_idx >= self.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            )));
+        }
+        self.applied_moments
+            .push(AppliedMoment::new(node_idx, value));
         Ok(())
     }
 
@@ -635,6 +894,74 @@ impl BeamSolver {
             }
         }
 
+        // Assemble point loads
+        for pl in &model.point_loads {
+            if pl.element_idx >= model.elements.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Point load: element index {} out of bounds (max: {})",
+                    pl.element_idx,
+                    model.elements.len().saturating_sub(1)
+                )));
+            }
+            let element = &model.elements[pl.element_idx];
+            let node_i = model.nodes[element.node_i].point();
+            let node_j = model.nodes[element.node_j].point();
+
+            // Check for zero-length beam
+            let dx = node_j.x - node_i.x;
+            let dy = node_j.y - node_i.y;
+            let L = (dx * dx + dy * dy).sqrt();
+            if L <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Point load: beam element has zero or negative length (nodes {} and {} at same position)",
+                    element.node_i, element.node_j
+                )));
+            }
+
+            // Compute consistent nodal load in local coordinates
+            let f_local = element.consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz)?;
+
+            // Get transformation matrix
+            let T = element.transformation_matrix(node_i, node_j);
+
+            // Transform to global coordinates: f_global_elem = T^T * f_local
+            let mut f_global_elem = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    f_global_elem[i] += T[j][i] * f_local[j];
+                }
+            }
+
+            // Map element DOFs to global DOFs
+            let dof_map = [
+                model.dof_index(element.node_i, 0), // u_i
+                model.dof_index(element.node_i, 1), // v_i
+                model.dof_index(element.node_i, 2), // θ_i
+                model.dof_index(element.node_j, 0), // u_j
+                model.dof_index(element.node_j, 1), // v_j
+                model.dof_index(element.node_j, 2), // θ_j
+            ];
+
+            // Assemble into global force vector
+            for a in 0..6 {
+                f_global[dof_map[a]] += f_global_elem[a];
+            }
+        }
+
+        // Assemble applied moments (already in global coordinates)
+        for am in &model.applied_moments {
+            if am.node_idx >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Applied moment: node index {} out of bounds (max: {})",
+                    am.node_idx,
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            // Applied moment is in global coordinates, DOF 2 = θ
+            let idx = model.dof_index(am.node_idx, 2);
+            f_global[idx] += am.value;
+        }
+
         // Fixed DOFs and prescribed values
         let mut fixed_dofs = vec![false; n_dof];
         let mut prescribed_values = vec![None; n_dof];
@@ -712,16 +1039,17 @@ impl BeamSolver {
             );
         }
 
-        // Extract free-free submatrix K_ff, free-constrained K_fc, and force vector f_f
+        // Extract free-free submatrix K_ff and force vector f_f
         let mut k_ff = SparseMatrix::new(n_free);
-        let mut k_fc = SparseMatrix::new(n_free); // Only n_free rows, n columns but we'll only use constrained cols
         let mut f_f = vec![0.0; n_free];
 
         // Compress original matrix to access CSR data
         let mut k_orig = self.k_global.clone();
         k_orig.compress();
 
-        // Extract K_ff and K_fc
+        // Extract K_ff and compute K_fc * U_c directly
+        let mut kfc_uc = vec![0.0; n_free];
+
         for (free_idx, &global_i) in free_dofs.iter().enumerate() {
             // Force vector
             f_f[free_idx] = self.f_global[global_i];
@@ -739,31 +1067,22 @@ impl BeamSolver {
                     // free-free
                     k_ff.add(free_idx, free_j, val);
                 } else if fixed[global_j] {
-                    // free-constrained
+                    // free-constrained: accumulate K_fc * U_c directly
                     let constr_idx = constrained_dofs
                         .iter()
                         .position(|&x| x == global_j)
                         .unwrap();
-                    k_fc.add(free_idx, constr_idx, val);
+                    kfc_uc[free_idx] += val * constrained_values[constr_idx];
                 }
             }
         }
 
         k_ff.compress();
-        k_fc.compress();
 
         // Compute reduced RHS: F_reduced = F_f - K_fc * U_c
         let mut f_reduced = f_f;
-        for (free_idx, _) in free_dofs.iter().enumerate() {
-            let mut sum = 0.0;
-            let row_ptr = k_fc.row_ptr();
-            let csr_cols = k_fc.csr_cols();
-            let csr_vals = k_fc.csr_vals();
-            for idx in row_ptr[free_idx]..row_ptr[free_idx + 1] {
-                let constr_j = csr_cols[idx];
-                sum += csr_vals[idx] * constrained_values[constr_j];
-            }
-            f_reduced[free_idx] -= sum;
+        for free_idx in 0..n_free {
+            f_reduced[free_idx] -= kfc_uc[free_idx];
         }
 
         (
@@ -874,6 +1193,103 @@ impl BeamSolver {
         } else {
             0.0
         }
+    }
+
+    /// Compute element end forces in LOCAL coordinates
+    ///
+    /// Returns a vector of 6 forces per element in local coordinates:
+    /// [N_i, V_i, M_i, N_j, V_j, M_j]
+    /// where N = axial force (positive = tension), V = shear force (positive = upward), M = moment (positive = CCW)
+    pub fn element_end_forces(&self) -> Vec<[f64; 6]> {
+        let mut results = Vec::new();
+        
+        for element in &self.model.elements {
+            let node_i = self.model.nodes[element.node_i].point();
+            let node_j = self.model.nodes[element.node_j].point();
+            
+            // Get element displacement in global coordinates
+            let dof_map = [
+                self.model.dof_index(element.node_i, 0), // u_i
+                self.model.dof_index(element.node_i, 1), // v_i
+                self.model.dof_index(element.node_i, 2), // θ_i
+                self.model.dof_index(element.node_j, 0), // u_j
+                self.model.dof_index(element.node_j, 1), // v_j
+                self.model.dof_index(element.node_j, 2), // θ_j
+            ];
+            
+            let u_global_elem = [
+                self.u_global[dof_map[0]],
+                self.u_global[dof_map[1]],
+                self.u_global[dof_map[2]],
+                self.u_global[dof_map[3]],
+                self.u_global[dof_map[4]],
+                self.u_global[dof_map[5]],
+            ];
+            
+            // Transform global displacements to local: u_local = T * u_global
+            let T = element.transformation_matrix(node_i, node_j);
+            let mut u_local = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    u_local[i] += T[i][j] * u_global_elem[j];
+                }
+            }
+            
+            // Get local stiffness matrix
+            let k_local = element.local_stiffness(node_i, node_j);
+            
+            // Compute local forces: f_local = K_local * u_local
+            let mut f_local = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    f_local[i] += k_local[i][j] * u_local[j];
+                }
+            }
+            
+            // Element end forces: forces applied by element on nodes (positive tension, positive shear upward, positive moment CCW)
+            // f_local = K_local * u_local gives forces applied BY element ON nodes
+            let end_forces = [
+                f_local[0],  // N_i: axial at node i (tension positive)
+                f_local[1],  // V_i: shear at node i (upward positive)
+                f_local[2],  // M_i: moment at node i (CCW positive)
+                f_local[3],  // N_j: axial at node j (tension positive)
+                f_local[4],  // V_j: shear at node j (upward positive)
+                f_local[5],  // M_j: moment at node j (CCW positive)
+            ];
+            
+            results.push(end_forces);
+        }
+        
+        results
+    }
+
+    /// Compute element end forces in GLOBAL coordinates
+    ///
+    /// Returns a vector of 6 forces per element in global coordinates:
+    /// [Fx_i, Fy_i, Mz_i, Fx_j, Fy_j, Mz_j]
+    pub fn element_end_forces_global(&self) -> Vec<[f64; 6]> {
+        let local_forces = self.element_end_forces();
+        let mut results = Vec::new();
+        
+        for (idx, forces) in local_forces.iter().enumerate() {
+            let element = &self.model.elements[idx];
+            let node_i = self.model.nodes[element.node_i].point();
+            let node_j = self.model.nodes[element.node_j].point();
+            
+            let T = element.transformation_matrix(node_i, node_j);
+            
+            // Transform local forces to global: f_global = T^T * f_local
+            let mut f_global_elem = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    f_global_elem[i] += T[j][i] * forces[j];
+                }
+            }
+            
+            results.push(f_global_elem);
+        }
+        
+        results
     }
 }
 

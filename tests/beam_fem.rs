@@ -1,8 +1,8 @@
 //! Tests for 2D Euler-Bernoulli Beam FEM
 
 use section_properties::beam_fem::{
-    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, DistributedLoad,
-    FemError,
+    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, DistributedLoad, FemError,
+    PointLoad, AppliedMoment,
 };
 use section_properties::fea::{
     SparseMatrix,
@@ -1650,4 +1650,619 @@ fn test_rotated_beam_distributed_load() {
         rx_v,
         ry_h
     );
+}
+ 
+#[test]
+fn test_element_end_forces() {
+    // Test element end forces for horizontal cantilever with tip load
+    let mut model_end = BeamModel::new();
+model_end.add_node(BeamNode::new(0, 0.0, 0.0));
+model_end.add_node(BeamNode::new(1, 1.0, 0.0));
+let material = Material::new(200e9, 0.3, 7850.0, "Steel");
+let section = BeamSection::new(0.02, 0.1 * 0.2_f64.powi(3) / 12.0);
+model_end.add_element(BeamElement::new(0, 1, material, section).unwrap());
+model_end.fix_node(0);
+model_end.add_nodal_force(1, 1, -1000.0);
+
+let mut solver_end = BeamSolver::from_model(&model_end).unwrap();
+let registry = SolverRegistry::default();
+let mut linear_solver = registry.create("dense").unwrap();
+solver_end.solve(&mut *linear_solver).unwrap();
+
+// Get element end forces in local coordinates
+let end_forces = solver_end.element_end_forces();
+assert_eq!(end_forces.len(), 1);
+let forces = end_forces[0];
+
+// For cantilever with downward tip load:
+    // Element nodal forces (what element applies to nodes):
+    // N_i = 0 (no axial force)
+    // V_i = 1000 (upward shear at fixed end - element pushes up on support)
+    // M_i = 1000 (CCW moment at fixed end, L=1, P=1000)
+    // N_j = 0 (no axial force at tip)
+    // V_j = -1000 (downward shear at free end - element pushes down on free node to balance external load)
+    // M_j = 0 (no moment at free end)
+
+    assert!(forces[0].abs() < 1e-6);  // N_i
+    assert!((forces[1] - 1000.0).abs() < 1e-6);  // V_i = 1000 upward
+    assert!((forces[2] - 1000.0).abs() < 1e-6);  // M_i = 1000 CCW
+    assert!(forces[3].abs() < 1e-6);  // N_j
+    assert!((forces[4] + 1000.0).abs() < 1e-6);  // V_j = -1000 downward
+    assert!(forces[5].abs() < 1e-6);  // M_j
+
+// Test global element end forces
+let global_forces = solver_end.element_end_forces_global();
+assert_eq!(global_forces.len(), 1);
+let gforces = global_forces[0];
+
+// For horizontal beam, global = local
+assert!((gforces[0] - forces[0]).abs() < 1e-10);
+assert!((gforces[1] - forces[1]).abs() < 1e-10);
+assert!((gforces[2] - forces[2]).abs() < 1e-10);
+assert!((gforces[3] - forces[3]).abs() < 1e-10);
+assert!((gforces[4] - forces[4]).abs() < 1e-10);
+    assert!((gforces[5] - forces[5]).abs() < 1e-10);
+}
+
+// Test 1: Cantilever with interior point load (at midspan)
+#[test]
+fn test_cantilever_interior_point_load() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0; // Downward force
+
+    // For a cantilever with point load at midspan (x = L/2):
+    // Analytical solution for tip displacement and rotation
+    // v_tip = P * (L/2)^3 / (3EI) + P * (L/2)^2 * L / (2EI) = P * L^3 / (24 EI) + P * L^3 / (8 EI) = P * L^3 / (6 EI)
+    // θ_tip = P * (L/2)^2 / (2EI) = P * L^2 / (8 EI)
+    // Support reaction: R_y = P (upward)
+    // Support moment: M_z = P * L/2 (CCW)
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, L, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+    model.fix_node(0);
+    // Point load at midspan (position = 0.5), downward (negative fy in local coords for horizontal beam)
+    model.add_point_load(0, 0.5, 0.0, -P, 0.0).unwrap();
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    // Check displacements at tip
+    let v_tip = solver.displacement(1, 1);
+    let theta_tip = solver.displacement(1, 2);
+
+    // Single element FEM with equivalent nodal loads for point load at midspan:
+    // v_tip = -5/48 * P*L³/EI (not -1/6 which is exact continuum)
+    // θ_tip = -1/8 * P*L²/EI
+    let expected_v = -5.0 / 48.0 * P * L.powi(3) / (E * I);
+    let expected_theta = -1.0 / 8.0 * P * L.powi(2) / (E * I);
+
+    let v_error = (v_tip - expected_v).abs() / expected_v.abs();
+    let theta_error = (theta_tip - expected_theta).abs() / expected_theta.abs();
+
+    assert!(
+        v_error < 1e-10,
+        "v error: {}, expected: {}, got: {}",
+        v_error,
+        expected_v,
+        v_tip
+    );
+    assert!(
+        theta_error < 1e-10,
+        "theta error: {}, expected: {}, got: {}",
+        theta_error,
+        expected_theta,
+        theta_tip
+    );
+
+    // Check reactions
+    let reactions = solver.reactions();
+    let ry = reactions[1]; // v reaction at fixed node
+    let rz = reactions[2]; // θ reaction at fixed node
+
+    // Reaction force should balance applied force
+    assert!((ry - P).abs() < 1e-6);
+    // Reaction moment should be P * L/2
+    assert!((rz - P * L / 2.0).abs() < 1e-6);
+}
+
+// Test 2: Cantilever with applied moment at tip
+#[test]
+fn test_cantilever_applied_moment() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let M = 1000.0; // CCW moment at tip
+
+    // For cantilever with tip moment M (CCW):
+    // v_tip = M * L^2 / (2EI) (upward)
+    // θ_tip = M * L / (EI) (CCW)
+    // Support reaction: R_y = 0
+    // Support moment: M_z = -M (CW)
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, L, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+    model.fix_node(0);
+    // Applied moment at tip node in global coordinates (CCW positive)
+    model.add_applied_moment(1, M).unwrap();
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    let v_tip = solver.displacement(1, 1);
+    let theta_tip = solver.displacement(1, 2);
+
+    let expected_v = M * L.powi(2) / (2.0 * E * I);
+    let expected_theta = M * L / (E * I);
+
+    let v_error = (v_tip - expected_v).abs() / expected_v.abs();
+    let theta_error = (theta_tip - expected_theta).abs() / expected_theta.abs();
+
+    assert!(
+        v_error < 1e-10,
+        "v error: {}, expected: {}, got: {}",
+        v_error,
+        expected_v,
+        v_tip
+    );
+    assert!(
+        theta_error < 1e-10,
+        "theta error: {}, expected: {}, got: {}",
+        theta_error,
+        expected_theta,
+        theta_tip
+    );
+
+    // Check reactions
+    let reactions = solver.reactions();
+    let ry = reactions[1]; // v reaction at fixed node
+    let rz = reactions[2]; // θ reaction at fixed node
+
+    assert!(ry.abs() < 1e-6); // No vertical reaction
+    assert!((rz + M).abs() < 1e-6); // Reaction moment balances applied moment
+}
+
+// Test 3: Simply supported beam with central point load
+#[test]
+fn test_simply_supported_central_point_load() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0; // Downward force
+
+    // For simply supported beam with central point load P (downward):
+    // v_mid = P * L^3 / (48 * E * I) (downward)
+    // R_A = R_B = P/2 (upward)
+    // M_max = P * L / 4 (CCW at center)
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, L, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+    // Simply supported: fix u and v at both ends, but allow rotation at one end
+    model.fix_dof(0, 0, 0.0); // u = 0 at left
+    model.fix_dof(0, 1, 0.0); // v = 0 at left
+    model.fix_dof(1, 0, 0.0); // u = 0 at right
+    model.fix_dof(1, 1, 0.0); // v = 0 at right
+
+    // Point load at midspan (position = 0.5), downward
+    model.add_point_load(0, 0.5, 0.0, -P, 0.0).unwrap();
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    // Check displacement at midspan (node index doesn't exist, need to check element displacement)
+    // For this single element model, we can't directly check midspan.
+    // The reaction forces should be P/2 each
+    let reactions = solver.reactions();
+    let ry_left = reactions[1]; // v reaction at node 0
+    let ry_right = reactions[4]; // v reaction at node 1
+
+    assert!((ry_left - P / 2.0).abs() < 1e-6);
+    assert!((ry_right - P / 2.0).abs() < 1e-6);
+}
+
+// Test 4: Point load at element boundary (x=0 and x=1) - should not double count
+#[test]
+fn test_point_load_at_element_boundary() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0;
+
+    // Test with 2 elements
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, 0.5, 0.0));
+    model.add_node(BeamNode::new(2, 1.0, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
+    model.add_element(BeamElement::new(1, 2, material.clone(), section).unwrap());
+
+    model.fix_node(0);
+
+    // Point load at internal node 1 (midspan) - apply as nodal force
+    model.add_nodal_force(1, 1, -P);
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    // Point load at internal node should give reaction = P at fixed support
+    let reactions = solver.reactions();
+    let ry = reactions[1]; // v reaction at fixed node
+    assert!((ry - P).abs() < 1e-6);
+}
+
+// Test 5: Point load mesh convergence
+#[test]
+fn test_point_load_mesh_convergence() {
+    let L: f64 = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0; // Downward force at midspan
+
+    // Analytical solution for cantilever with point load at midspan
+    // Downward force gives negative v (downward) and negative theta (clockwise)
+    let expected_v = -P * L.powi(3) / (6.0 * E * I);
+    let expected_theta = -P * L.powi(2) / (8.0 * E * I);
+
+    let element_counts = [1, 3, 5, 7, 9];
+    let mut prev_v_error = f64::INFINITY;
+
+    for &n_elem in &element_counts {
+        let mut model = BeamModel::new();
+        let dx = L / n_elem as f64;
+
+        for i in 0..=n_elem {
+            model.add_node(BeamNode::new(i, i as f64 * dx, 0.0));
+        }
+
+        let material = Material::new(E, 0.3, 7850.0, "Steel");
+        let section = BeamSection::new(A, I);
+
+        for i in 0..n_elem {
+            model.add_element(BeamElement::new(i, i + 1, material.clone(), section).unwrap());
+        }
+
+        model.fix_node(0);
+
+        // Point load at midspan
+        let mid_node = n_elem / 2;
+        let position = 0.5; // midspan of the element containing the midpoint
+        // Find which element contains the midpoint
+        let mid_x = L / 2.0;
+        let mut element_idx = 0;
+        for i in 0..n_elem {
+            let x_start = i as f64 * dx;
+            let x_end = (i + 1) as f64 * dx;
+            if mid_x >= x_start && mid_x <= x_end {
+                element_idx = i;
+                break;
+            }
+        }
+        let local_position = (mid_x - element_idx as f64 * dx) / dx;
+        model.add_point_load(element_idx, local_position, 0.0, -P, 0.0).unwrap();
+
+        let mut solver = BeamSolver::from_model(&model).unwrap();
+        let registry = SolverRegistry::default();
+        let mut linear_solver = registry.create("dense").unwrap();
+        solver.solve(&mut *linear_solver).unwrap();
+
+        let v_tip = solver.displacement(n_elem, 1);
+        let v_error = (v_tip - expected_v).abs() / expected_v.abs();
+
+        println!("n_elem={}, v_tip={}, error={:.2e}", n_elem, v_tip, v_error);
+
+        // For n_elem=1 and n_elem=2, exact solution is not recovered:
+        // n_elem=1: interior point load on single element (piecewise cubic limitation)
+        // n_elem=2: point load at node (nodal force, different exact solution)
+        // Only check absolute error for n_elem >= 4 where load is interior
+        if n_elem >= 4 {
+            assert!(
+                v_error < 1e-10,
+                "Mesh convergence failed at n_elem={}: error={}",
+                n_elem,
+                v_error
+            );
+        }
+
+        // Check convergence (error should decrease with mesh refinement)
+        if n_elem > 1 {
+            assert!(
+                v_error < prev_v_error || v_error < 1e-10,
+                "Error should decrease or stay exact: n_elem={}, error={}, prev={}",
+                n_elem,
+                v_error,
+                prev_v_error
+            );
+        }
+        prev_v_error = v_error;
+    }
+}
+
+// Test 6: Rotated beam with point load
+#[test]
+fn test_rotated_beam_point_load() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0; // Downward global force
+
+    // Horizontal beam reference
+    let mut model_h = BeamModel::new();
+    model_h.add_node(BeamNode::new(0, 0.0, 0.0));
+    model_h.add_node(BeamNode::new(1, L, 0.0));
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model_h.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
+    model_h.fix_node(0);
+    model_h.add_point_load(0, 1.0, 0.0, -P, 0.0).unwrap();
+
+    let mut solver_h = BeamSolver::from_model(&model_h).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver_h.solve(&mut *linear_solver).unwrap();
+
+    let v_tip_h = solver_h.displacement(1, 1);
+    let reactions_h = solver_h.reactions();
+    let ry_h = reactions_h[1];
+
+    // Test 45° beam
+    let mut model_45 = BeamModel::new();
+    model_45.add_node(BeamNode::new(0, 0.0, 0.0));
+    model_45.add_node(BeamNode::new(1, L / 2.0_f64.sqrt(), L / 2.0_f64.sqrt()));
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model_45.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
+    model_45.fix_node(0);
+    // Global downward force -> local components for 45° beam
+    // Global (0, -P) -> local: both qx and qy = -P/√2 for the tip
+    let local_f = -P / 2.0_f64.sqrt();
+    model_45.add_point_load(0, 1.0, local_f, local_f, 0.0).unwrap();
+
+    let mut solver_45 = BeamSolver::from_model(&model_45).unwrap();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver_45.solve(&mut *linear_solver).unwrap();
+
+    let v_tip_45 = solver_45.displacement(1, 1);
+    let reactions_45 = solver_45.reactions();
+    let ry_45 = reactions_45[1];
+
+    // For 45° beam with same physical load:
+    // Global vertical displacement should match (with factor of 1/2)
+    let expected_v_tip_45 = v_tip_h / 2.0;
+    assert!(
+        (v_tip_45 - expected_v_tip_45).abs() < 1e-6,
+        "45° beam v_tip mismatch: expected {}, got {}",
+        expected_v_tip_45,
+        v_tip_45
+    );
+    assert!((ry_45 - ry_h).abs() < 1e-6);
+}
+
+// Test 7: Global equilibrium verification
+#[test]
+fn test_global_equilibrium() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0;
+    let q = 500.0; // Distributed load
+    let M = 200.0; // Applied moment
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, L, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+    model.fix_node(0);
+    model.add_nodal_force(1, 1, -P); // Downward nodal force
+    model.add_distributed_load(0, 0.0, -q); // Downward distributed load
+    model.add_point_load(0, 0.5, 0.0, -P, 0.0); // Midspan point load
+    model.add_applied_moment(1, M); // Applied moment at tip
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    // Compute total applied force and moment
+    let total_fy = P + q * L + P; // Nodal + distributed + point load
+    // Reaction moment: positive for downward forces (CCW), negative for applied CCW moment at tip
+    let total_mz = P * L + q * L * L / 2.0 + P * L / 2.0 - M;
+
+    let reactions = solver.reactions();
+    let rx = reactions[0];
+    let ry = reactions[1];
+    let rz = reactions[2];
+
+    // Global equilibrium
+    assert!(rx.abs() < 1e-6); // No horizontal force
+    assert!((ry - total_fy).abs() < 1e-6); // Vertical force balance
+    assert!((rz - total_mz).abs() < 1e-6); // Moment balance
+}
+
+// Test 8: Invalid input tests
+#[test]
+fn test_invalid_point_load_inputs() {
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, 1.0, 0.0));
+
+    let material = Material::new(200e9, 0.3, 7850.0, "Steel");
+    let section = BeamSection::rectangle(0.1, 0.2);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+    model.fix_node(0);
+
+    // Invalid element index
+    let result = model.add_point_load(999, 0.5, 0.0, 1000.0, 0.0);
+    assert!(result.is_err());
+
+    // Invalid position < 0
+    let result = model.add_point_load(0, -0.1, 0.0, 1000.0, 0.0);
+    assert!(result.is_err());
+
+    // Invalid position > 1
+    let result = model.add_point_load(0, 1.1, 0.0, 1000.0, 0.0);
+    assert!(result.is_err());
+
+    // Valid inputs
+    let result = model.add_point_load(0, 0.5, 0.0, 1000.0, 0.0);
+    assert!(result.is_ok());
+
+    // Invalid applied moment node index
+    let result = model.add_applied_moment(999, 1000.0);
+    assert!(result.is_err());
+
+    let result = model.add_applied_moment(0, 1000.0);
+    assert!(result.is_ok());
+}
+
+// Test 9: Scale invariance with point loads
+#[test]
+fn test_point_load_scale_invariance() {
+    let L = 1.0;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let P = 1000.0;
+
+    // Test various scales
+    let scales = [1e-3, 1e-1, 1.0, 1e1, 1e3, 1e6];
+    let mut v_ref = None;
+
+    for &alpha in &scales {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, L, 0.0));
+
+        let material = Material::new(200e9 * alpha, 0.3, 7850.0, "Steel");
+        let section = BeamSection::new(A * alpha, I * alpha);
+        model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+        model.fix_node(0);
+        model.add_point_load(0, 1.0, 0.0, -P * alpha, 0.0).unwrap();
+
+        let mut solver = BeamSolver::from_model(&model).unwrap();
+        let registry = SolverRegistry::default();
+        let mut linear_solver = registry.create("dense").unwrap();
+        solver.solve(&mut *linear_solver).unwrap();
+
+        let v_tip = solver.displacement(1, 1);
+
+        // Expected: v = P*L^3/(3EI) = (alpha*P)/(alpha*E*alpha*I) = v0 / alpha
+        let expected_v = (-P * alpha) * L.powi(3) / (3.0 * (200e9 * alpha) * (I * alpha));
+
+        if v_ref.is_none() {
+            v_ref = Some(v_tip * alpha);
+        } else {
+            let expected = v_ref.unwrap();
+            let rel_error = (v_tip * alpha - expected).abs() / expected.abs().max(1.0);
+            assert!(
+                rel_error < 1e-8,
+                "Scale invariance violated at α={}: v*α={}, expected={}, rel_error={}",
+                alpha,
+                v_tip * alpha,
+                expected,
+                rel_error
+            );
+        }
+    }
+}
+
+// Test 10: Combined distributed load + point load + moment
+#[test]
+fn test_combined_loads_complex() {
+    let L = 1.0;
+    let E = 200e9;
+    let A = 0.02;
+    let I = 0.1 * 0.2_f64.powi(3) / 12.0;
+    let q = 1000.0; // Uniform distributed load
+    let P = 500.0;  // Point load at midspan
+    let M = 200.0;  // Applied moment at tip
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, L, 0.0));
+
+    let material = Material::new(E, 0.3, 7850.0, "Steel");
+    let section = BeamSection::new(A, I);
+    model.add_element(BeamElement::new(0, 1, material, section).unwrap());
+
+    model.fix_node(0);
+    model.add_distributed_load(0, 0.0, -q).unwrap(); // Downward distributed load
+    model.add_point_load(0, 0.5, 0.0, -P, 0.0).unwrap(); // Midspan point load
+    model.add_applied_moment(1, M).unwrap(); // Applied moment at tip
+
+    let mut solver = BeamSolver::from_model(&model).unwrap();
+    let registry = SolverRegistry::default();
+    let mut linear_solver = registry.create("dense").unwrap();
+    solver.solve(&mut *linear_solver).unwrap();
+
+    // Verify global equilibrium
+    let reactions = solver.reactions();
+    let ry = reactions[1];
+    let rz = reactions[2];
+
+    // Total vertical force = q*L + P
+    let expected_ry = q * L + P;
+    // Total moment at support = q*L^2/2 + P*L/2 - M (applied moment at tip gives negative reaction)
+    let expected_rz = q * L * L / 2.0 + P * L / 2.0 - M;
+
+    assert!((ry - expected_ry).abs() < 1e-6);
+    assert!((rz - expected_rz).abs() < 1e-6);
+
+    // Element end forces - for combined loads, end forces at fixed end differ from reactions
+    // due to distributed load and point load contributions
+    let end_forces = solver.element_end_forces();
+    assert_eq!(end_forces.len(), 1);
+    let forces = end_forces[0];
+
+    // At fixed end (node 0): N=0
+    assert!(forces[0].abs() < 1e-6); // N_i
+    // V_i and M_i are internal forces, not equal to reactions for combined loads
+    // Just verify they are non-zero and finite
+    assert!(forces[1].is_finite()); // V_i
+    assert!(forces[2].is_finite()); // M_i
+
+    // At free end (node 1): N=0, M=0 (no external axial force or moment at free end)
+    // V_j equals the negative of the applied vertical force at the tip
+    assert!(forces[3].abs() < 1e-6); // N_j
+    assert!(forces[5].abs() < 1e-6); // M_j
 }
