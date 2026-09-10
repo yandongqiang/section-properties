@@ -227,6 +227,51 @@ impl BeamElement {
 
         k_global
     }
+
+    /// Compute consistent nodal load vector for uniform distributed load (6 DOF) in LOCAL coordinates
+    ///
+    /// Local DOF ordering: [u_i, v_i, θ_i, u_j, v_j, θ_j]
+    /// Sign convention:
+    /// - qx > 0: tensile axial load (pulling beam in +x direction)
+    /// - qy > 0: upward transverse load (in +y direction)
+    ///
+    /// Returns a 6-element vector in local coordinates
+    pub fn consistent_nodal_load(
+        &self,
+        node_i: Point,
+        node_j: Point,
+        qx: f64,
+        qy: f64,
+    ) -> [f64; 6] {
+        let L = self.length(node_i, node_j);
+        if L <= 0.0 {
+            return [0.0; 6];
+        }
+
+        // Consistent nodal load vector for uniform distributed load
+        // Axial (qx): linear shape functions
+        // f_u_i = qx * L / 2, f_u_j = qx * L / 2
+        //
+        // Transverse (qy): Hermite cubic shape functions
+        // f_v_i = qy * L / 2
+        // f_θ_i = qy * L^2 / 12  (positive = counterclockwise in local coords)
+        // f_v_j = qy * L / 2
+        // f_θ_j = -qy * L^2 / 12 (negative = clockwise in local coords)
+        //
+        // Note: Local v is positive upward, local θ is positive counterclockwise
+        let qx_L2 = qx * L / 2.0;
+        let qy_L2 = qy * L / 2.0;
+        let qy_L2_12 = qy * L * L / 12.0;
+
+        [
+            qx_L2,     // u_i: axial
+            qy_L2,     // v_i: transverse
+            qy_L2_12,  // θ_i: moment (CCW positive)
+            qx_L2,     // u_j: axial
+            qy_L2,     // v_j: transverse
+            -qy_L2_12, // θ_j: moment (CW negative)
+        ]
+    }
 }
 
 /// Beam node with 3 DOF: [u, v, θ]
@@ -250,6 +295,55 @@ impl BeamNode {
     }
 }
 
+/// Distributed load on a beam element in LOCAL coordinates
+///
+/// Local coordinate system:
+/// - x axis: along beam from node_i to node_j (axial direction)
+/// - y axis: transverse direction (positive v)
+/// - z axis: out of plane (rotation θ about z)
+///
+/// Sign convention:
+/// - qx > 0: tensile axial load (pulling beam in +x direction)
+/// - qy > 0: upward transverse load (in +y direction)
+#[derive(Debug, Clone, Copy)]
+pub struct DistributedLoad {
+    /// Element index (index in elements Vec)
+    pub element_idx: usize,
+    /// Uniform axial load per unit length [N/m] in local x direction
+    pub qx: f64,
+    /// Uniform transverse load per unit length [N/m] in local y direction
+    pub qy: f64,
+}
+
+impl DistributedLoad {
+    /// Create a new distributed load on an element
+    pub fn new(element_idx: usize, qx: f64, qy: f64) -> Self {
+        Self {
+            element_idx,
+            qx,
+            qy,
+        }
+    }
+
+    /// Uniform transverse load only (qy)
+    pub fn transverse(element_idx: usize, qy: f64) -> Self {
+        Self {
+            element_idx,
+            qx: 0.0,
+            qy,
+        }
+    }
+
+    /// Uniform axial load only (qx)
+    pub fn axial(element_idx: usize, qx: f64) -> Self {
+        Self {
+            element_idx,
+            qx,
+            qy: 0.0,
+        }
+    }
+}
+
 /// Beam model with nodes, elements, loads, and boundary conditions
 #[derive(Debug, Clone)]
 pub struct BeamModel {
@@ -261,6 +355,8 @@ pub struct BeamModel {
     /// dof: 0=u, 1=v, 2=θ
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub nodal_forces: Vec<(usize, usize, f64)>,
+    /// Distributed loads on elements (in LOCAL coordinates)
+    pub distributed_loads: Vec<DistributedLoad>,
     /// Fixed DOFs: (node_idx, dof, value) - value is the prescribed displacement (usually 0.0)
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fixed_dofs: Vec<(usize, usize, f64)>,
@@ -272,6 +368,7 @@ impl BeamModel {
             nodes: Vec::new(),
             elements: Vec::new(),
             nodal_forces: Vec::new(),
+            distributed_loads: Vec::new(),
             fixed_dofs: Vec::new(),
         }
     }
@@ -331,6 +428,20 @@ impl BeamModel {
         self.fix_dof(node_idx, 0, 0.0);
         self.fix_dof(node_idx, 1, 0.0);
         self.fix_dof(node_idx, 2, 0.0);
+    }
+
+    /// Add a distributed load on an element (in LOCAL coordinates)
+    /// element_idx is the index in the elements Vec (0, 1, 2, ...)
+    pub fn add_distributed_load(&mut self, element_idx: usize, qx: f64, qy: f64) {
+        if element_idx >= self.elements.len() {
+            panic!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.elements.len().saturating_sub(1)
+            );
+        }
+        self.distributed_loads
+            .push(DistributedLoad::new(element_idx, qx, qy));
     }
 
     /// Get total number of DOFs
@@ -460,6 +571,60 @@ impl BeamSolver {
             }
             let idx = model.dof_index(*node_id, *dof);
             f_global[idx] += value;
+        }
+
+        // Assemble distributed loads
+        for dl in &model.distributed_loads {
+            if dl.element_idx >= model.elements.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Distributed load: element index {} out of bounds (max: {})",
+                    dl.element_idx,
+                    model.elements.len().saturating_sub(1)
+                )));
+            }
+            let element = &model.elements[dl.element_idx];
+            let node_i = model.nodes[element.node_i].point();
+            let node_j = model.nodes[element.node_j].point();
+
+            // Check for zero-length beam
+            let dx = node_j.x - node_i.x;
+            let dy = node_j.y - node_i.y;
+            let L = (dx * dx + dy * dy).sqrt();
+            if L <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Distributed load: beam element has zero or negative length (nodes {} and {} at same position)",
+                    element.node_i, element.node_j
+                )));
+            }
+
+            // Compute consistent nodal load in local coordinates
+            let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy);
+
+            // Get transformation matrix
+            let T = element.transformation_matrix(node_i, node_j);
+
+            // Transform to global coordinates: f_global_elem = T^T * f_local
+            let mut f_global_elem = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    f_global_elem[i] += T[j][i] * f_local[j];
+                }
+            }
+
+            // Map element DOFs to global DOFs
+            let dof_map = [
+                model.dof_index(element.node_i, 0), // u_i
+                model.dof_index(element.node_i, 1), // v_i
+                model.dof_index(element.node_i, 2), // θ_i
+                model.dof_index(element.node_j, 0), // u_j
+                model.dof_index(element.node_j, 1), // v_j
+                model.dof_index(element.node_j, 2), // θ_j
+            ];
+
+            // Assemble into global force vector
+            for a in 0..6 {
+                f_global[dof_map[a]] += f_global_elem[a];
+            }
         }
 
         // Fixed DOFs and prescribed values
