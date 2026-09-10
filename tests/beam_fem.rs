@@ -1210,7 +1210,9 @@ fn test_consistent_nodal_load_uniform_transverse() {
 
     // qy = 1000 N/m upward
     let qy = 1000.0;
-    let f_local = element.consistent_nodal_load(node_i, node_j, 0.0, qy);
+    let f_local = element
+        .consistent_nodal_load(node_i, node_j, 0.0, qy)
+        .unwrap();
 
     // For uniform qy on L=1.0:
     // f_v_i = qy * L / 2 = 500
@@ -1249,7 +1251,9 @@ fn test_consistent_nodal_load_uniform_axial() {
 
     // qx = 1000 N/m tensile
     let qx = 1000.0;
-    let f_local = element.consistent_nodal_load(node_i, node_j, qx, 0.0);
+    let f_local = element
+        .consistent_nodal_load(node_i, node_j, qx, 0.0)
+        .unwrap();
 
     // For uniform qx on L=1.0:
     // f_u_i = qx * L / 2 = 500
@@ -1281,7 +1285,9 @@ fn test_consistent_nodal_load_combined() {
 
     let qx = 500.0;
     let qy = 1000.0;
-    let f_local = element.consistent_nodal_load(node_i, node_j, qx, qy);
+    let f_local = element
+        .consistent_nodal_load(node_i, node_j, qx, qy)
+        .unwrap();
 
     // For qx on L=2.0:
     // f_u_i = f_u_j = 500 * 2.0 / 2 = 500
@@ -1313,7 +1319,9 @@ fn test_consistent_nodal_load_vertical_beam() {
 
     // qy = 1000 N/m in LOCAL y (which is global -x for vertical beam)
     let qy = 1000.0;
-    let f_local = element.consistent_nodal_load(node_i, node_j, 0.0, qy);
+    let f_local = element
+        .consistent_nodal_load(node_i, node_j, 0.0, qy)
+        .unwrap();
 
     // Local forces: f_v_i = 500, f_θ_i = 83.33, f_v_j = 500, f_θ_j = -83.33
 
@@ -1367,7 +1375,7 @@ fn test_cantilever_uniform_distributed_load_analytical() {
 
     model.fix_node(0);
     // Add distributed load on element 0 (qx=0, qy=q)
-    model.add_distributed_load(0, 0.0, q);
+    model.add_distributed_load(0, 0.0, q).unwrap();
 
     let mut solver = BeamSolver::from_model(&model).expect("Failed to create solver");
     let registry = SolverRegistry::default();
@@ -1464,7 +1472,7 @@ fn test_cantilever_distributed_load_mesh_convergence() {
 
         // Add distributed load to each element
         for i in 0..n_elem {
-            model.add_distributed_load(i, 0.0, q);
+            model.add_distributed_load(i, 0.0, q).unwrap();
         }
 
         let mut solver = BeamSolver::from_model(&model).unwrap();
@@ -1521,7 +1529,7 @@ fn test_rotated_beam_distributed_load() {
     let section = BeamSection::new(A, I);
     model_h.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
     model_h.fix_node(0);
-    model_h.add_distributed_load(0, 0.0, -q); // qy = -q (downward in local)
+    model_h.add_distributed_load(0, 0.0, -q).unwrap(); // qy = -q (downward in local)
 
     let mut solver_h = BeamSolver::from_model(&model_h).unwrap();
     let registry = SolverRegistry::default();
@@ -1548,7 +1556,9 @@ fn test_rotated_beam_distributed_load() {
     // Local intensity per unit local length: q_local = (q * L/√2) / L = q/√2
     // Components: qx = -q/√2, qy = -q/√2
     let q_local = q / 2.0_f64.sqrt();
-    model_45.add_distributed_load(0, -q_local, -q_local);
+    model_45
+        .add_distributed_load(0, -q_local, -q_local)
+        .unwrap();
 
     let mut solver_45 = BeamSolver::from_model(&model_45).unwrap();
     let mut linear_solver = registry.create("dense").unwrap();
@@ -1588,7 +1598,7 @@ fn test_rotated_beam_distributed_load() {
     let section = BeamSection::new(A, I);
     model_v.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
     model_v.fix_node(0);
-    model_v.add_distributed_load(0, -q, 0.0);
+    model_v.add_distributed_load(0, -q, 0.0).unwrap();
 
     let mut solver_v = BeamSolver::from_model(&model_v).unwrap();
     let mut linear_solver = registry.create("dense").unwrap();
@@ -1616,7 +1626,7 @@ fn test_rotated_beam_distributed_load() {
     model_v_trans.add_element(BeamElement::new(0, 1, material.clone(), section).unwrap());
     model_v_trans.fix_node(0);
     // Global (-q, 0) -> local for vertical beam: qx = 0, qy = -q
-    model_v_trans.add_distributed_load(0, 0.0, -q);
+    model_v_trans.add_distributed_load(0, 0.0, -q).unwrap();
 
     let mut solver_v_trans = BeamSolver::from_model(&model_v_trans).unwrap();
     let mut linear_solver = registry.create("dense").unwrap();

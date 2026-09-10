@@ -242,10 +242,12 @@ impl BeamElement {
         node_j: Point,
         qx: f64,
         qy: f64,
-    ) -> [f64; 6] {
+    ) -> Result<[f64; 6], FemError> {
         let L = self.length(node_i, node_j);
         if L <= 0.0 {
-            return [0.0; 6];
+            return Err(FemError::InvalidInput(
+                "Beam element has zero or negative length for distributed load".to_string(),
+            ));
         }
 
         // Consistent nodal load vector for uniform distributed load
@@ -263,14 +265,14 @@ impl BeamElement {
         let qy_L2 = qy * L / 2.0;
         let qy_L2_12 = qy * L * L / 12.0;
 
-        [
+        Ok([
             qx_L2,     // u_i: axial
             qy_L2,     // v_i: transverse
             qy_L2_12,  // θ_i: moment (CCW positive)
             qx_L2,     // u_j: axial
             qy_L2,     // v_j: transverse
             -qy_L2_12, // θ_j: moment (CW negative)
-        ]
+        ])
     }
 }
 
@@ -432,16 +434,22 @@ impl BeamModel {
 
     /// Add a distributed load on an element (in LOCAL coordinates)
     /// element_idx is the index in the elements Vec (0, 1, 2, ...)
-    pub fn add_distributed_load(&mut self, element_idx: usize, qx: f64, qy: f64) {
+    pub fn add_distributed_load(
+        &mut self,
+        element_idx: usize,
+        qx: f64,
+        qy: f64,
+    ) -> Result<(), FemError> {
         if element_idx >= self.elements.len() {
-            panic!(
+            return Err(FemError::InvalidInput(format!(
                 "Invalid element index: {} (max: {})",
                 element_idx,
                 self.elements.len().saturating_sub(1)
-            );
+            )));
         }
         self.distributed_loads
             .push(DistributedLoad::new(element_idx, qx, qy));
+        Ok(())
     }
 
     /// Get total number of DOFs
@@ -598,7 +606,7 @@ impl BeamSolver {
             }
 
             // Compute consistent nodal load in local coordinates
-            let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy);
+            let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
 
             // Get transformation matrix
             let T = element.transformation_matrix(node_i, node_j);
