@@ -18,35 +18,48 @@ pub struct BeamSection {
     /// Cross-sectional area [m²]
     pub area: f64,
     /// Second moment of area about local z-axis (bending in local x-y plane) [m⁴]
-    pub i: f64,
+    pub second_moment: f64,
 }
 
 impl BeamSection {
     /// Create a new beam section
-    pub fn new(area: f64, i: f64) -> Self {
-        Self { area, i }
+    pub fn new(area: f64, second_moment: f64) -> Self {
+        Self {
+            area,
+            second_moment,
+        }
     }
 
     /// Create from a rectangle section
     pub fn rectangle(width: f64, height: f64) -> Self {
         let area = width * height;
-        let i = width * height.powi(3) / 12.0;
-        Self { area, i }
+        let second_moment = width * height.powi(3) / 12.0;
+        Self {
+            area,
+            second_moment,
+        }
     }
 
     /// Create from a circular section
     pub fn circle(radius: f64) -> Self {
         let area = std::f64::consts::PI * radius * radius;
-        let i = std::f64::consts::PI * radius.powi(4) / 4.0;
-        Self { area, i }
+        let second_moment = std::f64::consts::PI * radius.powi(4) / 4.0;
+        Self {
+            area,
+            second_moment,
+        }
     }
 
     /// Create from a circular hollow section
     pub fn circle_hollow(outer_radius: f64, inner_radius: f64) -> Self {
         let area =
             std::f64::consts::PI * (outer_radius * outer_radius - inner_radius * inner_radius);
-        let i = std::f64::consts::PI * (outer_radius.powi(4) - inner_radius.powi(4)) / 4.0;
-        Self { area, i }
+        let second_moment =
+            std::f64::consts::PI * (outer_radius.powi(4) - inner_radius.powi(4)) / 4.0;
+        Self {
+            area,
+            second_moment,
+        }
     }
 }
 
@@ -104,7 +117,7 @@ impl BeamElement {
 
         let E = self.material.youngs_modulus;
         let A = self.section.area;
-        let I = self.section.i;
+        let I = self.section.second_moment;
 
         let EA_L = E * A / L;
         let EI_L3 = E * I / L.powi(3);
@@ -275,6 +288,16 @@ impl BeamModel {
     /// dof: 0=u, 1=v, 2=θ
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fn add_nodal_force(&mut self, node_idx: usize, dof: usize, value: f64) {
+        if node_idx >= self.nodes.len() {
+            panic!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            );
+        }
+        if dof >= 3 {
+            panic!("Invalid DOF: {} (must be 0, 1, or 2)", dof);
+        }
         self.nodal_forces.push((node_idx, dof, value));
     }
 
@@ -282,12 +305,29 @@ impl BeamModel {
     /// dof: 0=u, 1=v, 2=θ
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fn fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) {
+        if node_idx >= self.nodes.len() {
+            panic!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            );
+        }
+        if dof >= 3 {
+            panic!("Invalid DOF: {} (must be 0, 1, or 2)", dof);
+        }
         self.fixed_dofs.push((node_idx, dof, value));
     }
 
     /// Fix a node completely (all 3 DOFs to 0)
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fn fix_node(&mut self, node_idx: usize) {
+        if node_idx >= self.nodes.len() {
+            panic!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            );
+        }
         self.fix_dof(node_idx, 0, 0.0);
         self.fix_dof(node_idx, 1, 0.0);
         self.fix_dof(node_idx, 2, 0.0);
@@ -336,6 +376,32 @@ impl BeamSolver {
             return Err(FemError::InvalidModel("Model has no nodes".to_string()));
         }
 
+        // Validate element node indices
+        for (elem_idx, element) in model.elements.iter().enumerate() {
+            if element.node_i >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: node_i index {} out of bounds (max: {})",
+                    elem_idx,
+                    element.node_i,
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            if element.node_j >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: node_j index {} out of bounds (max: {})",
+                    elem_idx,
+                    element.node_j,
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            if element.node_i == element.node_j {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: node_i and node_j cannot be the same",
+                    elem_idx
+                )));
+            }
+        }
+
         // Build global stiffness matrix
         let mut k_global = SparseMatrix::new(n_dof);
 
@@ -350,14 +416,8 @@ impl BeamSolver {
             let L = (dx * dx + dy * dy).sqrt();
             if L <= 0.0 {
                 return Err(FemError::InvalidModel(format!(
-                    "Beam element {} has zero or negative length (nodes {} and {} at same position)",
-                    model
-                        .elements
-                        .iter()
-                        .position(|e| e.node_i == element.node_i && e.node_j == element.node_j)
-                        .unwrap_or(0),
-                    element.node_i,
-                    element.node_j
+                    "Beam element has zero or negative length (nodes {} and {} at same position)",
+                    element.node_i, element.node_j
                 )));
             }
 
@@ -385,21 +445,43 @@ impl BeamSolver {
         // Build force vector
         let mut f_global = vec![0.0; n_dof];
         for (node_id, dof, value) in &model.nodal_forces {
-            if *node_id < model.nodes.len() && *dof < 3 {
-                let idx = model.dof_index(*node_id, *dof);
-                f_global[idx] += value;
+            if *node_id >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Nodal force: node index {} out of bounds (max: {})",
+                    node_id,
+                    model.nodes.len().saturating_sub(1)
+                )));
             }
+            if *dof >= 3 {
+                return Err(FemError::InvalidModel(format!(
+                    "Nodal force: DOF {} invalid (must be 0, 1, or 2)",
+                    dof
+                )));
+            }
+            let idx = model.dof_index(*node_id, *dof);
+            f_global[idx] += value;
         }
 
         // Fixed DOFs and prescribed values
         let mut fixed_dofs = vec![false; n_dof];
         let mut prescribed_values = vec![None; n_dof];
         for (node_id, dof, value) in &model.fixed_dofs {
-            if *node_id < model.nodes.len() && *dof < 3 {
-                let idx = model.dof_index(*node_id, *dof);
-                fixed_dofs[idx] = true;
-                prescribed_values[idx] = Some(*value);
+            if *node_id >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Fixed DOF: node index {} out of bounds (max: {})",
+                    node_id,
+                    model.nodes.len().saturating_sub(1)
+                )));
             }
+            if *dof >= 3 {
+                return Err(FemError::InvalidModel(format!(
+                    "Fixed DOF: DOF {} invalid (must be 0, 1, or 2)",
+                    dof
+                )));
+            }
+            let idx = model.dof_index(*node_id, *dof);
+            fixed_dofs[idx] = true;
+            prescribed_values[idx] = Some(*value);
         }
 
         // Store original matrix for reaction computation
@@ -674,11 +756,11 @@ mod tests {
     fn test_beam_section_creation() {
         let sec = BeamSection::new(1.0, 1.0);
         assert_eq!(sec.area, 1.0);
-        assert_eq!(sec.i, 1.0);
+        assert_eq!(sec.second_moment, 1.0);
 
         let rect = BeamSection::rectangle(0.1, 0.2);
         assert!((rect.area - 0.02).abs() < 1e-10);
-        assert!((rect.i - 0.1 * 0.2_f64.powi(3) / 12.0).abs() < 1e-10);
+        assert!((rect.second_moment - 0.1 * 0.2_f64.powi(3) / 12.0).abs() < 1e-10);
 
         let circ = BeamSection::circle(0.05);
         assert!((circ.area - std::f64::consts::PI * 0.0025).abs() < 1e-10);
@@ -688,7 +770,7 @@ mod tests {
     fn test_local_stiffness() {
         let material = Material::new(200e9, 0.3, 7850.0, "Steel");
         let section = BeamSection::new(0.01, 8.333e-6);
-        let element = BeamElement::new(0, 1, material, section);
+        let element = BeamElement::new(0, 1, material, section).unwrap();
 
         let node_i = Point::new(0.0, 0.0);
         let node_j = Point::new(1.0, 0.0);
@@ -708,16 +790,16 @@ mod tests {
         }
 
         // Check axial terms
-        let E = 200e9;
-        let A = 0.01;
-        let L = 1.0;
+        let E: f64 = 200e9;
+        let A: f64 = 0.01;
+        let L: f64 = 1.0;
         let EA_L = E * A / L;
         assert!((k[0][0] - EA_L).abs() < 1e-6);
         assert!((k[0][3] + EA_L).abs() < 1e-6);
         assert!((k[3][3] - EA_L).abs() < 1e-6);
 
         // Check bending terms
-        let I = 8.333e-6;
+        let I: f64 = 8.333e-6;
         let EI_L3 = E * I / L.powi(3);
         let EI_L2 = E * I / L.powi(2);
         let EI_L = E * I / L;
@@ -733,7 +815,7 @@ mod tests {
     fn test_transformation_matrix() {
         let material = Material::new(200e9, 0.3, 7850.0, "Steel");
         let section = BeamSection::new(0.01, 8.333e-6);
-        let element = BeamElement::new(0, 1, material, section);
+        let element = BeamElement::new(0, 1, material, section).unwrap();
 
         // Horizontal beam
         let node_i = Point::new(0.0, 0.0);
@@ -764,7 +846,7 @@ mod tests {
     fn test_global_stiffness_horizontal() {
         let material = Material::new(200e9, 0.3, 7850.0, "Steel");
         let section = BeamSection::new(0.01, 8.333e-6);
-        let element = BeamElement::new(0, 1, material, section);
+        let element = BeamElement::new(0, 1, material, section).unwrap();
 
         let node_i = Point::new(0.0, 0.0);
         let node_j = Point::new(1.0, 0.0);
@@ -784,7 +866,7 @@ mod tests {
     fn test_global_stiffness_vertical() {
         let material = Material::new(200e9, 0.3, 7850.0, "Steel");
         let section = BeamSection::new(0.01, 8.333e-6);
-        let element = BeamElement::new(0, 1, material, section);
+        let element = BeamElement::new(0, 1, material, section).unwrap();
 
         let node_i = Point::new(0.0, 0.0);
         let node_j = Point::new(0.0, 1.0);
@@ -827,7 +909,7 @@ mod tests {
 
         let material = Material::new(200e9, 0.3, 7850.0, "Steel");
         let section = BeamSection::new(0.01, 8.333e-6);
-        model.add_element(BeamElement::new(0, 1, material, section));
+        model.add_element(BeamElement::new(0, 1, material, section).unwrap());
 
         model.fix_node(0);
         model.add_nodal_force(1, 1, -1000.0); // Downward force at tip
