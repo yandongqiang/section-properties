@@ -149,12 +149,12 @@ impl LinearSolver for DenseGaussianSolver {
             x[i] = (x[i] - sum) / pivot_val;
         }
 
-        // Inverse permutation
-        let mut out = vec![0.0; n];
-        for (new_idx, &old_idx) in self.pivot.iter().enumerate() {
-            out[old_idx] = x[new_idx];
-        }
+        // NOTE: `x` is already the solution in the original (un-permuted) order.
+        // The forward substitution applied the row permutation `P` to the RHS,
+        // and the elimination produced `P A = L U`; solving `L U x = P b` yields
+        // `x` directly in the original variable order. No inverse permutation is
+        // required — applying one here would scramble the solution.
 
-        Ok(out)
+        Ok(x)
     }
 }
