@@ -111,6 +111,94 @@ impl SectionForces {
     }
 }
 
+/// One sampled point of a beam internal-force diagram.
+///
+/// Produced by [`BeamSolver::sample_element_forces`] and
+/// [`BeamSolver::sample_beam_forces`]. The sample is a thin record over
+/// [`SectionForces`]; the diagram API samples
+/// [`BeamSolver::element_section_forces`] and never interpolates nodal forces.
+///
+/// # Coordinates
+///
+/// - [`element_index`](Self::element_index): element index in the model
+///   (`BeamModel::elements` order).
+/// - [`xi`](Self::xi): element-local normalized coordinate in `[0, 1]`
+///   (`xi = 0` at the element's `node_i`, `xi = 1` at `node_j`).
+/// - [`x`](Self::x): beam arclength measured from the start of element 0
+///   (element 0's `node_i`), accumulated in model order:
+///   `x = Σ_{e < element_index} length(e) + xi · length(element_index)`.
+///   This is a physical beam distance, not an element-local coordinate, so
+///   adjacent elements produce **duplicate** `x` values at a shared node
+///   (element `i` at `xi = 1` and element `i+1` at `xi = 0`). Duplicates are
+///   intentional and are never removed.
+///
+/// # Section forces
+///
+/// [`section_forces`](Self::section_forces) are the beam-LOCAL `N`, `V`, `M`
+/// from [`SectionForces`] (same sign convention; not transformed to global
+/// axes). At an interior point load they follow the existing left-limit
+/// convention of [`BeamSolver::element_section_forces`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeamForceSample {
+    /// Element index in model order.
+    pub element_index: usize,
+    /// Element-local normalized coordinate, `0` at `node_i`, `1` at `node_j`.
+    pub xi: f64,
+    /// Beam arclength from the start of element 0 (see type docs).
+    pub x: f64,
+    /// Local section forces `N`, `V`, `M` at this sample.
+    pub section_forces: SectionForces,
+}
+
+/// A sampled beam internal-force diagram (recoverable via
+/// [`BeamSolver::beam_force_diagram`]).
+///
+/// This is a plain container of [`BeamForceSample`] points in model order. It
+/// deliberately performs **no** interpolation, and exposes no plotting or GUI
+/// functionality; a future visualization layer consumes [`samples`](Self::samples)
+/// (each carrying its own `x` coordinate) directly.
+#[derive(Debug, Clone)]
+pub struct BeamForceDiagram {
+    /// Samples in model order, element by element.
+    pub samples: Vec<BeamForceSample>,
+}
+
+impl BeamForceDiagram {
+    /// Create a diagram from pre-computed samples.
+    pub fn new(samples: Vec<BeamForceSample>) -> Self {
+        Self { samples }
+    }
+
+    /// Axial force `N` at every sample, in `samples` order.
+    pub fn axial(&self) -> Vec<f64> {
+        self.samples
+            .iter()
+            .map(|s| s.section_forces.axial)
+            .collect()
+    }
+
+    /// Shear force `V` at every sample, in `samples` order.
+    pub fn shear(&self) -> Vec<f64> {
+        self.samples
+            .iter()
+            .map(|s| s.section_forces.shear)
+            .collect()
+    }
+
+    /// Bending moment `M` at every sample, in `samples` order.
+    pub fn moment(&self) -> Vec<f64> {
+        self.samples
+            .iter()
+            .map(|s| s.section_forces.moment)
+            .collect()
+    }
+
+    /// Beam arclength `x` at every sample, in `samples` order.
+    pub fn x(&self) -> Vec<f64> {
+        self.samples.iter().map(|s| s.x).collect()
+    }
+}
+
 /// 2D Beam Element
 #[derive(Debug, Clone)]
 pub struct BeamElement {
@@ -1678,6 +1766,147 @@ impl BeamSolver {
         let moment = m_i - x * v_i + 0.5 * qy * x * x - sum_moment;
 
         Ok(SectionForces::new(axial, shear, moment))
+    }
+
+    /// Beam arclength from the start of element 0 to the start (`xi = 0`) of
+    /// `element_index`, accumulated in model order.
+    ///
+    /// Private helper shared by the sampling APIs. `element_index` is assumed
+    /// already validated; indices `>= elements.len()` simply sum all elements.
+    fn element_start_distance(&self, element_index: usize) -> f64 {
+        self.model
+            .elements
+            .iter()
+            .take(element_index)
+            .map(|e| {
+                let ni = self.model.nodes[e.node_i].point();
+                let nj = self.model.nodes[e.node_j].point();
+                e.length(ni, nj)
+            })
+            .sum()
+    }
+
+    /// Sample the internal-force diagram of a single element at `n` uniformly
+    /// spaced points, including both endpoints.
+    ///
+    /// Samples `xi = k / (n - 1)` for `k = 0..n`, so `xi = 0` and `xi = 1` are
+    /// always included. Each sample delegates to
+    /// [`Self::element_section_forces`] — the N/V/M values are **not**
+    /// interpolated or recomputed here.
+    ///
+    /// # Arguments
+    ///
+    /// - `element_index`: element index in `BeamModel::elements` order.
+    /// - `n`: number of samples, must be `>= 2`.
+    ///
+    /// The returned samples carry the global beam arclength `x` (see
+    /// [`BeamForceSample`]), measured from the start of element 0, so a sample
+    /// on element `e` starts at `Σ_{k < e} length(k)`.
+    ///
+    /// # Discontinuities
+    ///
+    /// If a uniform `xi` lands exactly on an interior point load, the value is
+    /// the existing **left-limit** result of
+    /// [`Self::element_section_forces`]. No epsilon sampling is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidInput`] if `n < 2`, if `element_index` is out
+    /// of bounds, or if the element has zero length.
+    pub fn sample_element_forces(
+        &self,
+        element_index: usize,
+        n: usize,
+    ) -> Result<Vec<BeamForceSample>, FemError> {
+        if n < 2 {
+            return Err(FemError::InvalidInput(format!(
+                "Number of samples n must be >= 2, got {}",
+                n
+            )));
+        }
+        if element_index >= self.model.elements.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_index,
+                self.model.elements.len().saturating_sub(1)
+            )));
+        }
+
+        let element = &self.model.elements[element_index];
+        let node_i = self.model.nodes[element.node_i].point();
+        let node_j = self.model.nodes[element.node_j].point();
+        let length = element.length(node_i, node_j);
+        let start = self.element_start_distance(element_index);
+
+        let mut samples = Vec::with_capacity(n);
+        for k in 0..n {
+            let xi = k as f64 / (n - 1) as f64;
+            // Delegates to the authoritative recovery (also validates a
+            // zero-length element via its existing error path).
+            let section_forces = self.element_section_forces(element_index, xi)?;
+            samples.push(BeamForceSample {
+                element_index,
+                xi,
+                x: start + xi * length,
+                section_forces,
+            });
+        }
+        Ok(samples)
+    }
+
+    /// Sample the internal-force diagram of the whole beam at `n_per_element`
+    /// uniformly spaced points per element.
+    ///
+    /// Elements are traversed in `BeamModel::elements` order. Global `x` is the
+    /// physical beam arclength accumulated over the true element lengths (equal
+    /// lengths are NOT assumed):
+    /// `x = Σ_{k < e} length(k) + xi · length(e)`.
+    ///
+    /// # Shared boundaries are duplicated on purpose
+    ///
+    /// The last sample of element `e` (`xi = 1`) and the first sample of
+    /// element `e+1` (`xi = 0`) share the same `x`. Both are returned:
+    ///
+    /// - when the internal force is continuous, the two values agree;
+    /// - at a point force / moment discontinuity they differ and represent the
+    ///   two one-sided limits.
+    ///
+    /// Duplicate `x` coordinates are **never** deduplicated — doing so would
+    /// destroy discontinuities for a future plotting layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidInput`] if `n_per_element < 2`, or for any
+    /// per-element error from [`Self::sample_element_forces`].
+    pub fn sample_beam_forces(
+        &self,
+        n_per_element: usize,
+    ) -> Result<Vec<BeamForceSample>, FemError> {
+        if n_per_element < 2 {
+            return Err(FemError::InvalidInput(format!(
+                "Number of samples per element must be >= 2, got {}",
+                n_per_element
+            )));
+        }
+        let mut samples = Vec::with_capacity(n_per_element * self.model.elements.len());
+        for element_index in 0..self.model.elements.len() {
+            samples.extend(self.sample_element_forces(element_index, n_per_element)?);
+        }
+        Ok(samples)
+    }
+
+    /// Sample the whole beam and wrap the result in a [`BeamForceDiagram`].
+    ///
+    /// Equivalent to [`Self::sample_beam_forces`] plus a container. No
+    /// interpolation is performed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::sample_beam_forces`].
+    pub fn beam_force_diagram(&self, n_per_element: usize) -> Result<BeamForceDiagram, FemError> {
+        Ok(BeamForceDiagram::new(
+            self.sample_beam_forces(n_per_element)?,
+        ))
     }
 }
 
