@@ -288,6 +288,138 @@ pub enum SolverBackend {
     Iccg,
 }
 
+/// How a linear solver is chosen for a system.
+///
+/// # Canonical solver names
+///
+/// `Named` carries one of the registered backend names below. Unknown names are
+/// rejected with a structured [`SolverError`] — they never fall back.
+///
+/// | name             | symmetry        | definiteness        | intended size |
+/// |------------------|-----------------|---------------------|---------------|
+/// | `dense`          | any (general)   | any                 | small         |
+/// | `skyline_ldlt`   | symmetric only  | SPD (verified)      | medium/large  |
+/// | `sparse_lu`      | any (general)   | any                 | medium/large  |
+/// | `cg`             | symmetric only  | SPD (assumed)       | large         |
+/// | `iccg`           | symmetric only  | SPD (assumed)       | large         |
+/// | `pardiso`        | any (general)   | any                 | very large (feature) |
+///
+/// # Semantics
+///
+/// - [`Auto`](Self::Auto): the registry analyses the matrix and picks a backend.
+///   It may substitute a different backend than any the caller had in mind.
+/// - [`Named`](Self::Named): the request is **authoritative**. The registry
+///   validates capabilities and returns an error if the backend cannot legally
+///   handle the matrix. It never substitutes another backend.
+///
+/// `skyline_ldlt`, `cg` and `iccg` require positive definiteness but perform
+/// their own definiteness check during [`LinearSolver::factor`] (skyline rejects
+/// a non-positive pivot; CG/ICCG report failure). They are therefore safe to
+/// select on a symmetric matrix, but are **never** chosen by `Auto` for a matrix
+/// whose SPD property is not established.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SolverSelection {
+    /// Registry-based automatic selection (default).
+    #[default]
+    Auto,
+    /// Explicit backend request (canonical name, see type docs).
+    Named(String),
+}
+
+impl SolverSelection {
+    /// Explicit selection by canonical name.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self::Named(name.into())
+    }
+    /// Select the dense Gaussian backend.
+    pub fn dense() -> Self {
+        Self::Named("dense".to_string())
+    }
+    /// Select the skyline LDL^T backend (symmetric SPD).
+    pub fn skyline_ldlt() -> Self {
+        Self::Named("skyline_ldlt".to_string())
+    }
+    /// Select the sparse LU backend.
+    pub fn sparse_lu() -> Self {
+        Self::Named("sparse_lu".to_string())
+    }
+    /// Select the conjugate-gradient backend (symmetric SPD).
+    pub fn cg() -> Self {
+        Self::Named("cg".to_string())
+    }
+    /// Select the incomplete-Cholesky CG backend (symmetric SPD).
+    pub fn iccg() -> Self {
+        Self::Named("iccg".to_string())
+    }
+    /// Select the PARDISO backend (feature-gated).
+    pub fn pardiso() -> Self {
+        Self::Named("pardiso".to_string())
+    }
+    /// Whether this is automatic selection.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+    /// The explicitly requested name, or `None` for [`SolverSelection::Auto`].
+    pub fn requested_name(&self) -> Option<&str> {
+        match self {
+            Self::Auto => None,
+            Self::Named(n) => Some(n.as_str()),
+        }
+    }
+}
+
+/// Why a particular solver was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionReason {
+    /// The caller requested this backend explicitly.
+    ExplicitlyRequested,
+    /// Small system: dense is used for any matrix class.
+    SmallSystem,
+    /// Symmetric matrix whose diagonal is positive (necessary condition for
+    /// SPD): skyline is chosen; it verifies definiteness during factorization.
+    SymmetricPositiveDiagonal,
+    /// General (possibly non-symmetric) system: sparse LU.
+    GeneralSystem,
+    /// Very large system with PARDISO available.
+    LargeSystem,
+}
+
+/// The outcome of a solver-selection query. No solver is constructed and no
+/// factorization is performed, so this is cheap and side-effect free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolverSelectionInfo {
+    /// Canonical name of the chosen backend.
+    pub solver_name: String,
+    /// Why it was chosen.
+    pub reason: SelectionReason,
+}
+
+/// Validate that a solver with `caps` may legally handle `matrix`.
+///
+/// This is a **class** check (symmetry / generality). It deliberately does not
+/// attempt to prove positive definiteness: a symmetric indefinite matrix is a
+/// legal input to every backend that claims `general` support, and backends that
+/// require SPD (`skyline_ldlt`, `cg`, `iccg`) verify that themselves during
+/// [`LinearSolver::factor`], returning an error rather than a wrong answer.
+fn validate_solver_for_matrix(
+    name: &str,
+    caps: &SolverCapabilities,
+    matrix: &SparseMatrix,
+) -> Result<(), SolverError> {
+    if matrix.n == 0 {
+        return Err(SolverError::invalid_input("Empty matrix"));
+    }
+    let symmetric = matrix.is_symmetric(1e-12);
+    if !symmetric && !caps.general {
+        return Err(SolverError::unsupported(format!(
+            "solver '{}' requires a symmetric matrix, but the matrix is not symmetric; \
+             use 'dense' or 'sparse_lu'",
+            name
+        )));
+    }
+    Ok(())
+}
+
 /// Registry for solver backends
 pub struct SolverRegistry {
     backends: std::collections::HashMap<String, Box<dyn LinearSolverFactory>>,
@@ -318,58 +450,175 @@ impl SolverRegistry {
         self.backends.keys().cloned().collect()
     }
 
+    /// Registered solver names, sorted (deterministic).
+    pub fn list_sorted(&self) -> Vec<String> {
+        let mut v = self.list();
+        v.sort();
+        v
+    }
+
     pub fn create(&self, name: &str) -> Option<Box<dyn LinearSolver>> {
         self.backends.get(name).map(|f| f.create())
     }
 
-    /// Auto-select best solver based on matrix properties
+    /// Validate that the named backend can legally handle `matrix`, returning
+    /// its capabilities on success. Performs **no** factorization.
     ///
-    /// Selection logic:
-    /// - Small matrices (n <= 500): Dense Gaussian (handles all types)
-    /// - Symmetric matrices: Skyline LDL^T (requires SPD, verified during factor)
-    /// - Non-symmetric matrices (n <= 3000): SparseLU
-    /// - Large non-symmetric: Falls back to Skyline if symmetric, else SparseLU
+    /// # Errors
     ///
-    /// Note: CG/ICCG are NOT auto-selected because they require SPD.
-    /// Users must explicitly choose CG/ICCG when they know the matrix is SPD.
-    pub fn auto_select(&self, matrix: &SparseMatrix) -> Option<Box<dyn LinearSolver>> {
-        let n = matrix.n;
-        let nnz = if matrix.compressed {
-            matrix.csr_vals.len()
-        } else {
-            matrix.vals.len()
-        };
-        let _density = nnz as f64 / (n * n) as f64;
+    /// - [`SolverError::Unsupported`] if the name is unknown or the matrix class
+    ///   is incompatible with the backend.
+    /// - [`SolverError::InvalidInput`] for an empty matrix.
+    pub fn validate_selection(
+        &self,
+        name: &str,
+        matrix: &SparseMatrix,
+    ) -> Result<SolverCapabilities, SolverError> {
+        let factory = self
+            .get(name)
+            .ok_or_else(|| SolverError::unsupported(format!("unknown solver '{}'", name)))?;
+        let caps = factory.capabilities();
+        validate_solver_for_matrix(name, &caps, matrix)?;
+        Ok(caps)
+    }
 
-        // Small matrices: dense handles everything
-        if n <= 500 {
-            return self.create("dense");
-        }
-
-        let is_symmetric = matrix.is_symmetric(1e-12);
-
-        if is_symmetric {
-            // Symmetric: Skyline LDL^T (requires SPD)
-            // User must verify SPD if using CG/ICCG explicitly
-            if n <= 10000 {
-                self.create("skyline_ldlt")
-            } else {
-                // Large symmetric: still prefer direct solver over CG
-                // CG requires SPD which we cannot verify reliably here
-                self.create("skyline_ldlt")
+    /// Decide which backend would be used, **without** constructing or
+    /// factorizing anything. Answers "which solver, and why?".
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown explicit name, an incompatible matrix
+    /// class, an empty matrix, or (for `Auto`) when no suitable backend exists.
+    pub fn select(
+        &self,
+        matrix: &SparseMatrix,
+        selection: &SolverSelection,
+    ) -> Result<SolverSelectionInfo, SolverError> {
+        match selection {
+            SolverSelection::Named(name) => {
+                self.validate_selection(name, matrix)?;
+                Ok(SolverSelectionInfo {
+                    solver_name: name.clone(),
+                    reason: SelectionReason::ExplicitlyRequested,
+                })
             }
-        } else if n <= 3000 {
-            // Non-symmetric small/medium: SparseLU
-            self.create("sparse_lu")
-        } else {
-            // Large non-symmetric: no good built-in option
-            // Fall back to SparseLU (may be slow) or return None
-            #[cfg(feature = "pardiso")]
-            return self.create("pardiso");
-            #[cfg(not(feature = "pardiso"))]
-            self.create("sparse_lu")
+            SolverSelection::Auto => self.auto_select_info(matrix),
         }
     }
+
+    /// The auto-selection policy, exposed as a decision (name + reason).
+    ///
+    /// Policy (conservative; never selects a solver that cannot handle the
+    /// detected matrix class):
+    ///
+    /// 1. `n <= 500` → `dense` (general, any class).
+    /// 2. symmetric with a positive diagonal (necessary condition for SPD) →
+    ///    `skyline_ldlt` (it verifies definiteness at factorization).
+    /// 3. `pardiso` if registered/available (very large).
+    /// 4. otherwise → `sparse_lu` (general; handles symmetric or not).
+    ///
+    /// `cg`/`iccg` are never auto-selected: their SPD requirement cannot be
+    /// established reliably from the matrix alone.
+    pub fn auto_select_info(
+        &self,
+        matrix: &SparseMatrix,
+    ) -> Result<SolverSelectionInfo, SolverError> {
+        if matrix.n == 0 {
+            return Err(SolverError::invalid_input("Empty matrix"));
+        }
+
+        if matrix.n <= 500 && self.get("dense").is_some() {
+            return Ok(SolverSelectionInfo {
+                solver_name: "dense".to_string(),
+                reason: SelectionReason::SmallSystem,
+            });
+        }
+
+        if matrix.is_symmetric(1e-12)
+            && has_positive_diagonal(matrix)
+            && self.get("skyline_ldlt").is_some()
+        {
+            return Ok(SolverSelectionInfo {
+                solver_name: "skyline_ldlt".to_string(),
+                reason: SelectionReason::SymmetricPositiveDiagonal,
+            });
+        }
+
+        #[cfg(feature = "pardiso")]
+        if self.get("pardiso").is_some() {
+            return Ok(SolverSelectionInfo {
+                solver_name: "pardiso".to_string(),
+                reason: SelectionReason::LargeSystem,
+            });
+        }
+
+        if self.get("sparse_lu").is_some() {
+            return Ok(SolverSelectionInfo {
+                solver_name: "sparse_lu".to_string(),
+                reason: SelectionReason::GeneralSystem,
+            });
+        }
+
+        Err(SolverError::unsupported(
+            "no suitable solver is registered for this matrix",
+        ))
+    }
+
+    /// Construct a solver for `selection`, after capability validation.
+    ///
+    /// Explicit selections are authoritative: if the requested backend cannot
+    /// legally handle the matrix (or is unknown / uncreatable), an error is
+    /// returned and **no** other backend is substituted. `Auto` may pick any
+    /// backend that can handle the matrix class.
+    ///
+    /// The solver is returned **unfactored** — the caller calls
+    /// [`LinearSolver::factor`] then [`LinearSolver::solve`].
+    pub fn create_selected(
+        &self,
+        matrix: &SparseMatrix,
+        selection: &SolverSelection,
+    ) -> Result<Box<dyn LinearSolver>, SolverError> {
+        let info = self.select(matrix, selection)?;
+        self.create(&info.solver_name).ok_or_else(|| {
+            SolverError::backend_unavailable(format!(
+                "solver '{}' was selected but cannot be constructed",
+                info.solver_name
+            ))
+        })
+    }
+
+    /// Backwards-compatible automatic selection: returns the chosen solver, or
+    /// `None` if none is registered. Prefer [`Self::select`] /
+    /// [`Self::create_selected`] for new code.
+    pub fn auto_select(&self, matrix: &SparseMatrix) -> Option<Box<dyn LinearSolver>> {
+        let info = self.auto_select_info(matrix).ok()?;
+        self.create(&info.solver_name)
+    }
+}
+
+/// True if every diagonal entry of `matrix` is strictly positive.
+///
+/// This is a *necessary* (not sufficient) condition for SPD and is used only as
+/// a conservative screen for auto-selection. It never asserts definiteness.
+fn has_positive_diagonal(matrix: &SparseMatrix) -> bool {
+    let n = matrix.n;
+    let mut diag = vec![0.0f64; n];
+    if matrix.compressed {
+        for i in 0..n {
+            for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
+                if matrix.csr_cols[k] == i {
+                    diag[i] = matrix.csr_vals[k];
+                }
+            }
+        }
+    } else {
+        for k in 0..matrix.rows.len() {
+            if matrix.rows[k] == matrix.cols[k] {
+                diag[matrix.rows[k]] = matrix.vals[k];
+            }
+        }
+    }
+    diag.iter().all(|&d| d > 0.0)
 }
 
 impl Default for SolverRegistry {

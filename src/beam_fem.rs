@@ -11,7 +11,7 @@
 
 use crate::fea::{
     SparseMatrix,
-    solver::{LinearSolver, SolverError},
+    solver::{LinearSolver, SolverError, SolverRegistry, SolverSelection},
 };
 use crate::geometry::Point;
 use crate::material::Material;
@@ -296,6 +296,13 @@ impl<'a> BeamAnalysisResult<'a> {
     /// Number of elements in the analysed model.
     pub fn n_elements(&self) -> usize {
         self.solver.model.elements.len()
+    }
+
+    /// Name of the linear-solver backend used by the solve that produced this
+    /// result (`"dense"`, `"skyline_ldlt"`, `"sparse_lu"`, `"cg"`, `"iccg"`,
+    /// ...), or `None` if no linear system was solved (e.g. fully constrained).
+    pub fn solver_name(&self) -> Option<&str> {
+        self.solver.solver_name()
     }
 
     /// Raw global displacement vector, DOF-ordered
@@ -1074,6 +1081,10 @@ pub struct BeamSolver {
     n_dof: usize,
     /// Model reference
     model: BeamModel,
+    /// Configured solver selection (defaults to [`SolverSelection::Auto`]).
+    solver_selection: SolverSelection,
+    /// Name of the backend used by the most recent successful solve, if any.
+    solver_name: Option<String>,
 }
 
 impl BeamSolver {
@@ -1333,6 +1344,8 @@ impl BeamSolver {
             k_original,
             n_dof,
             model: model.clone(),
+            solver_selection: SolverSelection::Auto,
+            solver_name: None,
         })
     }
 
@@ -1443,12 +1456,39 @@ impl BeamSolver {
         None
     }
 
-    /// Solve the system using the provided LinearSolver
-    pub fn solve(&mut self, solver: &mut dyn LinearSolver) -> Result<(), FemError> {
-        // Apply boundary conditions using static condensation
-        let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
-            self.apply_boundary_conditions();
+    /// Configure the solver selection used by [`Self::solve_configured`].
+    ///
+    /// Defaults to [`SolverSelection::Auto`]. Explicit selections are
+    /// authoritative: if the requested backend cannot handle the condensed
+    /// stiffness matrix, [`Self::solve_configured`] returns an error and does
+    /// **not** substitute another backend.
+    pub fn set_solver(&mut self, selection: SolverSelection) {
+        self.solver_selection = selection;
+    }
 
+    /// The configured solver selection.
+    pub fn solver_selection(&self) -> &SolverSelection {
+        &self.solver_selection
+    }
+
+    /// Name of the backend used by the most recent successful solve.
+    ///
+    /// Returns `None` before a solve, or when the model was fully constrained
+    /// (no linear system was solved).
+    pub fn solver_name(&self) -> Option<&str> {
+        self.solver_name.as_deref()
+    }
+
+    /// Factorize and expand a condensed system into the global solution.
+    fn factor_and_expand(
+        &mut self,
+        solver: &mut dyn LinearSolver,
+        mut k_ff: SparseMatrix,
+        f_reduced: Vec<f64>,
+        free_to_global: Vec<usize>,
+        constrained_dofs: Vec<usize>,
+        constrained_values: Vec<f64>,
+    ) -> Result<(), FemError> {
         if k_ff.n == 0 {
             // All DOFs fixed - just set prescribed values
             self.u_global = vec![0.0; self.n_dof];
@@ -1458,16 +1498,11 @@ impl BeamSolver {
             return Ok(());
         }
 
-        // Compress matrix if needed
-        let mut k_compressed = k_ff.clone();
-        k_compressed.compress();
-
-        // Factorize
+        k_ff.compress();
         solver
-            .factor(&k_compressed)
+            .factor(&k_ff)
             .map_err(|e| FemError::SolverError(e.to_string()))?;
 
-        // Solve reduced system
         let u_free = solver
             .solve(&f_reduced)
             .map_err(|e| FemError::SolverError(e.to_string()))?;
@@ -1477,11 +1512,75 @@ impl BeamSolver {
         for (free_idx, &global_idx) in free_to_global.iter().enumerate() {
             self.u_global[global_idx] = u_free[free_idx];
         }
-        // Set prescribed values for constrained DOFs
         for (i, &global_idx) in constrained_dofs.iter().enumerate() {
             self.u_global[global_idx] = constrained_values[i];
         }
+        Ok(())
+    }
 
+    /// Solve the system using the provided LinearSolver.
+    ///
+    /// The caller owns solver construction; [`Self::solve_configured`] instead
+    /// uses the configured [`SolverSelection`].
+    pub fn solve(&mut self, solver: &mut dyn LinearSolver) -> Result<(), FemError> {
+        let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
+            self.apply_boundary_conditions();
+        self.factor_and_expand(
+            solver,
+            k_ff,
+            f_reduced,
+            free_to_global,
+            constrained_dofs,
+            constrained_values,
+        )?;
+        self.solver_name = Some(solver.name().to_string());
+        Ok(())
+    }
+
+    /// Solve using the configured [`SolverSelection`] (default [`Auto`]).
+    ///
+    /// The backend is chosen via [`SolverRegistry`] against the **condensed**
+    /// (boundary-conditioned) stiffness matrix — the matrix that is actually
+    /// factorized. Capability validation therefore sees the real system.
+    ///
+    /// # Errors
+    ///
+    /// All solver errors propagate as [`FemError::SolverError`]; an explicit
+    /// invalid selection (e.g. a non-symmetric system with `skyline_ldlt`)
+    /// returns an error and never silently switches backend.
+    ///
+    /// [`Auto`]: SolverSelection::Auto
+    pub fn solve_configured(&mut self) -> Result<(), FemError> {
+        let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
+            self.apply_boundary_conditions();
+
+        if k_ff.n == 0 {
+            self.u_global = vec![0.0; self.n_dof];
+            for (i, &global_idx) in constrained_dofs.iter().enumerate() {
+                self.u_global[global_idx] = constrained_values[i];
+            }
+            self.solver_name = None;
+            return Ok(());
+        }
+
+        let mut k_probe = k_ff.clone();
+        k_probe.compress();
+
+        let registry = SolverRegistry::default();
+        let mut solver = registry
+            .create_selected(&k_probe, &self.solver_selection)
+            .map_err(|e| FemError::SolverError(e.to_string()))?;
+        let name = solver.name().to_string();
+
+        self.factor_and_expand(
+            &mut *solver,
+            k_ff,
+            f_reduced,
+            free_to_global,
+            constrained_dofs,
+            constrained_values,
+        )?;
+        self.solver_name = Some(name);
         Ok(())
     }
 

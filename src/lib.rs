@@ -42,8 +42,9 @@ pub use crate::beam_fem::{
 };
 pub use crate::fea::{
     LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
-    solver::SolverBackend, solver::SolverCapabilities, solver::SolverError, solver::SolverRegistry,
-    solvers,
+    solver::SelectionReason, solver::SolverBackend, solver::SolverCapabilities,
+    solver::SolverError, solver::SolverRegistry, solver::SolverSelection,
+    solver::SolverSelectionInfo, solvers,
 };
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
