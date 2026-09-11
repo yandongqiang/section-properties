@@ -477,3 +477,73 @@ fn test_dense_gaussian_forces_multiple_pivots_3x3() {
     let res = max_residual(&a, &x, &b);
     assert!(res < 1e-12, "residual ||Ax-b||_inf = {:.3e}", res);
 }
+
+/// Regression: a failed `factor()` must invalidate any previous successful
+/// factorization. A subsequent `solve()` may not silently reuse stale factors
+/// and must return `SolverError::NotFactorized`. A later successful
+/// factorization must restore normal operation.
+#[test]
+fn test_failed_refactor_invalidates_previous_factorization() {
+    let registry = SolverRegistry::default();
+
+    // Valid SPD (diagonal) system.
+    let mut a = SparseMatrix::new(3);
+    a.add(0, 0, 4.0);
+    a.add(1, 1, 5.0);
+    a.add(2, 2, 6.0);
+    a.compress();
+
+    // A matrix every backend rejects (empty).
+    let empty = SparseMatrix::new(0);
+
+    for name in ["dense", "skyline_ldlt", "sparse_lu", "cg", "iccg"] {
+        let mut solver = registry
+            .create(name)
+            .unwrap_or_else(|| panic!("{} solver not found", name));
+
+        // Fresh solver: not factorized yet.
+        assert!(
+            matches!(
+                solver.solve(&[1.0, 2.0, 3.0]),
+                Err(SolverError::NotFactorized)
+            ),
+            "{}: fresh solver should return NotFactorized",
+            name
+        );
+
+        // Successful factorization => solve works.
+        solver
+            .factor(&a)
+            .unwrap_or_else(|e| panic!("{}: factor(valid) failed: {:?}", name, e));
+        assert!(
+            solver.solve(&[1.0, 2.0, 3.0]).is_ok(),
+            "{}: solve after successful factor",
+            name
+        );
+
+        // Failed factorization must invalidate the previous one.
+        assert!(
+            solver.factor(&empty).is_err(),
+            "{}: factor(empty) should return Err",
+            name
+        );
+        assert!(
+            matches!(
+                solver.solve(&[1.0, 2.0, 3.0]),
+                Err(SolverError::NotFactorized)
+            ),
+            "{}: stale factorization still usable after a failed factor()",
+            name
+        );
+
+        // A successful refactorization restores normal operation.
+        solver
+            .factor(&a)
+            .unwrap_or_else(|e| panic!("{}: refactor(valid) failed: {:?}", name, e));
+        assert!(
+            solver.solve(&[1.0, 2.0, 3.0]).is_ok(),
+            "{}: solve after refactorization",
+            name
+        );
+    }
+}

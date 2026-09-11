@@ -30,6 +30,11 @@ impl LinearSolver for SparseLuSolver {
     }
 
     fn factor(&mut self, matrix: &SparseMatrix) -> Result<(), SolverError> {
+        // Invalidate any previous factorization first, so a failed factor()
+        // cannot leave stale factors usable by a later solve().
+        self.lu = None;
+        self.n = 0;
+
         let n = matrix.n;
         if n == 0 {
             return Err(SolverError::invalid_input("Empty matrix"));

@@ -14,7 +14,9 @@
 //! stiffness matrices (it returns an error rather than a silently wrong answer)
 //! and is therefore documented, not asserted, below.
 
-use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver};
+use section_properties::beam_fem::{
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
+};
 use section_properties::fea::solver::SolverRegistry;
 use section_properties::material::Material;
 
@@ -767,14 +769,16 @@ fn test_backend_iterative_cg_applicable() {
     );
 }
 
-/// ICCG is currently NOT reliable for beam stiffness matrices: its IC(0)
-/// factorisation/convergence fails on several beams and returns an **error**
-/// (fail-safe — never a silently wrong answer). This test documents that
-/// behaviour: whenever ICCG returns Ok, the solution must satisfy equilibrium
-/// and match the direct reference; on Err it must simply be treated as
-/// unsupported. We do not weaken the solver-selection rules for it.
+/// ICCG (`iccg`) is an optional iterative backend. It may fail on some beam
+/// stiffness matrices (its IC(0) factorisation is not always applicable); when
+/// it does, it must report an explicit solver error rather than a silently
+/// wrong result. This test does **not** require ICCG to fail: every successful
+/// result is validated against the dense reference plus the independent
+/// residual/energy audit, and every failure must be an explicit
+/// [`FemError::SolverError`]. The test stays valid if ICCG improves and all
+/// cases begin to pass.
 #[test]
-fn test_backend_iccg_documented_limitation() {
+fn test_backend_iccg_optional() {
     let (l, e, i) = (1.0, E0, i0());
     let mk = |kind: u32| {
         let mut m = chain(1, l, e, A0, i);
@@ -789,7 +793,8 @@ fn test_backend_iccg_documented_limitation() {
     };
 
     let registry = SolverRegistry::default();
-    let mut failed = 0;
+    let mut ok_count = 0;
+    let mut err_count = 0;
     for kind in 0..4u32 {
         let model = mk(kind);
         let reference = solve_backend(&model, "dense");
@@ -797,7 +802,8 @@ fn test_backend_iccg_documented_limitation() {
         let mut linear = registry.create("iccg").unwrap();
         match solver.solve(&mut *linear) {
             Ok(()) => {
-                // If it claims success, it must agree with the direct reference.
+                ok_count += 1;
+                // A successful result is held to the same correctness bar.
                 assert_pair(
                     solver.displacement(1, 1),
                     reference.displacement(1, 1),
@@ -812,16 +818,24 @@ fn test_backend_iccg_documented_limitation() {
                     1e-6,
                     "iccg vs dense Ry",
                 );
+                let a = audit(&model, &solver);
+                assert!(
+                    a.free_res <= 1e-6 * a.range,
+                    "iccg free-DOF residual {:.3e}",
+                    a.free_res
+                );
+                assert!(
+                    a.energy_rel <= 1e-9,
+                    "iccg energy mismatch {:.3e}",
+                    a.energy_rel
+                );
             }
-            Err(_) => failed += 1,
+            Err(FemError::SolverError(_)) => err_count += 1,
+            Err(other) => panic!("iccg returned an unexpected non-solver error: {:?}", other),
         }
     }
-    assert!(
-        failed > 0,
-        "expected ICCG to report failure on at least one beam case"
-    );
     println!(
-        "[iccg] {}/4 beam cases returned an error (unsupported); no silently-wrong results",
-        failed
+        "[iccg] {}/4 validated successes, {}/4 explicit solver failures (no silently-wrong results)",
+        ok_count, err_count
     );
 }

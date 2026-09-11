@@ -41,6 +41,12 @@ impl LinearSolver for SkylineLdltSolver {
     }
 
     fn factor(&mut self, matrix: &SparseMatrix) -> Result<(), SolverError> {
+        // A new factorization invalidates any previous one, even if this call
+        // fails: a failed factor() must never leave a stale factorization that
+        // a subsequent solve() could use.
+        self.inner = None;
+        self.n = 0;
+
         let n = matrix.n;
         if n == 0 {
             return Err(SolverError::invalid_input("Empty matrix"));

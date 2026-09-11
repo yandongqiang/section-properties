@@ -31,6 +31,12 @@ impl LinearSolver for DenseGaussianSolver {
     }
 
     fn factor(&mut self, matrix: &SparseMatrix) -> Result<(), SolverError> {
+        // Invalidate any previous factorization first, so a failed factor()
+        // cannot leave stale factors usable by a later solve().
+        self.n = 0;
+        self.a = Vec::new();
+        self.pivot = Vec::new();
+
         let n = matrix.n;
         if n == 0 {
             return Err(SolverError::invalid_input("Empty matrix"));
