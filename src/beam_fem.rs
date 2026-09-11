@@ -343,22 +343,22 @@ impl BeamElement {
         let f_v_j = fy * N3;
         let f_theta_j = fy * N4;
 
-        // Moment: shape functions for applied moment
-        // M1 = 1 - 3ξ² + 2ξ³ (same as N1 for transverse displacement due to moment)
-        // M2 = L(ξ - ξ²) (moment shape function for θ_i)
-        // M3 = 3ξ² - 2ξ³ (same as N3 for transverse displacement due to moment)
-        // M4 = L(-ξ² + ξ³) (same as N4 for θ_j)
-        // For a point moment mz at ξ, the equivalent nodal moments are:
-        // f_θ_i = mz * L(ξ - ξ²) = mz * M2
-        // f_θ_j = mz * L(-ξ² + ξ³) = mz * M4
-        // And the equivalent transverse forces:
-        // f_v_i = mz * (6ξ/L * (ξ - 1)) = mz * (-6ξ/L * one_minus_xi)
-        // f_v_j = mz * (-6ξ/L * one_minus_xi)
+        // Moment: shape functions for applied moment (from virtual work: δW = M * δθ(x_p))
+        // Rotation shape functions: θ(x) = dN1/dx * v_i + dN2/dx * θ_i + dN3/dx * v_j + dN4/dx * θ_j
+        // M1 = dN1/dx = (6/L)(ξ² - ξ) = -(6/L)ξ(1-ξ)
+        // M2 = dN2/dx = 1 - 4ξ + 3ξ²
+        // M3 = dN3/dx = (6/L)(ξ - ξ²) = (6/L)ξ(1-ξ)
+        // M4 = dN4/dx = -2ξ + 3ξ²
+        // For a point moment mz at ξ, the equivalent nodal loads are:
+        // f_v_i = mz * M1 = -6mz/L * ξ(1-ξ)
+        // f_θ_i = mz * M2 = mz * (1 - 4ξ + 3ξ²)
+        // f_v_j = mz * M3 = 6mz/L * ξ(1-ξ)
+        // f_θ_j = mz * M4 = mz * (-2ξ + 3ξ²)
         let one_minus_xi = 1.0 - xi;
-        let f_v_i_moment = mz * (-6.0 * xi * one_minus_xi / L);
-        let f_theta_i_moment = mz * L * (xi - xi2);     // M2 = L(ξ - ξ²)
-        let f_v_j_moment = mz * (6.0 * xi * one_minus_xi / L);
-        let f_theta_j_moment = mz * L * (-xi2 + xi3);   // M4 = L(-ξ² + ξ³)
+        let f_v_i_moment = mz * (-6.0 * xi * one_minus_xi / L);  // M1 = -(6/L)ξ(1-ξ)
+        let f_theta_i_moment = mz * (1.0 - 4.0 * xi + 3.0 * xi2);  // M2 = 1 - 4ξ + 3ξ²
+        let f_v_j_moment = mz * (6.0 * xi * one_minus_xi / L);    // M3 = (6/L)ξ(1-ξ)
+        let f_theta_j_moment = mz * (-2.0 * xi + 3.0 * xi2);      // M4 = -2ξ + 3ξ²
 
         Ok([
             f_u_i,                        // u_i: axial
@@ -1198,6 +1198,11 @@ impl BeamSolver {
         } else {
             0.0
         }
+    }
+
+    /// Get the global stiffness matrix (for debugging)
+    pub fn stiffness_matrix(&self) -> &SparseMatrix {
+        &self.k_original
     }
 
     /// Compute element end forces in LOCAL coordinates
