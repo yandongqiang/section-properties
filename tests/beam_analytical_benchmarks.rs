@@ -1007,3 +1007,178 @@ fn test_benchmark_n_result_api_consistency() {
 
     println!("[N result API] all accessors delegate consistently to BeamSolver");
 }
+
+// ===========================================================================
+// Benchmark O — BeamAnalysisResult::displacements() layout
+// ===========================================================================
+
+#[test]
+fn test_benchmark_o_result_displacements_layout() {
+    let (l, e, i) = (1.0, E0, i0());
+
+    // 2 elements → 3 nodes → 9 DOFs; load all three components so ordering
+    // cannot be masked by symmetry.
+    let mut model = beam_chain(2, l, e, A0, i);
+    model.add_nodal_force(2, 0, 300.0);
+    model.add_nodal_force(2, 1, -1000.0);
+    model.add_applied_moment(2, 500.0).unwrap();
+    let solver = solve(&model);
+    let r = solver.results();
+
+    let u = r.displacements();
+    assert_eq!(u.len(), r.n_nodes() * 3, "len == n_nodes * 3");
+    assert_eq!(u.len(), 9);
+
+    // Documented layout: [ux0, uy0, rz0, ux1, uy1, rz1, ...].
+    for node in 0..r.n_nodes() {
+        // Numerical equality with the solver's per-DOF accessor.
+        assert_eq!(u[node * 3], solver.displacement(node, 0), "DOF order ux");
+        assert_eq!(
+            u[node * 3 + 1],
+            solver.displacement(node, 1),
+            "DOF order uy"
+        );
+        assert_eq!(
+            u[node * 3 + 2],
+            solver.displacement(node, 2),
+            "DOF order rz"
+        );
+
+        // And with the typed result accessor.
+        let d = r.displacement(node).unwrap();
+        assert_eq!(d.ux, u[node * 3]);
+        assert_eq!(d.uy, u[node * 3 + 1]);
+        assert_eq!(d.rz, u[node * 3 + 2]);
+    }
+
+    // Spot-check the physical values (belt and braces on ordering).
+    assert_eq!(u[0], 0.0); // node0 ux (fixed)
+    assert_eq!(u[1], 0.0); // node0 uy (fixed)
+    assert_eq!(u[2], 0.0); // node0 rz (fixed)
+    assert!(u[6] > 0.0, "tip ux tension positive, got {}", u[6]);
+    assert!(u[7] < 0.0, "tip uy downward, got {}", u[7]);
+
+    println!(
+        "[O result layout] len={} layout [ux,uy,rz] x nodes verified",
+        u.len()
+    );
+}
+
+// ===========================================================================
+// Benchmark P — cantilever with an interior concentrated moment (analytical)
+//
+// Cantilever, fixed at x=0, free at x=L, with a CCW moment M0 at x=xp.
+// Independent analytical solution (project sign convention, sagging M+):
+//   reactions:      Rx = Ry = 0, Rz = -M0
+//   internal M(x):  M0   for x < xp
+//                   0    for x > xp          (V(x) = 0 everywhere)
+//   jump:           M(xp+) - M(xp-) = -M0
+//   slope (cont.):  theta(L) = M0·xp/(E·I)
+//   tip deflect.:   v(L) = M0·xp·(L - xp/2)/(E·I)
+// ===========================================================================
+
+fn interior_moment_analytical(m0: f64, xp: f64, l: f64, ei: f64) -> (f64, f64) {
+    let theta = m0 * xp / ei;
+    let v = m0 * xp * (l - xp / 2.0) / ei;
+    (v, theta)
+}
+
+/// Case (a): the moment is applied at a mesh NODE at x = xp (exact FE).
+#[test]
+fn test_benchmark_p_interior_moment_at_node() {
+    let (l, m0, xp) = (1.0, 1000.0, 0.4);
+    let (e, a, i) = (200e9, 1.0, 1.0); // A = I = 1 for unambiguous numbers
+    let ei = e * i;
+
+    // 5 equal elements of length 0.2 → node 2 is exactly at x = 0.4.
+    let mut model = beam_chain(5, l, e, a, i);
+    model.add_applied_moment(2, m0).unwrap(); // CCW external moment at x = 0.4
+    let solver = solve(&model);
+    let r = solver.results();
+
+    // Reactions and global equilibrium.
+    let rr = r.reaction(0).unwrap();
+    assert_close(rr.fx, 0.0, 1e-10, "Rx");
+    assert_close(rr.fy, 0.0, 1e-10, "Ry");
+    assert_close(rr.mz, -m0, 1e-10, "Rz = -M0");
+    assert_close(rr.mz + m0, 0.0, 1e-10, "ΣMz");
+
+    // Section moment diagram and jump.
+    let left = solver.element_section_forces(1, 1.0).unwrap(); // x=0.4, left side
+    let right = solver.element_section_forces(2, 0.0).unwrap(); // x=0.4, right side
+    assert_close(left.moment, m0, 1e-9, "M(0.4-) = +M0");
+    assert_close(right.moment, 0.0, 1e-9, "M(0.4+) = 0");
+    assert_close(right.moment - left.moment, -m0, 1e-9, "jump = -M0");
+
+    // M is +M0 before xp and 0 after; V = 0 throughout.
+    let before = solver.element_section_forces(0, 0.5).unwrap(); // x = 0.1
+    let after = solver.element_section_forces(4, 0.5).unwrap(); // x = 0.9
+    assert_close(before.moment, m0, 1e-9, "M(x<xp) = M0");
+    assert_close(after.moment, 0.0, 1e-9, "M(x>xp) = 0");
+    assert_close(before.shear, 0.0, 1e-10, "V = 0");
+    assert_close(after.shear, 0.0, 1e-10, "V = 0");
+    assert_close(
+        solver.element_section_forces(4, 1.0).unwrap().moment,
+        0.0,
+        1e-10,
+        "free-end M = 0",
+    );
+
+    // Tip displacement / rotation (exact with a node at xp).
+    let (v_an, th_an) = interior_moment_analytical(m0, xp, l, ei);
+    assert_close(r.displacement(5).unwrap().rz, th_an, 1e-9, "tip rz");
+    assert_close(r.displacement(5).unwrap().uy, v_an, 1e-9, "tip uy");
+
+    println!(
+        "[P nodal moment] Rz={:.6e} (an {:.6e}) | tip rz={:.6e} (an {:.6e}) tip uy={:.6e} (an {:.6e})",
+        rr.mz,
+        -m0,
+        r.displacement(5).unwrap().rz,
+        th_an,
+        r.displacement(5).unwrap().uy,
+        v_an
+    );
+}
+
+/// Case (b): the moment is applied INSIDE a single element at xi = xp/L.
+/// Reactions, the moment diagram, the jump and the tip displacement/rotation
+/// are all verified against the independent analytical piecewise solution.
+#[test]
+fn test_benchmark_p_interior_moment_inside_element() {
+    let (l, m0, xp) = (1.0, 1000.0, 0.4);
+    let (e, a, i) = (200e9, 1.0, 1.0);
+    let ei = e * i;
+
+    let mut model = beam_chain(1, l, e, a, i);
+    model.add_point_moment(0, xp, m0).unwrap(); // moment inside element 0
+    let solver = solve(&model);
+    let r = solver.results();
+
+    // Reactions / global equilibrium.
+    let rr = r.reaction(0).unwrap();
+    assert_close(rr.fy, 0.0, 1e-10, "Ry");
+    assert_close(rr.mz + m0, 0.0, 1e-10, "ΣMz");
+    assert_close(rr.mz, -m0, 1e-10, "Rz = -M0");
+
+    // Moment diagram + jump (exact by equilibrium recovery).
+    let left = solver.element_section_forces(0, xp).unwrap(); // left limit
+    let right = solver.element_section_forces(0, xp + 1e-6).unwrap();
+    assert_close(left.moment, m0, 1e-6, "M(xp-) = +M0");
+    assert_close(right.moment, 0.0, 1e-6, "M(xp+) = 0");
+    assert_close(right.moment - left.moment, -m0, 1e-6, "jump = -M0");
+    assert_close(left.shear, 0.0, 1e-9, "V = 0");
+
+    // Analytical piecewise solution.
+    let (v_an, th_an) = interior_moment_analytical(m0, xp, l, ei);
+    let th = r.displacement(1).unwrap().rz;
+    let v = r.displacement(1).unwrap().uy;
+    let e_th = (th - th_an).abs() / th_an.abs();
+    let e_v = (v - v_an).abs() / v_an.abs();
+    assert_close(th, th_an, 1e-9, "tip rz");
+    assert_close(v, v_an, 1e-9, "tip uy");
+
+    println!(
+        "[P interior moment] Rz={:.6e} (an {:.6e}) | tip rz={:.6e} (an {:.6e}, rel {:.2e}) tip uy={:.6e} (an {:.6e}, rel {:.2e})",
+        rr.mz, -m0, th, th_an, e_th, v, v_an, e_v
+    );
+}
