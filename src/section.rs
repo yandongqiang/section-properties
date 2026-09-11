@@ -411,7 +411,7 @@ impl Section {
     ///
     /// Returns `Err` with a descriptive message if validation fails.
     pub fn new_validated(outer: Polygon, holes: Vec<Polygon>) -> Result<Self, String> {
-        let mut section = Self::new(outer, holes);
+        let section = Self::new(outer, holes);
         section.validate()?;
         Ok(section)
     }

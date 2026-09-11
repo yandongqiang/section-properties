@@ -849,7 +849,7 @@ fn split_into_loops(verts: &[Point], intersections: &[Intersection]) -> Vec<Vec<
 
     // Map from (edge_idx, intersection_idx) -> vertex index
     let mut inter_vertex_idx = vec![None; num_intersections];
-    for (idx, inter) in intersections.iter().enumerate() {
+    for (idx, _inter) in intersections.iter().enumerate() {
         inter_vertex_idx[idx] = Some(n + idx);
     }
 
@@ -864,7 +864,7 @@ fn split_into_loops(verts: &[Point], intersections: &[Intersection]) -> Vec<Vec<
         // Collect all vertices on this edge: start, intersections..., end
         let mut edge_verts = vec![a_orig_idx];
 
-        for &(t, inter_idx) in &edge_intersections[edge_idx] {
+        for &(_t, inter_idx) in &edge_intersections[edge_idx] {
             if let Some(v_idx) = inter_vertex_idx[inter_idx] {
                 edge_verts.push(v_idx);
             }

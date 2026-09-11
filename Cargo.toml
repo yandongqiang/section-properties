@@ -2,6 +2,7 @@
 name = "section-properties"
 version = "0.1.0"
 edition = "2024"
+description = "Structural cross-section properties: geometric/principal moments, section moduli, warping/torsion FEM, plastic, cold-formed, and fire analysis."
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

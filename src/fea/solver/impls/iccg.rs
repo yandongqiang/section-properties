@@ -93,7 +93,7 @@ impl LinearSolver for IccgSolver {
 
         // IC(0) factorization
         for i in 0..n {
-            let diag_pos = l_row_ptr[i + 1] - 1; // Diagonal is last in row
+            let _diag_pos = l_row_ptr[i + 1] - 1; // Diagonal is last in row
 
             // Compute diagonal
             let mut sum = 0.0;
@@ -123,7 +123,6 @@ impl LinearSolver for IccgSolver {
             // Compute off-diagonals
             for idx in l_row_ptr[i]..l_row_ptr[i + 1] - 1 {
                 let j = l_col_idx[idx];
-                let mut sum = 0.0;
 
                 // Find A_ij
                 let mut a_ij = 0.0;
@@ -133,7 +132,7 @@ impl LinearSolver for IccgSolver {
                         break;
                     }
                 }
-                sum = a_ij;
+                let mut sum = a_ij;
 
                 // Subtract contributions
                 for idx2 in l_row_ptr[j]..l_row_ptr[j + 1] {

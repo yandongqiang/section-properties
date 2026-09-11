@@ -10,6 +10,7 @@ pub struct SkylineLdltSolver {
     row_start: Vec<usize>,
     col_start: Vec<usize>,
     scale: f64,
+    #[allow(dead_code)]
     symmetric: bool,
 }
 
@@ -88,7 +89,7 @@ impl LinearSolver for SkylineLdltSolver {
 
         // Fill skyline matrix
         for i in 0..n {
-            let diag_idx = row_start[i + 1] - 1;
+            let _diag_idx = row_start[i + 1] - 1;
             for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
                 let j = matrix.csr_cols[k];
                 let val = matrix.csr_vals[k];

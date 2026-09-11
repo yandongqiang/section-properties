@@ -3,12 +3,8 @@
 //! Provides St. Venant torsion constant (J), warping constant (Iw),
 //! shear center coordinates, and torsional-warping section properties.
 
-use super::warping_fem::{
-    FemSolution, FemWarpingResult, FemWarpingSolution, analytical_beta, analytical_shear_center,
-    compute_fem_solution, compute_fem_warping_properties, compute_fem_warping_solution,
-};
+use super::warping_fem::{compute_fem_solution, compute_fem_warping_properties};
 use crate::geometry::Point;
-use crate::material::Material;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
 
@@ -372,31 +368,6 @@ impl TorsionAnalysis {
             theta_prime,
             warping_displacement,
         }
-    }
-}
-
-trait SectionDistance {
-    fn max_distance_from(&self, from: Point) -> f64;
-}
-
-impl SectionDistance for Section {
-    fn max_distance_from(&self, from: Point) -> f64 {
-        let mut max_dist: f64 = 0.0;
-        for v in &self.outer.vertices {
-            let dx = v.x - from.x;
-            let dy = v.y - from.y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            max_dist = max_dist.max(dist);
-        }
-        for hole in &self.holes {
-            for v in &hole.vertices {
-                let dx = v.x - from.x;
-                let dy = v.y - from.y;
-                let dist = (dx * dx + dy * dy).sqrt();
-                max_dist = max_dist.max(dist);
-            }
-        }
-        max_dist
     }
 }
 

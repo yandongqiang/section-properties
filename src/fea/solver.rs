@@ -339,7 +339,7 @@ impl SolverRegistry {
         } else {
             matrix.vals.len()
         };
-        let density = nnz as f64 / (n * n) as f64;
+        let _density = nnz as f64 / (n * n) as f64;
 
         // Small matrices: dense handles everything
         if n <= 500 {

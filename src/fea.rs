@@ -681,14 +681,14 @@ impl Tri6 {
             let [_, _, d1, d2, h1, h2] = shear_parameter(sf.x, sf.y, ixx, iyy, ixy);
 
             // Bending stresses
-            if denom.abs() > NEAR_ZERO_TOL {
+            if denom.abs() > NEAR_ZERO_TOL_BASE {
                 sig_zz_mxx_gp[i] = em * (-ixy * mxx / denom * sf.x + iyy * mxx / denom * sf.y);
                 sig_zz_myy_gp[i] = em * (-ixx * myy / denom * sf.x + ixy * myy / denom * sf.y);
             }
-            if i11.abs() > NEAR_ZERO_TOL {
+            if i11.abs() > NEAR_ZERO_TOL_BASE {
                 sig_zz_m11_gp[i] = em * m11 / i11 * ny_22;
             }
-            if i22.abs() > NEAR_ZERO_TOL {
+            if i22.abs() > NEAR_ZERO_TOL_BASE {
                 sig_zz_m22_gp[i] = em * -m22 / i22 * nx_11;
             }
 
@@ -1169,7 +1169,7 @@ pub fn cg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgRes
     let mut m_inv = vec![1.0; n];
     for i in 0..n {
         let d = a.diag[i];
-        if d.abs() > NEAR_ZERO_TOL {
+        if d.abs() > NEAR_ZERO_TOL_BASE {
             m_inv[i] = 1.0 / d;
         }
     }
@@ -1386,7 +1386,7 @@ pub fn solve_lagrange_sparse_tol(
     let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(a, b)| a * b).sum();
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(a, b)| a * b).sum();
 
-    if ct_w2.abs() < NEAR_ZERO_TOL {
+    if ct_w2.abs() < NEAR_ZERO_TOL_BASE {
         return Ok(w1);
     }
     let lambda = ct_w1 / ct_w2;
@@ -1770,7 +1770,7 @@ impl DirectLagrangeSolver {
                 let w2 = ldlt.solve(&self.c)?;
                 let ct_w2: f64 = self.c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
                 let ct_w1: f64 = self.c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-                let lambda = if ct_w2.abs() > NEAR_ZERO_TOL {
+                let lambda = if ct_w2.abs() > NEAR_ZERO_TOL_BASE {
                     ct_w1 / ct_w2
                 } else {
                     0.0
@@ -1986,9 +1986,9 @@ impl SkylineLdlt {
         // First pass: compute diagonal scale for scale-invariant pivot tolerance
         let mut diag_for_scale = vec![0.0f64; n];
         for i in 0..n {
-            let mut d = 0.0;
-            for k in first[i]..i {
-                let l_ik = 0.0; // L not yet computed, but we only need diag for scale
+            let _d = 0.0;
+            for _k in first[i]..i {
+                let _l_ik = 0.0; // L not yet computed, but we only need diag for scale
             }
             // We need a preliminary diagonal. Use matrix diagonal as approximation.
             // The actual diagonal will be computed during factorization.
@@ -1996,7 +1996,7 @@ impl SkylineLdlt {
         }
         // Use matrix Frobenius norm as scale proxy for pivot tolerance
         let mut matrix_scale = 0.0f64;
-        for (&(r, c), &v) in map.iter() {
+        for (&(_r, _c), &v) in map.iter() {
             matrix_scale = matrix_scale.max(v.abs());
         }
         let pivot_tol = PIVOT_TOL_BASE * matrix_scale.max(1.0);

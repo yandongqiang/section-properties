@@ -1052,7 +1052,7 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
             // on the line. We can compute the overlap length parameter.
             // If the overlap is just a single point, it's Touch.
             let len_a2 = (a2.x - a1.x).powi(2) + (a2.y - a1.y).powi(2);
-            let len_b2 = (b2.x - b1.x).powi(2) + (b2.y - b1.y).powi(2);
+            let _len_b2 = (b2.x - b1.x).powi(2) + (b2.y - b1.y).powi(2);
 
             // Project b1, b2 onto segment a's line (parameter t in [0,1])
             let t_b1 = if len_a2 > EPS {
@@ -1121,22 +1121,6 @@ fn segment_relation(a1: Point, a2: Point, b1: Point, b2: Point) -> SegmentRelati
     }
 
     SegmentRelation::Disjoint
-}
-
-fn points_equal(p: Point, q: Point) -> bool {
-    const EPS: f64 = 1e-12;
-    (p.x - q.x).abs() <= EPS && (p.y - q.y).abs() <= EPS
-}
-
-/// Strict edge-crossing test: two segments A1→A2 and B1→B2 cross (share
-/// interior points) if and only if the endpoints of each segment straddle
-/// the line through the other. Touching at a single endpoint is **not**
-/// considered a cross (shared-vertex configurations are allowed).
-fn segments_cross(a1: Point, a2: Point, b1: Point, b2: Point) -> bool {
-    matches!(
-        segment_relation(a1, a2, b1, b2),
-        SegmentRelation::ProperCross
-    )
 }
 
 /// Check if two segments have any topological interaction (crossing, touching, or collinear overlap).

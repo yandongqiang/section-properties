@@ -1,6 +1,6 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
-use super::{CgResult, CgStatus, PIVOT_TOL_BASE, SkylineLdlt, SparseMatrix, cg_solve};
+use super::{CgResult, CgStatus, SkylineLdlt, SparseMatrix, cg_solve};
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,7 +356,7 @@ impl SparseLu {
     /// Returns error if matrix is singular or nearly singular.
     pub fn factor(a: &SparseMatrix) -> Result<SparseLu, String> {
         let n = a.n;
-        let mut ac = if a.compressed {
+        let ac = if a.compressed {
             None
         } else {
             let mut m = a.clone();
@@ -604,7 +604,7 @@ pub struct Ic0Factor {
 impl Ic0Factor {
     pub fn factor(a: &SparseMatrix) -> Result<Ic0Factor, String> {
         let n = a.n;
-        let mut ac = if a.compressed {
+        let ac = if a.compressed {
             None
         } else {
             let mut m = a.clone();
@@ -727,7 +727,7 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
     };
 
     let n = b.len();
-    let mut ac = if a.compressed {
+    let ac = if a.compressed {
         None
     } else {
         let mut m = a.clone();
@@ -840,7 +840,7 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
 pub mod pardiso {
     //! Direct solve via Intel MKL PARDISO (`mkl_rt`). Enable with
     //! `--features pardiso`; requires `mkl_rt.3.dll` (or equivalent) on PATH.
-    use super::super::{CscMatrix, NEAR_ZERO_TOL, NEAR_ZERO_TOL_BASE, SkylineLdlt, SparseMatrix};
+    use super::super::{CscMatrix, NEAR_ZERO_TOL_BASE, SkylineLdlt, SparseMatrix};
     use std::os::raw::c_void;
 
     #[link(name = "mkl_rt.2", kind = "raw-dylib")]

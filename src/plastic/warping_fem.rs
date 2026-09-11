@@ -10,7 +10,7 @@ use crate::fea::{
     solve_lagrange_sparse, tri3_to_tri6,
 };
 use crate::geometry::Point;
-use crate::mesh::{MeshControl, MeshParams, mesh_params_from_control, mesh_section};
+use crate::mesh::{MeshControl, mesh_params_from_control, mesh_section};
 use crate::plastic::warping::ThinWalledCheck;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
@@ -459,7 +459,7 @@ pub fn diagnose_exact_factorization(k: &SparseMatrix, c: &[f64], f: &[f64]) -> R
             for i in 0..n + 1 {
                 let mut norm = 0.0f64;
                 let (rows, cols, vals) = k_lg.triplets();
-                for (&r, (&c, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
+                for (&r, (&_c, &v)) in rows.iter().zip(cols.iter().zip(vals.iter())) {
                     if r == i {
                         norm += v.abs();
                     }
@@ -634,7 +634,7 @@ pub fn compute_fem_warping_solution(
         used_nodes[tri[1]] = true;
         used_nodes[tri[2]] = true;
     }
-    let node_map: Vec<Option<usize>> = used_nodes
+    let _node_map: Vec<Option<usize>> = used_nodes
         .iter()
         .enumerate()
         .map(|(i, &used)| if used { Some(i) } else { None })
@@ -706,7 +706,7 @@ pub fn compute_fem_warping_solution(
 
     let (
         omega_exact,
-        j_exact,
+        _j_exact,
         j_reg,
         max_abs_diff,
         max_rel_diff,
@@ -1055,7 +1055,7 @@ pub fn compute_fem_warping_solution(
         + sin_phi * (cos_phi * alpha_xy + sin_phi * alpha_yy);
     let rot_11 = (-sin_phi) * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
         + cos_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
-    let rot_01 = cos_phi * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
+    let _rot_01 = cos_phi * (-sin_phi * alpha_xx + cos_phi * alpha_xy)
         + sin_phi * (-sin_phi * alpha_xy + cos_phi * alpha_yy);
 
     let a_s11 = if rot_00.abs() > 1e-15 {
@@ -1200,7 +1200,7 @@ pub fn warping_svg(
 
 /// Geometry-based section type detection
 pub mod geometry_detection {
-    use crate::geometry::{Point, Polygon};
+    use crate::geometry::Polygon;
     use crate::section::Section;
 
     /// Check if a polygon is a circle/CHS approximation (many vertices, roughly equal radius)
@@ -1339,7 +1339,7 @@ use geometry_detection::*;
 /// Returns None for sections without known exact formulas (should use FEM).
 pub fn analytical_j(section: &Section, props: &SectionProperties) -> Option<f64> {
     // Try to detect section type from geometry
-    let area = props.area;
+    let _area = props.area;
 
     // Solid circle: J = π*r⁴/2
     if is_solid_circle(section) {
@@ -1436,7 +1436,7 @@ pub fn analytical_iw(section: &Section, props: &SectionProperties) -> Option<f64
 
 /// Compute exact shear area for solid rectangle
 pub fn exact_shear_area_rectangle(section: &Section, props: &SectionProperties) -> (f64, f64) {
-    if let Some((w, h)) = rectangle_dimensions(&section.outer) {
+    if let Some((_w, _h)) = rectangle_dimensions(&section.outer) {
         // For solid rectangle: Ay = 5/6 * A, Az = 5/6 * A (Timoshenko shear coefficients)
         // More precisely: Ay = A * (5/6) for shear in y-direction (vertical shear)
         // Az = A * (5/6) for shear in z-direction (horizontal shear)
@@ -1488,8 +1488,8 @@ pub fn exact_shear_area_chs(section: &Section, props: &SectionProperties) -> (f6
 pub fn analytical_shear_center(section: &Section, props: &SectionProperties) -> Point {
     // Use bounding box and symmetry to estimate
     let bounds = section.bounds();
-    let cx = props.centroid.x;
-    let cy = props.centroid.y;
+    let _cx = props.centroid.x;
+    let _cy = props.centroid.y;
 
     // Check if section is symmetric about x or y axis
     let sym_x = is_symmetric_about_x(section);
@@ -1539,15 +1539,15 @@ pub fn analytical_beta(props: &SectionProperties, shear_center: Point) -> (f64, 
 pub fn diag_test_eps(
     section: &Section,
     props: &SectionProperties,
-    nu: f64,
+    _nu: f64,
     eps_multiplier: f64,
 ) -> Result<(f64, f64, f64, f64), crate::mesh::fem::FemError> {
-    let cx = props.centroid.x;
-    let cy = props.centroid.y;
+    let _cx = props.centroid.x;
+    let _cy = props.centroid.y;
     let ixx = props.ix;
     let iyy = props.iy;
-    let ixy = props.ixy;
-    let ea = props.area;
+    let _ixy = props.ixy;
+    let _ea = props.area;
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
@@ -1718,7 +1718,7 @@ pub struct WarpingDiagnostics {
 pub fn diagnose_warping_fem(
     section: &Section,
     name: &str,
-    nu: f64,
+    _nu: f64,
 ) -> Result<WarpingDiagnostics, crate::mesh::fem::FemError> {
     let props = SectionProperties::from_section(section);
 
@@ -1741,7 +1741,7 @@ pub fn diagnose_warping_fem(
         used_nodes[tri[1]] = true;
         used_nodes[tri[2]] = true;
     }
-    let node_map: Vec<Option<usize>> = used_nodes
+    let _node_map: Vec<Option<usize>> = used_nodes
         .iter()
         .enumerate()
         .map(|(i, &used)| if used { Some(i) } else { None })
@@ -1820,20 +1820,20 @@ pub fn diagnose_warping_fem(
     k_global.compress();
     let k_sym_max_err = k_global.symmetry_max_error();
     let k_fro = k_global.frobenius_norm();
-    let k_sym_rel_err = if k_fro > 0.0 {
+    let _k_sym_rel_err = if k_fro > 0.0 {
         k_sym_max_err / k_fro
     } else {
         0.0
     };
 
     // Constraint info
-    let constraint_sum: f64 = c_global.iter().sum();
+    let _constraint_sum: f64 = c_global.iter().sum();
     let constraint_nodes: Vec<usize> = c_global
         .iter()
         .enumerate()
         .filter_map(|(i, &v)| if v.abs() > 1e-15 { Some(i) } else { None })
         .collect();
-    let constraint_dofs = constraint_nodes.len();
+    let _constraint_dofs = constraint_nodes.len();
 
     // Regularized K
     let k_reg = {
@@ -1854,7 +1854,7 @@ pub fn diagnose_warping_fem(
     // Solve for omega (warping)
     let ixx = props.ix;
     let iyy = props.iy;
-    let ixy = props.ixy;
+    let _ixy = props.ixy;
 
     let solver = crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
@@ -1886,14 +1886,14 @@ pub fn diagnose_warping_fem(
     }
     let residual_norm: f64 = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
     let f_norm: f64 = f_torsion.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let residual_rel = if f_norm > 0.0 {
+    let _residual_rel = if f_norm > 0.0 {
         residual_norm / f_norm
     } else {
         0.0
     };
 
     // C^T * omega
-    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    let _ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
 
     // w^T K w
     let mut kw = vec![0.0_f64; n_dof];
@@ -1914,10 +1914,10 @@ pub fn diagnose_warping_fem(
     // J_raw = Ixx + Iyy - w^T F
     let ixx_plus_iyy = ixx + iyy;
     let omega_dot_f = wtf;
-    let j_raw = ixx_plus_iyy - omega_dot_f;
+    let _j_raw = ixx_plus_iyy - omega_dot_f;
 
     // Energy identity: |w^T*K*w - w^T*F| / |w^T*F|
-    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+    let _energy_identity_rel_error = if wtf.abs() > 1e-15 {
         (wtkw - wtf).abs() / wtf.abs()
     } else {
         0.0
@@ -1949,8 +1949,8 @@ pub fn diagnose_warping_fem(
 
     // Compute J with fallback
     let j_fem = ixx + iyy - omega_dot_f;
-    let j_analytical = analytical_j(section, &props).unwrap_or(0.0);
-    let j_fallback = !j_fem.is_finite() || j_fem <= 0.0;
+    let _j_analytical = analytical_j(section, &props).unwrap_or(0.0);
+    let _j_fallback = !j_fem.is_finite() || j_fem <= 0.0;
 
     // Rank/nullity estimate
     let k_diag_count = (0..n_dof)
@@ -2003,18 +2003,6 @@ pub fn diagnose_warping_fem(
     // Verify F formulation: check if F uses global [y, -x] or centroidal [y-yc, -(x-xc)]
     // This is determined by checking if sum(F) is zero and moments match
     let f_formulation_global = sum_fx.abs() < 1e-10; // global formulation has sum(F) ≈ 0
-
-    // Verify element F formulation
-    // For torsion, F_e = ∫ B^T [y, -x] dA in global coordinates
-    // Let's verify by checking if element F matches global or centroidal
-    let mut f_formulation_verified = true;
-    for tri6 in &elements {
-        let (_, f_el, _) = tri6.torsion_properties();
-        let f_el_sum: f64 = f_el.iter().sum();
-        if f_el_sum.abs() > 1e-10 {
-            f_formulation_verified = false;
-        }
-    }
 
     Ok(WarpingDiagnostics {
         section_name: name.to_string(),
@@ -2106,7 +2094,7 @@ pub fn export_exact_augmented_system(
     let tri6_mesh = tri3_to_tri6(&new_nodes, &remapped_elements);
     let n = tri6_mesh.nodes.len();
 
-    let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
+    let _elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
 
     // Centroid shift
     let cx = props.centroid.x;
@@ -2312,7 +2300,7 @@ pub fn export_global_warping_matrices(
     use std::fs::File;
     use std::io::Write;
 
-    let props = SectionProperties::from_section(section);
+    let _props = SectionProperties::from_section(section);
 
     let bounds = section.bounds();
     let max_dim = (bounds.1 - bounds.0).max(bounds.3 - bounds.2);
@@ -2332,7 +2320,7 @@ pub fn export_global_warping_matrices(
         used_nodes[tri[1]] = true;
         used_nodes[tri[2]] = true;
     }
-    let node_map: Vec<Option<usize>> = used_nodes
+    let _node_map: Vec<Option<usize>> = used_nodes
         .iter()
         .enumerate()
         .map(|(i, &used)| if used { Some(i) } else { None })
@@ -2355,7 +2343,7 @@ pub fn export_global_warping_matrices(
     let n = tri6_mesh.nodes.len();
 
     let elements = build_tri6_elements(&tri6_mesh, 1.0, 1.0, 1.0)?;
-    let n_elements = elements.len();
+    let _n_elements = elements.len();
 
     // Global system assembly
     let mut k_global = SparseMatrix::new(n);
@@ -3022,7 +3010,7 @@ pub fn run_fem_on_python_mesh(
 
     // Convert Tri3 to Tri6
     let tri6_mesh = tri3_to_tri6(&vertices, &tri3_elements);
-    let n_dof = tri6_mesh.nodes.len();
+    let _n_dof = tri6_mesh.nodes.len();
     println!(
         "Tri6 mesh: {} nodes, {} elements",
         tri6_mesh.nodes.len(),
@@ -3061,7 +3049,7 @@ pub fn run_fem_on_python_mesh(
     };
 
     // Constraint info
-    let constraint_sum: f64 = c_global.iter().sum();
+    let _constraint_sum: f64 = c_global.iter().sum();
     let constraint_nodes: Vec<usize> = c_global
         .iter()
         .enumerate()
@@ -3086,9 +3074,9 @@ pub fn run_fem_on_python_mesh(
     };
 
     // Solve for omega (warping)
-    let ixx = 1.0; // placeholder - we don't have section properties here
-    let iyy = 1.0;
-    let ixy = 0.0;
+    let _ixx = 1.0; // placeholder - we don't have section properties here
+    let _iyy = 1.0;
+    let _ixy = 0.0;
 
     let solver = crate::fea::DirectLagrangeSolver::with_kernel(
         crate::fea::LagrangeKernel::Skyline,
@@ -3127,7 +3115,7 @@ pub fn run_fem_on_python_mesh(
     };
 
     // C^T * omega
-    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    let _ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
 
     // w^T K w
     let mut kw = vec![0.0_f64; n_dof];
@@ -3151,14 +3139,14 @@ pub fn run_fem_on_python_mesh(
     let j_raw = ixx_plus_iyy - omega_dot_f;
 
     // Energy identity
-    let energy_identity_rel_error = if wtf.abs() > 1e-15 {
+    let _energy_identity_rel_error = if wtf.abs() > 1e-15 {
         (wtkw - wtf).abs() / wtf.abs()
     } else {
         0.0
     };
 
     // C^T * omega
-    let ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
+    let _ct_omega: f64 = c_global.iter().zip(omega.iter()).map(|(c, w)| c * w).sum();
 
     // w^T K w
     let wtkw: f64 = omega.iter().zip(kw.iter()).map(|(w, kw)| w * kw).sum();

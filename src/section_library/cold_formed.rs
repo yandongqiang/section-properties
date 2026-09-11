@@ -588,7 +588,7 @@ impl ParametricSection for DeckProfile {
         let h = self.depth;
         let w = self.pitch;
         let wb = self.bottom_width;
-        let t = self.thickness;
+        let _t = self.thickness;
         let alpha = self.web_angle.to_radians();
 
         let hh = h / 2.0;
