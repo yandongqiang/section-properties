@@ -1230,7 +1230,27 @@ impl BeamSolver {
     /// - free-end node with applied moment `M`: `M_element_j + M ≈ 0`;
     /// - internal node with applied moment `M` shared by two elements:
     ///   `M_left_j + M_right_i + M ≈ 0`.
-    pub fn element_end_forces(&self) -> Vec<[f64; 6]> {
+    ///
+    /// # Scope: nodal end forces, NOT section internal forces
+    ///
+    /// This method returns the *element-on-node* nodal equilibrium forces at
+    /// `ξ = 0` and `ξ = 1` only. It is **not** a beam-section internal-force
+    /// diagram, and the two are not interchangeable when the element carries a
+    /// distributed load, an interior point force, or an interior point moment:
+    /// the end values here include the consistent-load contributions and say
+    /// nothing about `N(x)`, `V(x)`, `M(x)` *inside* the element.
+    ///
+    /// A future section-force API (`section_forces(xi)` /
+    /// `element_internal_force(xi)`) will compute the true internal resultants
+    /// at an arbitrary `ξ` via `f_int(ξ) = K·u` sectional relations plus the
+    /// load terms. Do not overload this method to mean both.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the equivalent point-load recovery
+    /// (see [`Self::element_equivalent_nodal_forces`]); a failed recovery is
+    /// never silently replaced by a zero load.
+    pub fn element_end_forces(&self) -> Result<Vec<[f64; 6]>, FemError> {
         let mut results = Vec::with_capacity(self.model.elements.len());
 
         for (elem_idx, element) in self.model.elements.iter().enumerate() {
@@ -1282,7 +1302,7 @@ impl BeamSolver {
                 element,
                 node_i,
                 node_j,
-            );
+            )?;
 
             // Element-on-node end forces: f_end = f_equiv - f_stiffness.
             let end_forces = [
@@ -1297,7 +1317,7 @@ impl BeamSolver {
             results.push(end_forces);
         }
 
-        results
+        Ok(results)
     }
 
     /// Compute equivalent nodal forces (in LOCAL coordinates) for an element
@@ -1306,13 +1326,21 @@ impl BeamSolver {
     /// force vector).
     ///
     /// Returns `[N_i, V_i, M_i, N_j, V_j, M_j]` in local coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`BeamElement::consistent_nodal_load_point`]
+    /// (for example a zero-length element). Point-load positions are validated
+    /// when the load is added via [`BeamModel::add_point_load`], so in normal
+    /// use this succeeds; the error path exists so that a failed equivalent-load
+    /// computation can never be silently turned into a zero load.
     fn element_equivalent_nodal_forces(
         model: &BeamModel,
         elem_idx: usize,
         element: &BeamElement,
         node_i: Point,
         node_j: Point,
-    ) -> [f64; 6] {
+    ) -> Result<[f64; 6], FemError> {
         let mut f_equiv = [0.0; 6];
 
         // Distributed loads on this element.
@@ -1341,24 +1369,33 @@ impl BeamSolver {
         // Point loads on this element.
         for pl in &model.point_loads {
             if pl.element_idx == elem_idx {
-                let f_local = element
-                    .consistent_nodal_load_point(node_i, node_j, pl.position, pl.fx, pl.fy, pl.mz)
-                    .unwrap_or([0.0; 6]);
+                let f_local = element.consistent_nodal_load_point(
+                    node_i,
+                    node_j,
+                    pl.position,
+                    pl.fx,
+                    pl.fy,
+                    pl.mz,
+                )?;
                 for i in 0..6 {
                     f_equiv[i] += f_local[i];
                 }
             }
         }
 
-        f_equiv
+        Ok(f_equiv)
     }
 
     /// Compute element end forces in GLOBAL coordinates
     ///
     /// Returns a vector of 6 forces per element in global coordinates:
     /// [Fx_i, Fy_i, Mz_i, Fx_j, Fy_j, Mz_j]
-    pub fn element_end_forces_global(&self) -> Vec<[f64; 6]> {
-        let local_forces = self.element_end_forces();
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Self::element_end_forces`].
+    pub fn element_end_forces_global(&self) -> Result<Vec<[f64; 6]>, FemError> {
+        let local_forces = self.element_end_forces()?;
         let mut results = Vec::new();
 
         for (idx, forces) in local_forces.iter().enumerate() {
@@ -1379,7 +1416,7 @@ impl BeamSolver {
             results.push(f_global_elem);
         }
 
-        results
+        Ok(results)
     }
 }
 

@@ -1664,7 +1664,7 @@ fn test_element_end_forces() {
     solver_end.solve(&mut *linear_solver).unwrap();
 
     // Get element end forces in local coordinates
-    let end_forces = solver_end.element_end_forces();
+    let end_forces = solver_end.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 1);
     let forces = end_forces[0];
 
@@ -1686,7 +1686,7 @@ fn test_element_end_forces() {
     assert!(forces[5].abs() < 1e-6); // M_j = 0
 
     // Test global element end forces
-    let global_forces = solver_end.element_end_forces_global();
+    let global_forces = solver_end.element_end_forces_global().unwrap();
     assert_eq!(global_forces.len(), 1);
     let gforces = global_forces[0];
 
@@ -1818,7 +1818,7 @@ fn test_cantilever_interior_point_moment() {
     assert!((rz + 1000.0).abs() < 1e-6); // Support moment = -1000 (CW)
 
     // Check element end forces (reactions convention)
-    let end_forces = solver.element_end_forces();
+    let end_forces = solver.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 1);
     let forces = end_forces[0];
 
@@ -1867,7 +1867,7 @@ fn test_element_end_forces_interior_point_load() {
     solver.solve(&mut *linear_solver).unwrap();
 
     // Check element end forces (reactions convention)
-    let end_forces = solver.element_end_forces();
+    let end_forces = solver.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 1);
     let forces = end_forces[0];
 
@@ -2376,7 +2376,7 @@ fn test_combined_loads_complex() {
 
     // Element end forces - for combined loads, end forces at fixed end differ from reactions
     // due to distributed load and point load contributions
-    let end_forces = solver.element_end_forces();
+    let end_forces = solver.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 1);
     let forces = end_forces[0];
 
@@ -2536,7 +2536,7 @@ fn test_free_end_applied_moment_end_forces() {
     assert!((r[2] + M).abs() < 1e-6, "Rz = {} (expected {})", r[2], -M);
 
     // Element end forces: at the free end, M_element_j = -M.
-    let end_forces = solver.element_end_forces();
+    let end_forces = solver.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 2);
     let elem1 = end_forces[1]; // element 1 (node 1 -> node 2)
     // Element 1's j-end is node 2 (free end). M_j = -M.
@@ -2581,7 +2581,7 @@ fn test_internal_node_applied_moment_equilibrium() {
 
     // Element end moments at the shared node 1 must satisfy
     // M_element0_j + M_element1_i + M ≈ 0.
-    let end_forces = solver.element_end_forces();
+    let end_forces = solver.element_end_forces().unwrap();
     assert_eq!(end_forces.len(), 2);
     let elem0 = end_forces[0]; // element 0 (node 0 -> node 1), j-end = node 1
     let elem1 = end_forces[1]; // element 1 (node 1 -> node 2), i-end = node 1

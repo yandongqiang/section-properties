@@ -6,6 +6,7 @@
 //! 3. PARDISO stub is not auto-selected
 //! 4. solve() before factor() returns NotFactorized
 //! 5. solve_many() consistency
+//! 6. DenseGaussian forced row-pivot correctness (regression for a8b535e)
 
 use section_properties::fea::{
     SparseMatrix,
@@ -368,4 +369,111 @@ fn test_cg_factor_fails_on_indefinite() {
     // Solve should fail with "not positive definite"
     let solve_result = solver.solve(&[1.0, 1.0, 1.0, 1.0]);
     assert!(matches!(solve_result, Err(SolverError::SingularMatrix(_))));
+}
+
+/// Max-norm residual `||A x - b||_inf` for a square sparse matrix.
+fn max_residual(a: &SparseMatrix, x: &[f64], b: &[f64]) -> f64 {
+    let row_ptr = a.row_ptr();
+    let csr_cols = a.csr_cols();
+    let csr_vals = a.csr_vals();
+    let mut max_err = 0.0f64;
+    for i in 0..a.n {
+        let mut sum = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            sum += csr_vals[k] * x[csr_cols[k]];
+        }
+        max_err = max_err.max((sum - b[i]).abs());
+    }
+    max_err
+}
+
+/// Regression: DenseGaussian must return the correct solution when the
+/// leading diagonal entry is zero and a row pivot is mandatory.
+///
+/// ```text
+/// A = [ 0  2 ]   b = [ 4 ]   =>   x = [ -1  2 ]
+///     [ 1  3 ]       [ 5 ]
+/// ```
+///
+/// This is the minimal reproducer for the inverse-permutation bug fixed in
+/// a8b535e. The first column has a structural zero at the diagonal, so the
+/// factorization must swap rows; an incorrect (or omitted) permutation of the
+/// solution then scrambles `x` rather than merely losing precision.
+#[test]
+fn test_dense_gaussian_forces_pivot_2x2() {
+    let registry = SolverRegistry::default();
+
+    // Note: the (0,0) entry is intentionally omitted so it is structurally zero.
+    let mut a = SparseMatrix::new(2);
+    a.add(0, 1, 2.0);
+    a.add(1, 0, 1.0);
+    a.add(1, 1, 3.0);
+    a.compress();
+
+    let b = vec![4.0, 5.0];
+    let expected = [-1.0, 2.0];
+
+    let mut solver = registry.create("dense").expect("dense solver not found");
+    solver.factor(&a).expect("factorization failed");
+    let x = solver.solve(&b).expect("solve failed");
+
+    for (i, (&xi, &ei)) in x.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (xi - ei).abs() < 1e-12,
+            "x[{}] = {}, expected {} (pivot permutation likely wrong)",
+            i,
+            xi,
+            ei
+        );
+    }
+
+    let res = max_residual(&a, &x, &b);
+    assert!(res < 1e-12, "residual ||Ax-b||_inf = {:.3e}", res);
+}
+
+/// Regression: DenseGaussian must handle a matrix that requires *multiple*
+/// row pivots, not just one.
+///
+/// ```text
+/// A = [ 0  2  1 ]       [ 7 ]        [ 1 ]
+///     [ 0  1  3 ]   b = [ 11 ]  =>  x = [ 2 ]
+///     [ 4  0  1 ]       [ 7 ]        [ 3 ]
+/// ```
+///
+/// The first column has no diagonal entry and after the first swap column 1
+/// still needs a pivot, so the factorization must compose two row swaps.
+/// Verifying `A x = b` (and `x` itself) guards against any partial-permutation
+/// regression.
+#[test]
+fn test_dense_gaussian_forces_multiple_pivots_3x3() {
+    let registry = SolverRegistry::default();
+
+    let mut a = SparseMatrix::new(3);
+    a.add(0, 1, 2.0);
+    a.add(0, 2, 1.0);
+    a.add(1, 1, 1.0);
+    a.add(1, 2, 3.0);
+    a.add(2, 0, 4.0);
+    a.add(2, 2, 1.0);
+    a.compress();
+
+    let b = vec![7.0, 11.0, 7.0];
+    let expected = [1.0, 2.0, 3.0];
+
+    let mut solver = registry.create("dense").expect("dense solver not found");
+    solver.factor(&a).expect("factorization failed");
+    let x = solver.solve(&b).expect("solve failed");
+
+    for (i, (&xi, &ei)) in x.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (xi - ei).abs() < 1e-12,
+            "x[{}] = {}, expected {} (multi-pivot permutation likely wrong)",
+            i,
+            xi,
+            ei
+        );
+    }
+
+    let res = max_residual(&a, &x, &b);
+    assert!(res < 1e-12, "residual ||Ax-b||_inf = {:.3e}", res);
 }
