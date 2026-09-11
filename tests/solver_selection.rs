@@ -487,3 +487,179 @@ fn test_beam_reports_selected_solver() {
     legacy.solve(&mut *ls).unwrap();
     assert_eq!(legacy.solver_name(), Some("sparse_lu"));
 }
+
+// ===========================================================================
+// G. max_size capability validation
+// ===========================================================================
+
+/// Lightweight diagonal SPD matrix (n entries), no dense fill-in.
+fn diag(n: usize, v: f64) -> SparseMatrix {
+    let mut a = SparseMatrix::new(n);
+    for i in 0..n {
+        a.add(i, i, v);
+    }
+    a.compress();
+    a
+}
+
+/// A explicit selection that violates `max_size` must be rejected with a
+/// structured error instead of silently switching to another backend.
+#[test]
+fn test_max_size_validation() {
+    let registry = SolverRegistry::default();
+
+    // Dense: 500 accepted, 501 rejected.
+    assert!(
+        registry
+            .create_selected(&diag(500, 4.0), &SolverSelection::dense())
+            .is_ok()
+    );
+    let err = match registry.create_selected(&diag(501, 4.0), &SolverSelection::dense()) {
+        Ok(_) => panic!("dense should reject n=501"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, SolverError::Unsupported(_)), "got {:?}", err);
+    let msg = err.to_string();
+    assert!(msg.contains("dense"), "{}", msg);
+    assert!(msg.contains("500") && msg.contains("501"), "{}", msg);
+    println!("[max_size dense] {}", msg);
+
+    // Skyline LDLT: 10000 accepted, 10001 rejected.
+    assert!(
+        registry
+            .create_selected(&diag(10000, 4.0), &SolverSelection::skyline_ldlt())
+            .is_ok()
+    );
+    let err = match registry.create_selected(&diag(10001, 4.0), &SolverSelection::skyline_ldlt()) {
+        Ok(_) => panic!("skyline_ldlt should reject n=10001"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, SolverError::Unsupported(_)), "got {:?}", err);
+    let msg = err.to_string();
+    assert!(msg.contains("10000") && msg.contains("10001"), "{}", msg);
+    println!("[max_size skyline] {}", msg);
+
+    // Sparse LU: 3000 accepted, 3001 rejected.
+    assert!(
+        registry
+            .create_selected(&diag(3000, 4.0), &SolverSelection::sparse_lu())
+            .is_ok()
+    );
+    let err = match registry.create_selected(&diag(3001, 4.0), &SolverSelection::sparse_lu()) {
+        Ok(_) => panic!("sparse_lu should reject n=3001"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, SolverError::Unsupported(_)), "got {:?}", err);
+    let msg = err.to_string();
+    assert!(msg.contains("3000") && msg.contains("3001"), "{}", msg);
+    println!("[max_size sparse_lu] {}", msg);
+
+    // CG / ICCG have no size limit: a large diagonal system is accepted.
+    let big = diag(20000, 4.0);
+    assert!(
+        registry
+            .create_selected(&big, &SolverSelection::cg())
+            .is_ok(),
+        "cg should accept a large system"
+    );
+    assert!(
+        registry
+            .create_selected(&big, &SolverSelection::iccg())
+            .is_ok(),
+        "iccg should accept a large system"
+    );
+
+    // validate_selection enforces the same rule.
+    assert!(
+        registry
+            .validate_selection("dense", &diag(501, 4.0))
+            .is_err()
+    );
+    assert!(
+        registry
+            .validate_selection("dense", &diag(500, 4.0))
+            .is_ok()
+    );
+
+    // Auto still selects an appropriate backend (dense is out of range at 501).
+    let info = registry
+        .select(&diag(501, 4.0), &SolverSelection::Auto)
+        .unwrap();
+    assert_eq!(info.solver_name, "skyline_ldlt");
+}
+
+// ===========================================================================
+// H. PARDISO is not a default registry backend
+// ===========================================================================
+
+#[test]
+fn test_pardiso_not_available_by_default() {
+    let registry = SolverRegistry::default();
+
+    // Not registered (the unified wrapper is a stub), so it is never claimed.
+    assert!(
+        !registry.list().contains(&"pardiso".to_string()),
+        "pardiso must not be registered by default"
+    );
+
+    let a = spd_tridiagonal(4);
+    let err = match registry.create_selected(&a, &SolverSelection::pardiso()) {
+        Ok(_) => panic!("pardiso must not be selectable from the default registry"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, SolverError::Unsupported(_)),
+        "expected Unsupported, got {:?}",
+        err
+    );
+
+    // Auto must not claim PARDISO for the default registry, even for a very
+    // large system.
+    let info = registry
+        .select(&nonsymmetric(20000), &SolverSelection::Auto)
+        .unwrap();
+    assert!(
+        info.solver_name != "pardiso",
+        "auto claimed pardiso: {:?}",
+        info
+    );
+    println!(
+        "[pardiso] not registered; auto picked '{}'",
+        info.solver_name
+    );
+}
+
+// ===========================================================================
+// I. solver_name must not remain stale after a failed solve
+// ===========================================================================
+
+#[test]
+fn test_solver_name_invalidated_on_failed_solve() {
+    let mut solver = BeamSolver::from_model(&cantilever_tip_force()).unwrap();
+    assert_eq!(solver.solver_name(), None, "no solve yet");
+
+    // Successful configured solve records the backend.
+    solver.set_solver(SolverSelection::sparse_lu());
+    solver.solve_configured().unwrap();
+    assert_eq!(solver.solver_name(), Some("sparse_lu"));
+    assert_eq!(solver.results().solver_name(), Some("sparse_lu"));
+
+    // Switch to an unavailable backend: the solve must fail and the previously
+    // recorded name must be cleared (never claim the failed backend produced
+    // the current solution, and never leave a stale "sparse_lu" claim).
+    solver.set_solver(SolverSelection::named("nonexistent"));
+    assert!(solver.solve_configured().is_err(), "expected solve to fail");
+    assert_eq!(
+        solver.solver_name(),
+        None,
+        "stale solver_name after a failed solve"
+    );
+    assert_eq!(solver.results().solver_name(), None);
+
+    // The legacy solve() path clears the name at the start as well.
+    let registry = SolverRegistry::default();
+    let mut legacy = BeamSolver::from_model(&cantilever_tip_force()).unwrap();
+    let mut ls = registry.create("dense").unwrap();
+    legacy.solve(&mut *ls).unwrap();
+    assert_eq!(legacy.solver_name(), Some("dense"));
+}

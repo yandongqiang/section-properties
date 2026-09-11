@@ -1471,10 +1471,15 @@ impl BeamSolver {
         &self.solver_selection
     }
 
-    /// Name of the backend used by the most recent successful solve.
+    /// Name of the backend used by the most recent **successful** solve.
     ///
-    /// Returns `None` before a solve, or when the model was fully constrained
-    /// (no linear system was solved).
+    /// Semantics: the value describes the solution currently held by this
+    /// solver. It is cleared before each solve attempt and set only when the
+    /// solve completes successfully, so it is `None`:
+    ///
+    /// * before any solve;
+    /// * after a failed solve attempt (no stale claim from an earlier run);
+    /// * when the model was fully constrained and no linear system was solved.
     pub fn solver_name(&self) -> Option<&str> {
         self.solver_name.as_deref()
     }
@@ -1522,7 +1527,12 @@ impl BeamSolver {
     ///
     /// The caller owns solver construction; [`Self::solve_configured`] instead
     /// uses the configured [`SolverSelection`].
+    ///
+    /// [`Self::solver_name`] is cleared at the start of this call and set only
+    /// after the solve succeeds, so a failed solve never leaves stale
+    /// observability implying a backend produced the current solution.
     pub fn solve(&mut self, solver: &mut dyn LinearSolver) -> Result<(), FemError> {
+        self.solver_name = None;
         let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
             self.apply_boundary_conditions();
         self.factor_and_expand(
@@ -1546,11 +1556,17 @@ impl BeamSolver {
     /// # Errors
     ///
     /// All solver errors propagate as [`FemError::SolverError`]; an explicit
-    /// invalid selection (e.g. a non-symmetric system with `skyline_ldlt`)
-    /// returns an error and never silently switches backend.
+    /// invalid selection (e.g. a non-symmetric system with `skyline_ldlt`, or a
+    /// matrix larger than the backend's `max_size`) returns an error and never
+    /// silently switches backend.
+    ///
+    /// [`Self::solver_name`] is cleared before the solve is attempted and set
+    /// only once it fully succeeds, so a failed attempt never leaves stale
+    /// observability claiming the failed backend produced a solution.
     ///
     /// [`Auto`]: SolverSelection::Auto
     pub fn solve_configured(&mut self) -> Result<(), FemError> {
+        self.solver_name = None;
         let (k_ff, f_reduced, free_to_global, constrained_dofs, constrained_values) =
             self.apply_boundary_conditions();
 
@@ -1559,7 +1575,6 @@ impl BeamSolver {
             for (i, &global_idx) in constrained_dofs.iter().enumerate() {
                 self.u_global[global_idx] = constrained_values[i];
             }
-            self.solver_name = None;
             return Ok(());
         }
 

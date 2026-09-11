@@ -295,14 +295,23 @@ pub enum SolverBackend {
 /// `Named` carries one of the registered backend names below. Unknown names are
 /// rejected with a structured [`SolverError`] — they never fall back.
 ///
-/// | name             | symmetry        | definiteness        | intended size |
-/// |------------------|-----------------|---------------------|---------------|
-/// | `dense`          | any (general)   | any                 | small         |
-/// | `skyline_ldlt`   | symmetric only  | SPD (verified)      | medium/large  |
-/// | `sparse_lu`      | any (general)   | any                 | medium/large  |
-/// | `cg`             | symmetric only  | SPD (assumed)       | large         |
-/// | `iccg`           | symmetric only  | SPD (assumed)       | large         |
-/// | `pardiso`        | any (general)   | any                 | very large (feature) |
+/// | name             | symmetry        | definiteness        | intended size | registered by default |
+/// |------------------|-----------------|---------------------|---------------|-----------------------|
+/// | `dense`          | any (general)   | any                 | small         | yes                   |
+/// | `skyline_ldlt`   | symmetric only  | SPD (verified)      | medium/large  | yes                   |
+/// | `sparse_lu`      | any (general)   | any                 | medium/large  | yes                   |
+/// | `cg`             | symmetric only  | SPD (assumed)       | large         | yes                   |
+/// | `iccg`           | symmetric only  | SPD (assumed)       | large         | yes                   |
+/// | `pardiso`        | any (general)   | any                 | very large    | **no** — feature-gated stub |
+///
+/// # PARDISO availability
+///
+/// `pardiso` is **not** registered by [`SolverRegistry::default()`], even when
+/// the `pardiso` feature is compiled in: the unified PARDISO wrapper is a stub
+/// whose `factor()` always returns an error. Selecting it through the default
+/// registry therefore returns [`SolverError::Unsupported`] ("unknown solver"),
+/// and auto-selection never claims it is available unless a PARDISO factory is
+/// explicitly registered on the registry.
 ///
 /// # Semantics
 ///
@@ -351,7 +360,14 @@ impl SolverSelection {
     pub fn iccg() -> Self {
         Self::Named("iccg".to_string())
     }
-    /// Select the PARDISO backend (feature-gated).
+    /// Select the PARDISO backend.
+    ///
+    /// **Not available through [`SolverRegistry::default()`]** — PARDISO is a
+    /// feature-gated stub that is deliberately left unregistered, so this
+    /// selection resolves only if a PARDISO factory is explicitly registered
+    /// via [`SolverRegistry::register`]. Otherwise
+    /// [`SolverRegistry::create_selected`] returns
+    /// [`SolverError::Unsupported`] rather than silently falling back.
     pub fn pardiso() -> Self {
         Self::Named("pardiso".to_string())
     }
@@ -408,6 +424,12 @@ fn validate_solver_for_matrix(
 ) -> Result<(), SolverError> {
     if matrix.n == 0 {
         return Err(SolverError::invalid_input("Empty matrix"));
+    }
+    if let Some(max_size) = caps.max_size.filter(|&m| matrix.n > m) {
+        return Err(SolverError::unsupported(format!(
+            "solver '{}' supports at most {} DOFs, but matrix has {}",
+            name, max_size, matrix.n
+        )));
     }
     let symmetric = matrix.is_symmetric(1e-12);
     if !symmetric && !caps.general {
@@ -512,10 +534,16 @@ impl SolverRegistry {
     /// detected matrix class):
     ///
     /// 1. `n <= 500` → `dense` (general, any class).
-    /// 2. symmetric with a positive diagonal (necessary condition for SPD) →
-    ///    `skyline_ldlt` (it verifies definiteness at factorization).
-    /// 3. `pardiso` if registered/available (very large).
+    /// 2. symmetric with a positive diagonal (necessary condition for SPD) and
+    ///    within skyline's size limit → `skyline_ldlt` (it verifies definiteness
+    ///    at factorization).
+    /// 3. `pardiso` **only if a PARDISO factory is actually registered**
+    ///    (never for the default registry, even with the feature enabled).
     /// 4. otherwise → `sparse_lu` (general; handles symmetric or not).
+    ///
+    /// Auto never selects `cg`/`iccg`. Unlike explicit selection, auto does not
+    /// hard-reject on `max_size`: it treats the limit as a preference and still
+    /// returns the only class-legal backend for very large systems.
     ///
     /// `cg`/`iccg` are never auto-selected: their SPD requirement cannot be
     /// established reliably from the matrix alone.
@@ -534,16 +562,24 @@ impl SolverRegistry {
             });
         }
 
-        if matrix.is_symmetric(1e-12)
-            && has_positive_diagonal(matrix)
-            && self.get("skyline_ldlt").is_some()
-        {
-            return Ok(SolverSelectionInfo {
-                solver_name: "skyline_ldlt".to_string(),
-                reason: SelectionReason::SymmetricPositiveDiagonal,
-            });
+        // Symmetric with a positive diagonal: skyline is preferred, but only
+        // within its configured size limit (it requires SPD and verifies it at
+        // factorization).
+        if matrix.is_symmetric(1e-12) && has_positive_diagonal(matrix) {
+            let skyline_fits = self
+                .get("skyline_ldlt")
+                .is_some_and(|f| f.capabilities().max_size.is_none_or(|m| matrix.n <= m));
+            if skyline_fits {
+                return Ok(SolverSelectionInfo {
+                    solver_name: "skyline_ldlt".to_string(),
+                    reason: SelectionReason::SymmetricPositiveDiagonal,
+                });
+            }
         }
 
+        // PARDISO is used only if a PARDISO factory is actually registered. It
+        // is NOT part of `SolverRegistry::default()`, so this never fires for
+        // the default registry even when the feature is compiled in.
         #[cfg(feature = "pardiso")]
         if self.get("pardiso").is_some() {
             return Ok(SolverSelectionInfo {
@@ -604,10 +640,10 @@ fn has_positive_diagonal(matrix: &SparseMatrix) -> bool {
     let n = matrix.n;
     let mut diag = vec![0.0f64; n];
     if matrix.compressed {
-        for i in 0..n {
+        for (i, d) in diag.iter_mut().enumerate() {
             for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
                 if matrix.csr_cols[k] == i {
-                    diag[i] = matrix.csr_vals[k];
+                    *d = matrix.csr_vals[k];
                 }
             }
         }
@@ -710,7 +746,13 @@ impl LinearSolverFactory for IccgSolverFactory {
     }
 }
 
+// PARDISO is deliberately NOT registered by `SolverRegistry::default()`: the
+// unified wrapper (`PardisoSolverWrapper`) is a stub whose `factor()` always
+// returns an error, so it is not a usable general-purpose `LinearSolver` yet.
+// The factory is kept for callers that want to register it explicitly once a
+// real implementation exists; it is therefore never constructed in-tree.
 #[cfg(feature = "pardiso")]
+#[allow(dead_code)]
 struct PardisoSolverFactory;
 #[cfg(feature = "pardiso")]
 impl LinearSolverFactory for PardisoSolverFactory {
