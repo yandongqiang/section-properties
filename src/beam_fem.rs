@@ -67,6 +67,50 @@ impl BeamSection {
     }
 }
 
+/// Internal section forces `N`, `V`, `M` at a point along a beam element.
+///
+/// All quantities below are expressed in the element's LOCAL coordinate
+/// system (see [`BeamElement::local_stiffness`] for the local axes and DOF
+/// ordering).
+///
+/// # Sign convention
+///
+/// - [`axial`](Self::axial): axial internal force, **tension positive** —
+///   positive pulls the material apart along +x, the `node_i -> node_j`
+///   direction.
+/// - [`shear`](Self::shear): transverse shear internal force, defined so that
+///   `d(moment)/dx = shear` and `d(shear)/dx = q`, where `q` is the local
+///   transverse load intensity (positive upward, i.e. local +y). Equivalently,
+///   with `q_down` = downward load per length, `d(shear)/dx = -q_down`.
+/// - [`moment`](Self::moment): bending moment, **sagging positive**
+///   (`moment = E·I·v''` for a horizontal element with local +y up).
+///
+/// These are internal *resultants at a section*, and are a different concept
+/// from the element-on-node equilibrium forces returned by
+/// [`BeamSolver::element_end_forces`]. At the element ends the two are related
+/// by explicit sign factors documented on
+/// [`BeamSolver::element_section_forces`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SectionForces {
+    /// Axial internal force (tension positive) [N]
+    pub axial: f64,
+    /// Transverse shear internal force [N]; satisfies `d(moment)/dx = shear`
+    pub shear: f64,
+    /// Bending moment (sagging positive) [Nm]
+    pub moment: f64,
+}
+
+impl SectionForces {
+    /// Create a section-force triple
+    pub fn new(axial: f64, shear: f64, moment: f64) -> Self {
+        Self {
+            axial,
+            shear,
+            moment,
+        }
+    }
+}
+
 /// 2D Beam Element
 #[derive(Debug, Clone)]
 pub struct BeamElement {
@@ -1252,72 +1296,106 @@ impl BeamSolver {
     /// never silently replaced by a zero load.
     pub fn element_end_forces(&self) -> Result<Vec<[f64; 6]>, FemError> {
         let mut results = Vec::with_capacity(self.model.elements.len());
+        for elem_idx in 0..self.model.elements.len() {
+            results.push(self.element_on_node_end_forces_local(elem_idx)?);
+        }
+        Ok(results)
+    }
 
-        for (elem_idx, element) in self.model.elements.iter().enumerate() {
-            let node_i = self.model.nodes[element.node_i].point();
-            let node_j = self.model.nodes[element.node_j].point();
+    /// Local element displacement vector `[u_i, v_i, θ_i, u_j, v_j, θ_j]`.
+    ///
+    /// Returns the element's nodal displacements transformed from global to
+    /// local coordinates (`u_local = T · u_global`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds.
+    fn element_local_displacement(&self, element_idx: usize) -> Result<[f64; 6], FemError> {
+        let element = self.model.elements.get(element_idx).ok_or_else(|| {
+            FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.model.elements.len().saturating_sub(1)
+            ))
+        })?;
+        let node_i = self.model.nodes[element.node_i].point();
+        let node_j = self.model.nodes[element.node_j].point();
 
-            // Element displacement in global coordinates.
-            let dof_map = [
-                self.model.dof_index(element.node_i, 0), // u_i
-                self.model.dof_index(element.node_i, 1), // v_i
-                self.model.dof_index(element.node_i, 2), // θ_i
-                self.model.dof_index(element.node_j, 0), // u_j
-                self.model.dof_index(element.node_j, 1), // v_j
-                self.model.dof_index(element.node_j, 2), // θ_j
-            ];
-            let u_global_elem = [
-                self.u_global[dof_map[0]],
-                self.u_global[dof_map[1]],
-                self.u_global[dof_map[2]],
-                self.u_global[dof_map[3]],
-                self.u_global[dof_map[4]],
-                self.u_global[dof_map[5]],
-            ];
+        let dof_map = [
+            self.model.dof_index(element.node_i, 0), // u_i
+            self.model.dof_index(element.node_i, 1), // v_i
+            self.model.dof_index(element.node_i, 2), // θ_i
+            self.model.dof_index(element.node_j, 0), // u_j
+            self.model.dof_index(element.node_j, 1), // v_j
+            self.model.dof_index(element.node_j, 2), // θ_j
+        ];
+        let u_global_elem = [
+            self.u_global[dof_map[0]],
+            self.u_global[dof_map[1]],
+            self.u_global[dof_map[2]],
+            self.u_global[dof_map[3]],
+            self.u_global[dof_map[4]],
+            self.u_global[dof_map[5]],
+        ];
 
-            // Transform to local coordinates: u_local = T * u_global.
-            let t = element.transformation_matrix(node_i, node_j);
-            let mut u_local = [0.0; 6];
-            for i in 0..6 {
-                for j in 0..6 {
-                    u_local[i] += t[i][j] * u_global_elem[j];
-                }
+        // Transform to local coordinates: u_local = T * u_global.
+        let t = element.transformation_matrix(node_i, node_j);
+        let mut u_local = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                u_local[i] += t[i][j] * u_global_elem[j];
             }
+        }
+        Ok(u_local)
+    }
 
-            // Internal nodal force: f_stiffness = K_local * u_local.
-            let k_local = element.local_stiffness(node_i, node_j);
-            let mut f_stiffness = [0.0; 6];
-            for i in 0..6 {
-                for j in 0..6 {
-                    f_stiffness[i] += k_local[i][j] * u_local[j];
-                }
+    /// Element-on-node end forces in LOCAL coordinates for a single element:
+    /// `f_end = f_equiv - K_local · u_local`, ordered
+    /// `[N_i, V_i, M_i, N_j, V_j, M_j]`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::element_local_displacement`] and
+    /// [`Self::element_equivalent_nodal_forces`].
+    fn element_on_node_end_forces_local(&self, element_idx: usize) -> Result<[f64; 6], FemError> {
+        let element = self.model.elements.get(element_idx).ok_or_else(|| {
+            FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.model.elements.len().saturating_sub(1)
+            ))
+        })?;
+        let node_i = self.model.nodes[element.node_i].point();
+        let node_j = self.model.nodes[element.node_j].point();
+
+        let u_local = self.element_local_displacement(element_idx)?;
+
+        // Internal nodal force: f_stiffness = K_local * u_local.
+        let k_local = element.local_stiffness(node_i, node_j);
+        let mut f_stiffness = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                f_stiffness[i] += k_local[i][j] * u_local[j];
             }
-
-            // Equivalent nodal forces from distributed and point loads on this
-            // element. Applied moments at nodes are external concentrated loads,
-            // excluded from the equivalent element loads.
-            let f_equiv = Self::element_equivalent_nodal_forces(
-                &self.model,
-                elem_idx,
-                element,
-                node_i,
-                node_j,
-            )?;
-
-            // Element-on-node end forces: f_end = f_equiv - f_stiffness.
-            let end_forces = [
-                f_equiv[0] - f_stiffness[0], // N_i: axial at node i
-                f_equiv[1] - f_stiffness[1], // V_i: shear at node i
-                f_equiv[2] - f_stiffness[2], // M_i: moment at node i
-                f_equiv[3] - f_stiffness[3], // N_j: axial at node j
-                f_equiv[4] - f_stiffness[4], // V_j: shear at node j
-                f_equiv[5] - f_stiffness[5], // M_j: moment at node j
-            ];
-
-            results.push(end_forces);
         }
 
-        Ok(results)
+        // Equivalent nodal forces from distributed and point loads on this
+        // element. Applied moments at nodes are external concentrated loads,
+        // excluded from the equivalent element loads.
+        let f_equiv = Self::element_equivalent_nodal_forces(
+            &self.model,
+            element_idx,
+            element,
+            node_i,
+            node_j,
+        )?;
+
+        // Element-on-node end forces: f_end = f_equiv - f_stiffness.
+        let mut end_forces = [0.0; 6];
+        for i in 0..6 {
+            end_forces[i] = f_equiv[i] - f_stiffness[i];
+        }
+        Ok(end_forces)
     }
 
     /// Compute equivalent nodal forces (in LOCAL coordinates) for an element
@@ -1417,6 +1495,153 @@ impl BeamSolver {
         }
 
         Ok(results)
+    }
+
+    /// Compute the internal section forces `N`, `V`, `M` at normalized position
+    /// `xi` along element `element_idx`, in LOCAL coordinates.
+    ///
+    /// `xi = 0` at `node_i` and `xi = 1` at `node_j`; the physical position is
+    /// `x = xi · L`.
+    ///
+    /// # What this returns
+    ///
+    /// True beam-section internal resultants at the cut (see [`SectionForces`]
+    /// for the sign convention):
+    /// - `axial` (`N`): tension positive,
+    /// - `shear` (`V`): satisfies `d(moment)/dx = shear`,
+    /// - `moment` (`M`): sagging positive.
+    ///
+    /// These are beam-LOCAL quantities (not transformed to global axes). They
+    /// are deliberately distinct from [`Self::element_end_forces`], which
+    /// returns the element-on-node *nodal equilibrium* forces at the two ends
+    /// only.
+    ///
+    /// # Method (equilibrium recovery)
+    ///
+    /// The result is obtained by enforcing equilibrium of the element segment
+    /// `[0, x]` using the recovered i-end element-on-node force and the actual
+    /// distributed / point loads — **not** by linearly interpolating the end
+    /// forces. With the local axes of this module (+x from `node_i` to
+    /// `node_j`, +y transverse with upward load `qy > 0`, `θ` CCW) and the
+    /// i-end force `f_i = [N_i, V_i, M_i]` from [`Self::element_end_forces`]:
+    ///
+    /// ```text
+    /// N(x) = N_i - qx·x - Σ_{x_p < x} fx_p
+    /// V(x) = -V_i + qy·x + Σ_{x_p < x} fy_p
+    /// M(x) = M_i - x·V_i + qy·x²/2 - Σ_{x_p < x} [(x_p - x)·fy_p + mz_p]
+    /// ```
+    ///
+    /// This is the equilibrium-consistent extension of the Euler–Bernoulli
+    /// relations: for an element with no span load (no distributed load and no
+    /// interior point load) it reduces to the classical `N = E·A·du/dx` and
+    /// `M = E·I·v''` implied by the element's cubic Hermite field, while
+    /// additionally satisfying
+    ///
+    /// ```text
+    /// dN/dx = -qx
+    /// dV/dx =  qy          (qy = upward load intensity; = -q_down)
+    /// dM/dx =  V
+    /// ```
+    ///
+    /// and reproducing the correct jumps at interior point forces / moments.
+    /// For statically determinate loadings the section forces are exact.
+    ///
+    /// # Discontinuities (point loads inside the element)
+    ///
+    /// A load at `x_p = xi_p · L` introduces a jump with this convention:
+    ///
+    /// ```text
+    /// N(xi_p⁺) - N(xi_p⁻) = -fx_p
+    /// V(xi_p⁺) - V(xi_p⁻) = +fy_p
+    /// M(xi_p⁺) - M(xi_p⁻) = -mz_p
+    /// ```
+    ///
+    /// Evaluating exactly at `xi = xi_p` returns the **left limit**
+    /// (`x -> xi_p⁻`): loads located strictly before `xi` are included and a
+    /// load exactly at `xi` is excluded. Evaluate at `xi_p ± ε` (or on the
+    /// adjacent elements) to obtain the right-hand value.
+    ///
+    /// # Relation to element end forces
+    ///
+    /// At the element ends the section forces agree with
+    /// [`Self::element_end_forces`] up to the sign factors of the
+    /// internal-force convention:
+    ///
+    /// ```text
+    /// xi = 0:  N = +N_i,  V = -V_i,  M = +M_i
+    /// xi = 1:  N = -N_j,  V = +V_j,  M = -M_j
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds,
+    /// if `xi` is outside `[0, 1]`, or if the element has zero length.
+    pub fn element_section_forces(
+        &self,
+        element_idx: usize,
+        xi: f64,
+    ) -> Result<SectionForces, FemError> {
+        let element = self.model.elements.get(element_idx).ok_or_else(|| {
+            FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.model.elements.len().saturating_sub(1)
+            ))
+        })?;
+        if !(0.0..=1.0).contains(&xi) {
+            return Err(FemError::InvalidInput(format!(
+                "Section position xi must be in [0, 1], got {}",
+                xi
+            )));
+        }
+        let node_i = self.model.nodes[element.node_i].point();
+        let node_j = self.model.nodes[element.node_j].point();
+        let length = element.length(node_i, node_j);
+        if length <= 0.0 {
+            return Err(FemError::InvalidInput(
+                "Beam element has zero or negative length for section-force recovery".to_string(),
+            ));
+        }
+
+        let x = xi * length;
+
+        // Anchor at the i-end element-on-node force (LOCAL): [N_i, V_i, M_i, ...].
+        let f_end = self.element_on_node_end_forces_local(element_idx)?;
+        let n_i = f_end[0];
+        let v_i = f_end[1];
+        let m_i = f_end[2];
+
+        // Uniform distributed load on this element (LOCAL), summed if repeated.
+        let mut qx = 0.0;
+        let mut qy = 0.0;
+        for dl in &self.model.distributed_loads {
+            if dl.element_idx == element_idx {
+                qx += dl.qx;
+                qy += dl.qy;
+            }
+        }
+
+        // Point loads strictly to the left of x (left-limit convention).
+        let mut sum_fx = 0.0;
+        let mut sum_fy = 0.0;
+        let mut sum_moment = 0.0;
+        for pl in &self.model.point_loads {
+            if pl.element_idx != element_idx {
+                continue;
+            }
+            let x_p = pl.position * length;
+            if x_p < x {
+                sum_fx += pl.fx;
+                sum_fy += pl.fy;
+                sum_moment += (x_p - x) * pl.fy + pl.mz;
+            }
+        }
+
+        let axial = n_i - qx * x - sum_fx;
+        let shear = -v_i + qy * x + sum_fy;
+        let moment = m_i - x * v_i + 0.5 * qy * x * x - sum_moment;
+
+        Ok(SectionForces::new(axial, shear, moment))
     }
 }
 
