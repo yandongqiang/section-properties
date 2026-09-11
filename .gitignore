@@ -1,1 +1,8 @@
 /target
+
+# --- Generated outputs (produced by examples/tests, not source) ---
+build_output.txt
+element_data.json
+keep_rust_k_*.json
+rust_augmented_*.json
+rust_on_python_mesh_*.json

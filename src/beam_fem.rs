@@ -349,19 +349,16 @@ impl BeamElement {
         // M3 = 3ξ² - 2ξ³ (same as N3 for transverse displacement due to moment)
         // M4 = L(-ξ² + ξ³) (same as N4 for θ_j)
         // For a point moment mz at ξ, the equivalent nodal moments are:
-        // f_θ_i = mz * (1 - 3ξ² + 2ξ³) = mz * N1
-        // f_θ_j = mz * (3ξ² - 2ξ³) = mz * N3
+        // f_θ_i = mz * L(ξ - ξ²) = mz * M2
+        // f_θ_j = mz * L(-ξ² + ξ³) = mz * M4
         // And the equivalent transverse forces:
         // f_v_i = mz * (6ξ/L * (ξ - 1)) = mz * (-6ξ/L * one_minus_xi)
         // f_v_j = mz * (-6ξ/L * one_minus_xi)
         let one_minus_xi = 1.0 - xi;
         let f_v_i_moment = mz * (-6.0 * xi * one_minus_xi / L);
-        let f_theta_i_moment = mz * (1.0 - 3.0 * xi2 + 2.0 * xi3);
+        let f_theta_i_moment = mz * L * (xi - xi2);     // M2 = L(ξ - ξ²)
         let f_v_j_moment = mz * (6.0 * xi * one_minus_xi / L);
-        let f_theta_j_moment = mz * (3.0 * xi2 - 2.0 * xi3);
-
-        let xi2 = xi * xi;
-        let _xi3 = xi2 * xi;
+        let f_theta_j_moment = mz * L * (-xi2 + xi3);   // M4 = L(-ξ² + ξ³)
 
         Ok([
             f_u_i,                        // u_i: axial
@@ -1205,10 +1202,11 @@ impl BeamSolver {
 
     /// Compute element end forces in LOCAL coordinates
     ///
-    /// Returns a vector of 6 forces per element in local coordinates:
+/// Returns a vector of 6 forces per element in local coordinates:
     /// [N_i, V_i, M_i, N_j, V_j, M_j]
     /// where N = axial force (positive = tension), V = shear force (positive = upward), M = moment (positive = CCW)
-    /// These are INTERNAL forces (forces the element applies to nodes, excluding equivalent nodal forces from applied loads on the element)
+    /// These are REACTION forces (what the element applies to the nodes, including effect of applied moments at nodes)
+    /// Positive = tension/upward/CCW on the node (f_stiffness - f_equiv - applied_moment_local)
     pub fn element_end_forces(&self) -> Vec<[f64; 6]> {
         let mut results = Vec::new();
 
@@ -1244,10 +1242,38 @@ impl BeamSolver {
                 }
             }
 
+            // Get applied moments at this element's nodes (in GLOBAL coordinates)
+            let mut applied_moment_i_global = 0.0;
+            let mut applied_moment_j_global = 0.0;
+            for am in &self.model.applied_moments {
+                if am.node_idx == element.node_i {
+                    applied_moment_i_global = am.value;
+                } else if am.node_idx == element.node_j {
+                    applied_moment_j_global = am.value;
+                }
+            }
+
+            // Transform applied moments to LOCAL coordinates
+            // Moment about z is invariant under 2D rotation: M_local = M_global
+            let applied_moment_i_local = applied_moment_i_global;
+            let applied_moment_j_local = applied_moment_j_global;
+
+            // Compute equivalent nodal forces from distributed and point loads on this element
+            let f_equiv =
+                Self::element_equivalent_nodal_forces(&self.model, element, node_i, node_j);
+
             // Get local stiffness matrix
             let k_local = element.local_stiffness(node_i, node_j);
 
             // Compute local stiffness forces: f_stiffness = K_local * u_local
+            let mut u_local = [0.0; 6];
+            for i in 0..6 {
+                for j in 0..6 {
+                    u_local[i] += T[i][j] * u_global_elem[j];
+                }
+            }
+
+            let k_local = element.local_stiffness(node_i, node_j);
             let mut f_stiffness = [0.0; 6];
             for i in 0..6 {
                 for j in 0..6 {
@@ -1255,19 +1281,32 @@ impl BeamSolver {
                 }
             }
 
-            // Compute equivalent nodal forces from applied loads on this element
+            // Compute equivalent nodal forces from distributed and point loads on this element
             let f_equiv =
                 Self::element_equivalent_nodal_forces(&self.model, element, node_i, node_j);
 
-            // Element end forces (INTERNAL): f_internal = f_stiffness - f_equiv
-            // For moments (indices 2, 5), internal moment sign convention is opposite: M_internal = f_equiv - f_stiffness
+            // Element end forces (REACTION): f_reaction = f_stiffness - f_equiv - applied_moment_local
+            // Convention: returns REACTION forces (what the element applies to the nodes)
+            // Positive = tension/upward/CCW on the node
+            // For nodes with applied moments, the moment reaction is -applied_moment (to balance it)
+            let m_i = if applied_moment_i_local != 0.0 {
+                -applied_moment_i_local
+            } else {
+                f_stiffness[2] - f_equiv[2]
+            };
+            let m_j = if applied_moment_j_local != 0.0 {
+                -applied_moment_j_local
+            } else {
+                f_stiffness[5] - f_equiv[5]
+            };
+            
             let end_forces = [
-                f_stiffness[0] - f_equiv[0], // N_i: axial at node i (tension positive)
-                f_stiffness[1] - f_equiv[1], // V_i: shear at node i (upward positive)
-                f_equiv[2] - f_stiffness[2], // M_i: moment at node i (CCW positive, internal = f_equiv - f_stiffness)
-                f_stiffness[3] - f_equiv[3], // N_j: axial at node j (tension positive)
-                f_stiffness[4] - f_equiv[4], // V_j: shear at node j (upward positive)
-                f_equiv[5] - f_stiffness[5], // M_j: moment at node j (CCW positive, internal = f_equiv - f_stiffness)
+                f_stiffness[0] - f_equiv[0],  // N_i: axial at node i (tension positive)
+                f_stiffness[1] - f_equiv[1],  // V_i: shear at node i (upward positive)
+                m_i,  // M_i: moment at node i (CCW positive)
+                f_stiffness[3] - f_equiv[3],  // N_j: axial at node j (tension positive)
+                f_stiffness[4] - f_equiv[4],  // V_j: shear at node j (upward positive)
+                m_j,  // M_j: moment at node j (CCW positive)
             ];
 
             results.push(end_forces);
