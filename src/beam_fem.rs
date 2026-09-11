@@ -1572,6 +1572,42 @@ impl BeamSolver {
     /// xi = 1:  N = -N_j,  V = +V_j,  M = -M_j
     /// ```
     ///
+    /// # Nodal applied moments vs. interior point moments
+    ///
+    /// Two different moment-load mechanisms exist and must not be conflated:
+    ///
+    /// - [`BeamModel::add_point_load`] / [`BeamModel::add_point_moment`] stores
+    ///   a moment *inside* an element (`0 < xi_p < 1`). It is a span load and
+    ///   produces the interior jump `M(xi_p⁺) - M(xi_p⁻) = -mz_p` above.
+    /// - [`BeamModel::add_applied_moment`] stores a concentrated moment at a
+    ///   *mesh node*. It is **not** a span load: it enters the global force
+    ///   vector (the θ DOF) and is therefore already carried by the
+    ///   element-on-node end forces from which this recovery is built, so no
+    ///   separate term is added here. (Adding one would double-count it.)
+    ///
+    /// For an internal node shared by elements `e` and `e+1` carrying an
+    /// applied nodal moment `M_ext`, the recovered section moments on the two
+    /// sides satisfy the nodal moment equilibrium
+    ///
+    /// ```text
+    /// M(e+1, xi=0) - M(e, xi=1) + M_ext = 0
+    /// ```
+    ///
+    /// which is the section-force form of the element-on-node end-force
+    /// equilibrium `M_j(e) + M_i(e+1) + M_ext = 0` under the boundary relations
+    /// above. Equivalently, the internal moment jumps by `-M_ext` across the
+    /// node — the same sign as an interior point moment of equal value. A nodal
+    /// moment applied at a free end yields a constant `+M_ext` along the
+    /// element.
+    ///
+    /// ## Internal-node limits
+    ///
+    /// The "exact evaluation returns the left limit" rule applies to interior
+    /// point loads with `0 < xi_p < 1`. A nodal applied moment is not evaluated
+    /// from within one element; the meaningful statement is the two-sided
+    /// equilibrium relation above between `element_section_forces(e, 1.0)` and
+    /// `element_section_forces(e+1, 0.0)`.
+    ///
     /// # Errors
     ///
     /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds,

@@ -554,3 +554,223 @@ fn test_section_forces_invalid_inputs() {
     assert!(solver.element_section_forces(1, 0.5).is_err());
     assert!(solver.element_section_forces(999, 0.5).is_err());
 }
+
+// ===========================================================================
+// K. Nodal applied moments (add_applied_moment)
+//
+// `add_applied_moment(node, M)` is a concentrated external moment at a mesh
+// node. Unlike an interior element point moment, it is not a span load: it
+// enters the solution through the global force vector (DOF 2) and is therefore
+// already carried by the element-on-node end forces, and hence by the
+// equilibrium-recovered section forces. The tests below verify that the
+// recovered N/V/M satisfy the correct nodal moment equilibrium on both sides
+// of the node, and check global equilibrium independently.
+// ===========================================================================
+
+/// Free-end applied nodal moment: the internal moment is constant `+M`.
+#[test]
+fn test_section_forces_free_end_nodal_moment() {
+    let l = 1.0;
+    let m = 1000.0;
+
+    let mut model = cantilever_model(1, l);
+    model.add_applied_moment(1, m).unwrap();
+    let solver = solve(&model);
+
+    for &xi in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let f = solver.element_section_forces(0, xi).unwrap();
+        assert_close(f.axial, 0.0, 1e-9, "N");
+        assert_close(f.shear, 0.0, 1e-9, "V");
+        assert_close(f.moment, m, 1e-9, &format!("M at xi={}", xi));
+    }
+
+    // Boundary consistency with the documented end-force relations.
+    let end = solver.element_end_forces().unwrap()[0];
+    let at0 = solver.element_section_forces(0, 0.0).unwrap();
+    let at1 = solver.element_section_forces(0, 1.0).unwrap();
+    assert_close(at0.moment, end[2], 1e-9, "M(0) = +M_i");
+    assert_close(at1.moment, -end[5], 1e-9, "M(1) = -M_j");
+
+    // The element-on-node free-end moment balances the applied nodal moment.
+    assert_close(end[5] + m, 0.0, 1e-9, "M_j + M_ext = 0");
+
+    // Independent global moment equilibrium: support reaction balances M.
+    let r = solver.reactions();
+    assert_close(r[1], 0.0, 1e-9, "Ry");
+    assert_close(r[2], -m, 1e-9, "Rz = -M_ext");
+    assert_close(r[2] + m, 0.0, 1e-9, "global sum of moments");
+
+    println!(
+        "[free-end nodal moment] M(0)={:.6e}, M(1)={:.6e}, M_j(end)={:.6e}, Rz={:.6e}",
+        at0.moment, at1.moment, end[5], r[2]
+    );
+}
+
+/// Internal-node applied nodal moment: the recovered section moments on the
+/// two adjacent elements satisfy the nodal equilibrium
+/// `M_right - M_left + M_ext = 0` (equivalently the internal moment jumps by
+/// `-M_ext`, matching the interior point-moment convention).
+#[test]
+fn test_section_forces_internal_node_nodal_moment() {
+    let l = 1.0;
+    let m = 1000.0;
+
+    let mut model = cantilever_model(2, l);
+    model.add_applied_moment(1, m).unwrap();
+    let solver = solve(&model);
+
+    let left = solver.element_section_forces(0, 1.0).unwrap();
+    let right = solver.element_section_forces(1, 0.0).unwrap();
+
+    // Physical internal moment diagram: +M on [0, 0.5], 0 on (0.5, 1].
+    assert_close(left.moment, m, 1e-9, "left section moment");
+    assert_close(right.moment, 0.0, 1e-9, "right section moment");
+
+    // Nodal moment equilibrium in the SECTION-force representation:
+    //   M_right - M_left + M_ext = 0
+    // (i.e. the internal moment jumps by -M_ext across the node, consistent
+    // with the interior point-moment rule M+ - M- = -mz).
+    assert_close(
+        right.moment - left.moment + m,
+        0.0,
+        1e-9,
+        "section nodal-moment equilibrium: M_right - M_left + M_ext",
+    );
+
+    // Shear and axial remain zero for a pure moment.
+    for f in [left, right] {
+        assert_close(f.shear, 0.0, 1e-9, "V");
+        assert_close(f.axial, 0.0, 1e-9, "N");
+    }
+
+    // Independent check 1: element-on-node end-force equilibrium at the shared
+    // node must also hold (Phase 2.3 relation).
+    let end = solver.element_end_forces().unwrap();
+    let m_left_j = end[0][5];
+    let m_right_i = end[1][2];
+    assert_close(
+        m_left_j + m_right_i + m,
+        0.0,
+        1e-9,
+        "end-force nodal equilibrium: M_left_j + M_right_i + M_ext",
+    );
+
+    // Independent check 2: global moment equilibrium via support reactions.
+    let r = solver.reactions();
+    assert_close(r[1], 0.0, 1e-9, "Ry");
+    assert_close(r[2], -m, 1e-9, "Rz = -M_ext");
+    assert_close(r[2] + m, 0.0, 1e-9, "global sum of moments");
+
+    // The section-force and end-force representations are linked by the
+    // documented boundary relations: left = -M_left_j, right = +M_right_i.
+    assert_close(left.moment, -m_left_j, 1e-9, "left = -M_left_j");
+    assert_close(right.moment, m_right_i, 1e-9, "right = +M_right_i");
+
+    println!(
+        "[internal nodal moment] left={:.6e}, right={:.6e}, M_left_j={:.6e}, M_right_i={:.6e}, Rz={:.6e}",
+        left.moment, right.moment, m_left_j, m_right_i, r[2]
+    );
+}
+
+/// Three-element beam with a moment applied at node 1 only: verify node-1
+/// equilibrium and that the moment is not double-applied to element 1/2.
+#[test]
+fn test_section_forces_three_element_nodal_moment() {
+    let l = 1.0;
+    let m = 1000.0;
+
+    let mut model = cantilever_model(3, l);
+    model.add_applied_moment(1, m).unwrap();
+    let solver = solve(&model);
+
+    let e0_right = solver.element_section_forces(0, 1.0).unwrap();
+    let e1_left = solver.element_section_forces(1, 0.0).unwrap();
+    let e1_right = solver.element_section_forces(1, 1.0).unwrap();
+    let e2_left = solver.element_section_forces(2, 0.0).unwrap();
+    let e2_right = solver.element_section_forces(2, 1.0).unwrap();
+
+    // Equilibrium at node 1 (section representation).
+    assert_close(
+        e1_left.moment - e0_right.moment + m,
+        0.0,
+        1e-9,
+        "node-1 section equilibrium",
+    );
+
+    // Moment diagram: +M before node 1, zero after; no shear anywhere.
+    assert_close(e0_right.moment, m, 1e-9, "e0 right = +M");
+    assert_close(e1_left.moment, 0.0, 1e-9, "e1 left = 0");
+    assert_close(e1_right.moment, 0.0, 1e-9, "e1 right = 0");
+    assert_close(e2_left.moment, 0.0, 1e-9, "e2 left = 0");
+    assert_close(e2_right.moment, 0.0, 1e-9, "e2 right (free end) = 0");
+    for f in [e0_right, e1_left, e1_right, e2_left, e2_right] {
+        assert_close(f.shear, 0.0, 1e-9, "V");
+        assert_close(f.axial, 0.0, 1e-9, "N");
+    }
+
+    // Global equilibrium.
+    let r = solver.reactions();
+    assert_close(r[2], -m, 1e-9, "Rz = -M_ext");
+
+    println!(
+        "[three-element nodal moment] e0_right={:.6e}, e1_left={:.6e}, e2_right={:.6e}, Rz={:.6e}",
+        e0_right.moment, e1_left.moment, e2_right.moment, r[2]
+    );
+}
+
+/// Multiple `add_applied_moment` calls at the same node must accumulate.
+#[test]
+fn test_section_forces_multiple_nodal_moments() {
+    let l = 1.0;
+    let (m1, m2) = (600.0, 400.0);
+
+    let mut model = cantilever_model(1, l);
+    model.add_applied_moment(1, m1).unwrap();
+    model.add_applied_moment(1, m2).unwrap();
+    let solver = solve(&model);
+
+    let f = solver.element_section_forces(0, 0.5).unwrap();
+    assert_close(f.moment, m1 + m2, 1e-9, "summed nodal moment");
+
+    // Same as applying the total once.
+    let mut model_total = cantilever_model(1, l);
+    model_total.add_applied_moment(1, m1 + m2).unwrap();
+    let solver_total = solve(&model_total);
+    let g = solver_total.element_section_forces(0, 0.5).unwrap();
+    assert_close(f.moment, g.moment, 1e-9, "accumulated == total");
+
+    println!(
+        "[multiple nodal moments] M = {:.6e} (expected {:.6e})",
+        f.moment,
+        m1 + m2
+    );
+}
+
+/// Rotated beam with a nodal applied moment: a z-axis moment is invariant
+/// under in-plane rotation, so the local section moment equals the applied M.
+#[test]
+fn test_section_forces_rotated_beam_nodal_moment() {
+    use std::f64::consts::FRAC_1_SQRT_2;
+
+    let l = 1.0;
+    let m = 1000.0;
+    let c = FRAC_1_SQRT_2;
+    let s = FRAC_1_SQRT_2;
+
+    let mut model = BeamModel::new();
+    model.add_node(BeamNode::new(0, 0.0, 0.0));
+    model.add_node(BeamNode::new(1, l * c, l * s));
+    model.add_element(BeamElement::new(0, 1, steel(), section()).unwrap());
+    model.fix_node(0);
+    model.add_applied_moment(1, m).unwrap();
+    let solver = solve(&model);
+
+    for &xi in &[0.0, 0.5, 1.0] {
+        let f = solver.element_section_forces(0, xi).unwrap();
+        assert_close(f.axial, 0.0, 1e-9, "N");
+        assert_close(f.shear, 0.0, 1e-9, "V");
+        assert_close(f.moment, m, 1e-9, &format!("M at xi={}", xi));
+    }
+
+    println!("[rotated 45° nodal moment] local M = +M invariant under rotation");
+}
