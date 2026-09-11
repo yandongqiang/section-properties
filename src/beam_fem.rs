@@ -199,6 +199,207 @@ impl BeamForceDiagram {
     }
 }
 
+/// Nodal displacement of a beam node, in the GLOBAL coordinate system.
+///
+/// DOF ordering follows the rest of the beam module: `ux` (global x),
+/// `uy` (global y), `rz` (rotation about global z, counter-clockwise
+/// positive). Values are given in the user's consistent unit system. They are
+/// **not** rotated into element-local axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeamNodalDisplacement {
+    /// Displacement along global +x.
+    pub ux: f64,
+    /// Displacement along global +y.
+    pub uy: f64,
+    /// Rotation about global +z (counter-clockwise positive).
+    pub rz: f64,
+}
+
+/// External support reaction at a constrained beam node, in the GLOBAL
+/// coordinate system.
+///
+/// A reaction is the force/moment the support supplies to hold a constrained
+/// DOF. It is a different concept from an element-on-node end force
+/// ([`BeamSolver::element_end_forces`]) and from a section internal force
+/// ([`SectionForces`]).
+///
+/// Only constrained DOFs contribute a reaction; unconstrained DOFs are
+/// reported as exactly `0.0` (see [`BeamAnalysisResult::reaction`]). Signs are
+/// such that, at global equilibrium, `Σ reactions + Σ applied loads = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BeamReaction {
+    /// Reaction force along global +x.
+    pub fx: f64,
+    /// Reaction force along global +y.
+    pub fy: f64,
+    /// Reaction moment about global +z (counter-clockwise positive).
+    pub mz: f64,
+}
+
+/// Unified, read-only result view of an already-solved [`BeamSolver`].
+///
+/// Create one with [`BeamSolver::results`]. It is a thin **aggregation /
+/// delegation layer**: every quantity is produced by the existing solver
+/// methods, and none of the FEM mathematics is reimplemented here.
+///
+/// # When the solve happens
+///
+/// Constructing a `BeamAnalysisResult` does **not** solve anything. Call
+/// [`BeamSolver::solve`] first; the result reflects the solver's current
+/// displacement state.
+///
+/// # The three force concepts (kept distinct on purpose)
+///
+/// 1. **Support reaction** — [`BeamReaction`] / [`Self::reaction`]: the
+///    external force supplied by a *support* at a constrained DOF (global
+///    coordinates).
+/// 2. **Element-on-node end force** — [`Self::element_end_forces`]: the 6
+///    element equilibrium forces `[N_i, V_i, M_i, N_j, V_j, M_j]` acting at an
+///    element's two nodes (local coordinates).
+/// 3. **Section internal force** — [`Self::section_forces`]: the internal
+///    resultants `N`, `V`, `M` at an arbitrary point `xi` inside an element
+///    (local coordinates).
+///
+/// These are intentionally exposed through different types/methods and must
+/// not be conflated.
+///
+/// # Ownership / cost
+///
+/// The result borrows the solver (`&BeamSolver`) and snapshots the reaction
+/// vector once at construction; it never copies stiffness matrices. Accessors
+/// are cheap: displacements are O(1), reactions are O(1) lookups into the
+/// snapshot, and element/section/sampling calls delegate to the solver (they
+/// perform the same work as the corresponding solver methods).
+#[derive(Clone)]
+pub struct BeamAnalysisResult<'a> {
+    solver: &'a BeamSolver,
+    /// Global reaction snapshot, length `n_dof`, with unconstrained DOFs set
+    /// to exactly zero.
+    reactions: Vec<f64>,
+}
+
+impl std::fmt::Debug for BeamAnalysisResult<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeamAnalysisResult")
+            .field("nodes", &self.solver.model.nodes.len())
+            .field("elements", &self.solver.model.elements.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> BeamAnalysisResult<'a> {
+    /// Number of nodes in the analysed model.
+    pub fn n_nodes(&self) -> usize {
+        self.solver.model.nodes.len()
+    }
+
+    /// Number of elements in the analysed model.
+    pub fn n_elements(&self) -> usize {
+        self.solver.model.elements.len()
+    }
+
+    /// Raw global displacement vector, DOF-ordered
+    /// `[ux0, uy0, rz0, ux1, uy1, rz1, ...]`.
+    ///
+    /// This is a borrowed view into the solver (no copy).
+    pub fn displacements(&self) -> &[f64] {
+        &self.solver.u_global
+    }
+
+    /// Nodal displacement (GLOBAL) at `node_index`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_index` is out of bounds.
+    pub fn displacement(&self, node_index: usize) -> Result<BeamNodalDisplacement, FemError> {
+        if node_index >= self.solver.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_index,
+                self.solver.model.nodes.len().saturating_sub(1)
+            )));
+        }
+        Ok(BeamNodalDisplacement {
+            ux: self.solver.displacement(node_index, 0),
+            uy: self.solver.displacement(node_index, 1),
+            rz: self.solver.displacement(node_index, 2),
+        })
+    }
+
+    /// Support reaction (GLOBAL) at `node_index`.
+    ///
+    /// Only constrained DOFs carry a value; unconstrained DOFs are reported as
+    /// exactly `0.0` (the raw residual `K·u - f` at a free DOF is numerical
+    /// round-off and is not a physical support reaction). At a node that is not
+    /// a support, all three components are therefore `0.0`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_index` is out of bounds.
+    pub fn reaction(&self, node_index: usize) -> Result<BeamReaction, FemError> {
+        if node_index >= self.solver.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_index,
+                self.solver.model.nodes.len().saturating_sub(1)
+            )));
+        }
+        let base = self.solver.model.dof_index(node_index, 0);
+        Ok(BeamReaction {
+            fx: self.reactions[base],
+            fy: self.reactions[base + 1],
+            mz: self.reactions[base + 2],
+        })
+    }
+
+    /// Element-on-node end forces in LOCAL coordinates for `element_index`:
+    /// `[N_i, V_i, M_i, N_j, V_j, M_j]`.
+    ///
+    /// Delegates to the same recovery used by
+    /// [`BeamSolver::element_end_forces`].
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `element_index` is out of bounds.
+    pub fn element_end_forces(&self, element_index: usize) -> Result<[f64; 6], FemError> {
+        self.solver.element_on_node_end_forces_local(element_index)
+    }
+
+    /// Section internal forces `N`, `V`, `M` (LOCAL) at `(element_index, xi)`.
+    ///
+    /// Thin delegation to [`BeamSolver::element_section_forces`] (single
+    /// source of truth for the N/V/M equations).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`BeamSolver::element_section_forces`].
+    pub fn section_forces(&self, element_index: usize, xi: f64) -> Result<SectionForces, FemError> {
+        self.solver.element_section_forces(element_index, xi)
+    }
+
+    /// Whole-beam force samples (Phase 2.5).
+    ///
+    /// Delegates to [`BeamSolver::sample_beam_forces`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`BeamSolver::sample_beam_forces`].
+    pub fn sample_forces(&self, n_per_element: usize) -> Result<Vec<BeamForceSample>, FemError> {
+        self.solver.sample_beam_forces(n_per_element)
+    }
+
+    /// Whole-beam force diagram (Phase 2.5).
+    ///
+    /// Delegates to [`BeamSolver::beam_force_diagram`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`BeamSolver::beam_force_diagram`].
+    pub fn diagram(&self, n_per_element: usize) -> Result<BeamForceDiagram, FemError> {
+        self.solver.beam_force_diagram(n_per_element)
+    }
+}
+
 /// 2D Beam Element
 #[derive(Debug, Clone)]
 pub struct BeamElement {
@@ -1789,8 +1990,8 @@ impl BeamSolver {
     /// Sample the internal-force diagram of a single element at `n` uniformly
     /// spaced points, including both endpoints.
     ///
-    /// Samples `xi = k / (n - 1)` for `k = 0..n`, so `xi = 0` and `xi = 1` are
-    /// always included. Each sample delegates to
+    /// Samples `xi = k / (n - 1)` for `k = 0..=n-1` (i.e. `k = 0, 1, …, n-1`),
+    /// so `xi = 0` and `xi = 1` are always included. Each sample delegates to
     /// [`Self::element_section_forces`] — the N/V/M values are **not**
     /// interpolated or recomputed here.
     ///
@@ -1907,6 +2108,25 @@ impl BeamSolver {
         Ok(BeamForceDiagram::new(
             self.sample_beam_forces(n_per_element)?,
         ))
+    }
+
+    /// Build a unified, read-only [`BeamAnalysisResult`] view of this solver.
+    ///
+    /// This does **not** run the solver: it is a cheap, infallible view over the
+    /// current displacement state, so call [`Self::solve`] first. The reaction
+    /// vector is snapshotted once here (masking unconstrained DOFs to exactly
+    /// zero); everything else is delegated lazily to the solver.
+    pub fn results(&self) -> BeamAnalysisResult<'_> {
+        let mut reactions = self.reactions();
+        for (i, reaction) in reactions.iter_mut().enumerate() {
+            if !self.fixed_dofs[i] {
+                *reaction = 0.0;
+            }
+        }
+        BeamAnalysisResult {
+            solver: self,
+            reactions,
+        }
     }
 }
 
