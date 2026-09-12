@@ -15,7 +15,9 @@
 //! theta   = fy L^2 / (2 E I) + M L / (E I)           = -30
 //! ```
 
-use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver};
+use section_properties::beam_fem::{
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof,
+};
 use section_properties::material::Material;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,9 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let res = solver.results();
 
     // --- global results ------------------------------------------------------
-    let dg = res.displacement(1)?;
+    // Typed DOF accessors on the solver (equivalent to the raw-index API).
+    let (dgx, dgy) = (
+        solver.displacement_dof(1, Dof::Ux)?,
+        solver.displacement_dof(1, Dof::Uy)?,
+    );
     println!("solver backend : {:?}", res.solver_name());
-    println!("global tip ux,uy : {:+.6}, {:+.6}", dg.ux, dg.uy);
+    println!("global tip ux,uy : {:+.6}, {:+.6}", dgx, dgy);
 
     // Local tip displacement: u_local = T · u_global.
     let el = &model.elements[0];

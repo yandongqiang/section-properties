@@ -269,8 +269,9 @@ typed-ID redesign would be a breaking change with no numerical benefit.
   documented difference: `BeamAnalysisResult::reaction` reports **exactly 0.0**
   at free DOFs (the raw residual there is round-off, not a physical support
   reaction), whereas `BeamSolver::reactions()` returns the raw `K·u - f`
-  residual (~1e-13). No new result structs were added; the existing ones are
-  generated from the same vectors.
+  residual (~1e-13). The snapshot is produced by `BeamSolver::results()`, which
+  recomputes the reactions and zeroes every unconstrained DOF. No new result
+  structs were added; the existing ones are generated from the same vectors.
 - Reading results before a successful solve: the displacement vector is
   initialised to zero, so displacement access returns `0.0`; reactions evaluated
   before a solve are `K·0 - f` and are **not** physical support reactions.

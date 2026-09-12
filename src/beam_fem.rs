@@ -578,7 +578,10 @@ impl BeamElement {
         (t[0][0] * gx + t[0][1] * gy, t[1][0] * gx + t[1][1] * gy)
     }
 
-    /// Compute global stiffness matrix (6x6) by transforming local stiffness
+    /// Element stiffness matrix (6x6) in **GLOBAL** coordinates.
+    ///
+    /// `k_global = Tᵀ · k_local · T`, with the DOF order
+    /// `[ux_i, uy_i, rz_i, ux_j, uy_j, rz_j]` (global axes).
     pub fn global_stiffness(&self, node_i: Point, node_j: Point) -> [[f64; 6]; 6] {
         let k_local = self.local_stiffness(node_i, node_j);
         let T = self.transformation_matrix(node_i, node_j);
@@ -791,7 +794,8 @@ impl DistributedLoad {
         }
     }
 
-    /// Uniform transverse load only (qy)
+    /// Uniform transverse load only (`qy`), in **LOCAL** element coordinates
+    /// (`qy > 0` upward in local +y).
     pub fn transverse(element_idx: usize, qy: f64) -> Self {
         Self {
             element_idx,
@@ -800,7 +804,8 @@ impl DistributedLoad {
         }
     }
 
-    /// Uniform axial load only (qx)
+    /// Uniform axial load only (`qx`), in **LOCAL** element coordinates
+    /// (`qx > 0` tensile, towards `node_j`).
     pub fn axial(element_idx: usize, qx: f64) -> Self {
         Self {
             element_idx,
@@ -849,7 +854,8 @@ impl PointLoad {
         }
     }
 
-    /// Create a transverse point force only
+    /// Create a transverse point force only, in **LOCAL** element coordinates
+    /// (`fy > 0` upward in local +y).
     pub fn transverse_force(element_idx: usize, position: f64, fy: f64) -> Self {
         Self {
             element_idx,
@@ -860,7 +866,8 @@ impl PointLoad {
         }
     }
 
-    /// Create an axial point force only
+    /// Create an axial point force only, in **LOCAL** element coordinates
+    /// (`fx > 0` tensile, towards `node_j`).
     pub fn axial_force(element_idx: usize, position: f64, fx: f64) -> Self {
         Self {
             element_idx,
@@ -871,7 +878,8 @@ impl PointLoad {
         }
     }
 
-    /// Create a moment only
+    /// Create a point moment only, in **LOCAL** element coordinates
+    /// (`mz > 0` counter-clockwise).
     pub fn moment(element_idx: usize, position: f64, mz: f64) -> Self {
         Self {
             element_idx,
@@ -1285,7 +1293,17 @@ impl BeamModel {
         Ok(())
     }
 
-    /// Add a point force only (transverse or axial) on an element
+    /// Add a point force only (transverse or axial) on an element.
+    ///
+    /// Components are **LOCAL** to the element (local x from `node_i` to
+    /// `node_j`, local y transverse, positive up). Use
+    /// [`BeamElement::to_local_force`] to convert global input data. `position`
+    /// must be in `[0, 1]`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] for an out-of-bounds element, a `position`
+    /// outside `[0, 1]`, or a non-finite component.
     pub fn add_point_force(
         &mut self,
         element_idx: usize,
@@ -1296,7 +1314,17 @@ impl BeamModel {
         self.add_point_load(element_idx, position, fx, fy, 0.0)
     }
 
-    /// Add a point moment only on an element
+    /// Add a point moment only on an element.
+    ///
+    /// `mz` is **LOCAL** to the element (`mz > 0` counter-clockwise) and
+    /// `position` must be in `[0, 1]`. This is an element load, distinct from
+    /// [`Self::add_applied_moment`], which is a nodal (global) moment that is
+    /// never part of an element's equivalent load vector.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] for an out-of-bounds element, a `position`
+    /// outside `[0, 1]`, or a non-finite value.
     pub fn add_point_moment(
         &mut self,
         element_idx: usize,
@@ -1306,7 +1334,17 @@ impl BeamModel {
         self.add_point_load(element_idx, position, 0.0, 0.0, mz)
     }
 
-    /// Add an applied moment at a node (in GLOBAL coordinates)
+    /// Add an applied moment at a node (in GLOBAL coordinates).
+    ///
+    /// This is a nodal external load applied to the global `theta` DOF
+    /// (`value > 0` counter-clockwise). It is **not** an element load: it never
+    /// enters an element's equivalent nodal-load vector, so element end forces
+    /// are unaffected by it except through the displacement field.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] for an out-of-bounds node index or a
+    /// non-finite value.
     pub fn add_applied_moment(&mut self, node_idx: usize, value: f64) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
             return Err(FemError::InvalidInput(format!(
@@ -1997,7 +2035,21 @@ impl BeamSolver {
         Ok(())
     }
 
-    /// Get displacement at a specific DOF
+    /// Displacement of a global DOF at a node (raw-index accessor).
+    ///
+    /// `dof` is a raw index in the **global** system: `0 = ux`, `1 = uy`,
+    /// `2 = rz`; the assembled slot is `3*node_idx + dof`
+    /// ([`BeamModel::dof_index`]).
+    ///
+    /// # Caveat — legacy DOF aliasing
+    ///
+    /// `dof >= 3` is **not** rejected: `3*node_idx + dof` then addresses a DOF
+    /// of a *following* node. This behaviour is preserved for compatibility;
+    /// prefer the typed [`Self::displacement_dof`] with [`Dof`], which cannot
+    /// alias and returns an error for an out-of-bounds node instead of `0.0`.
+    ///
+    /// Out-of-range indices return `0.0` (no panic). Before a successful solve
+    /// the whole displacement vector is zero, so this also returns `0.0`.
     pub fn displacement(&self, node_idx: usize, dof: usize) -> f64 {
         let idx = self.model.dof_index(node_idx, dof);
         if idx < self.u_global.len() {
@@ -2067,7 +2119,12 @@ impl BeamSolver {
         }
     }
 
-    /// Get all displacements
+    /// The full **global** displacement vector (borrowed, not copied).
+    ///
+    /// Laid out as `[ux0, uy0, rz0, ux1, uy1, rz1, ...]`, i.e. slot
+    /// `3*node + dof` with `dof` = `0/1/2` = `ux/uy/rz`
+    /// ([`BeamModel::dof_index`]). Before a successful solve every entry is
+    /// `0.0`.
     pub fn displacements(&self) -> &[f64] {
         &self.u_global
     }
@@ -2084,6 +2141,14 @@ impl BeamSolver {
     /// Together with the applied loads the reactions satisfy global
     /// equilibrium (`ΣF = 0`, `ΣM = 0`). They are **not** element end forces;
     /// see [`Self::element_end_forces`] for those.
+    ///
+    /// # Pre-solve behaviour
+    ///
+    /// Before a successful solve the displacement vector is zero, so this
+    /// returns the raw algebraic quantity `K·0 - f = -f` — **not** physical
+    /// support reactions. Check [`Self::solver_name`] (`Some(..)` only after a
+    /// successful solve), or use [`Self::results`], whose reaction snapshot
+    /// sets free DOFs to exactly `0.0`.
     pub fn reactions(&self) -> Vec<f64> {
         // R = K_original * u - f_global
         let mut reactions = vec![0.0; self.n_dof];
@@ -2107,6 +2172,20 @@ impl BeamSolver {
     }
 
     /// Get reaction at a specific DOF
+    ///
+    /// Raw-index accessor for the **global** reaction at `3*node_idx + dof`
+    /// (`0 = ux` → `Fx`, `1 = uy` → `Fy`, `2 = rz` → `Mz`).
+    ///
+    /// # Caveat — legacy DOF aliasing
+    ///
+    /// `dof >= 3` is **not** rejected and addresses a DOF of a *following*
+    /// node (see [`Self::displacement`]). Prefer the typed
+    /// [`Self::reaction_dof`] with [`Dof`], which cannot alias, returns an
+    /// error for an out-of-bounds node, and evaluates the reaction vector once.
+    ///
+    /// Out-of-range indices return `0.0` (no panic). Before a successful solve
+    /// this returns the raw `K·0 - f` value, which is not a physical support
+    /// reaction (see [`Self::reactions`]).
     pub fn reaction(&self, node_idx: usize, dof: usize) -> f64 {
         let idx = self.model.dof_index(node_idx, dof);
         if idx < self.reactions().len() {

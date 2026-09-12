@@ -253,3 +253,133 @@ fn test_invalid_node_returns_error() {
     assert!(s.displacement_dof(0, Dof::Uy).unwrap().is_finite());
     assert!(s.reaction_dof(0, Dof::Rz).unwrap().is_finite());
 }
+
+// ===========================================================================
+// Sharp edge A — legacy raw-DOF aliasing (behaviour preserved, now pinned)
+// ===========================================================================
+
+#[test]
+fn test_legacy_raw_dof_aliasing_is_pinned() {
+    // Axial loading so that node 1's ux is non-zero and clearly distinct from
+    // node 0's (constrained) rz.
+    let mut m = model();
+    m.add_nodal_force(2, 0, 100.0);
+    let mut s = BeamSolver::from_model(&m).unwrap();
+    s.solve_configured().unwrap();
+
+    let node1_ux = s.displacement(1, 0);
+    assert!(node1_ux.abs() > 1e-9, "node 1 must move axially");
+    assert_eq!(
+        s.displacement(0, 2),
+        0.0,
+        "node 0 rz is constrained and must be exactly zero"
+    );
+
+    // Pinned legacy behaviour: dof >= 3 aliases into the following node,
+    // because dof_index = 3*node + dof.
+    assert_eq!(
+        s.displacement(0, 3),
+        node1_ux,
+        "legacy displacement(0, 3) aliases to node 1 ux"
+    );
+    assert_eq!(
+        s.displacement(0, 4),
+        s.displacement(1, 1),
+        "legacy displacement(0, 4) aliases to node 1 uy"
+    );
+    assert_eq!(
+        s.reaction(0, 3),
+        s.reaction(1, 0),
+        "legacy reaction(0, 3) aliases to node 1 Fx"
+    );
+
+    // The typed accessors never alias: Dof::Rz at node 0 is node 0's rz slot.
+    assert_eq!(
+        s.displacement_dof(0, Dof::Rz).unwrap(),
+        s.displacement(0, 2)
+    );
+    assert_eq!(s.displacement_dof(0, Dof::Rz).unwrap(), 0.0);
+    assert_ne!(
+        s.displacement_dof(0, Dof::Rz).unwrap(),
+        s.displacement(0, 3),
+        "typed accessor must not reproduce the legacy alias"
+    );
+    // And a typed access can never express an out-of-range DOF.
+    for dof in Dof::ALL {
+        assert!(s.displacement_dof(0, dof).unwrap().is_finite());
+        assert!(s.reaction_dof(0, dof).unwrap().is_finite());
+    }
+}
+
+// ===========================================================================
+// Sharp edge B — pre-solve reactions are the raw algebraic quantity K·u - f
+// ===========================================================================
+
+#[test]
+fn test_pre_solve_reactions_are_raw_algebraic() {
+    // Single nodal force at the free tip: f_global[7] = -100.
+    let mut m = BeamModel::new();
+    m.add_node(BeamNode::new(0, 0.0, 0.0));
+    m.add_node(BeamNode::new(1, 1.0, 0.0));
+    m.add_element(
+        BeamElement::new(
+            0,
+            1,
+            Material::new(1.0, 0.3, 1.0, "unit"),
+            BeamSection::new(1.0, 1.0),
+        )
+        .unwrap(),
+    );
+    m.fix_node(0);
+    m.add_nodal_force(1, 1, -100.0);
+
+    let mut s = BeamSolver::from_model(&m).unwrap();
+
+    // Pre-solve: u = 0, so reactions = K·0 - f = -f_global = +100 at DOF 4.
+    assert_eq!(s.solver_name(), None, "no solve yet");
+    assert!(
+        (s.reaction_dof(1, Dof::Uy).unwrap() - 100.0).abs() < 1e-12,
+        "pre-solve reaction must be the raw -f value, got {}",
+        s.reaction_dof(1, Dof::Uy).unwrap()
+    );
+    assert!(
+        (s.reactions()[4] - 100.0).abs() < 1e-12,
+        "pre-solve reactions() must be K·0 - f"
+    );
+
+    // Post-solve: the same DOF is free and carries no reaction; the support
+    // reaction appears at node 0 instead.
+    s.solve_configured().unwrap();
+    assert!(s.reaction_dof(1, Dof::Uy).unwrap().abs() < 1e-9);
+    assert!((s.reaction_dof(0, Dof::Uy).unwrap() - 100.0).abs() < 1e-9);
+}
+
+// ===========================================================================
+// Result-struct behaviour: free DOFs sanitised to exactly zero
+// ===========================================================================
+
+#[test]
+fn test_result_struct_sanitises_free_dof_reactions() {
+    let s = solved();
+    let res = s.results();
+
+    // Free node: BeamAnalysisResult reports exactly 0.0 ...
+    for node in [1usize, 2] {
+        let r = res.reaction(node).unwrap();
+        assert_eq!(r.fx, 0.0, "node {} fx", node);
+        assert_eq!(r.fy, 0.0, "node {} fy", node);
+        assert_eq!(r.mz, 0.0, "node {} mz", node);
+    }
+    // ... while BeamSolver::reactions() returns the raw residual (round-off).
+    let raw = s.reactions();
+    for (idx, &v) in raw.iter().enumerate().skip(3) {
+        assert!(
+            v.abs() < 1e-9,
+            "raw free-DOF residual {} = {} should be round-off",
+            idx,
+            v
+        );
+    }
+    // A constrained DOF is reported identically by both (no sanitisation there).
+    assert_eq!(res.reaction(0).unwrap().fy, raw[1]);
+}
