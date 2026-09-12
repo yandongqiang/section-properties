@@ -38,7 +38,7 @@ pub use crate::io::{
 };
 
 pub use crate::beam_fem::{
-    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
+    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError,
 };
 pub use crate::fea::{
     LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,

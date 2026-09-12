@@ -234,6 +234,29 @@ error and keep that compatibility contract; their `try_*` counterparts return
 
 ---
 
+## 11. Typed ergonomic helpers (additive)
+
+These helpers are naming/convenience layers only; they do **not** change any
+convention above.
+
+- `Dof::Ux | Dof::Uy | Dof::Rz` maps to `0 | 1 | 2`
+  (`Dof::index()`, `Dof::ALL`, `Dof::name()`, `TryFrom<usize>`,
+  `From<Dof> for usize`).
+- `BeamModel::try_fix(node, Dof, value)` — typed form of `try_fix_dof`.
+- `BeamModel::try_fix_node_with_values(node, ux, uy, rz)` — prescribed
+  displacement/rotation for all three DOFs of a node (e.g. a support
+  settlement). It delegates to `try_fix_dof`, shares the same boundary-condition
+  storage and static-condensation path, and validates all inputs before
+  recording anything, so a rejected call leaves the model unchanged.
+- `BeamElement::to_local_force(node_i, node_j, gx, gy) -> (fx_local, fy_local)`
+  — rotate a **global** force (or load-intensity) vector into the element's
+  **local** axes for use with `add_distributed_load` / `add_point_load`.
+
+`Dof` is always a **global** DOF. Node and element indices remain plain
+`usize`; strongly typed `NodeId` / `ElementId` / `DofId` wrappers are
+intentionally **not** introduced in this phase — raw indices are adequate and a
+typed-ID redesign would be a breaking change with no numerical benefit.
+
 ## Notes
 
 - Only 2D Euler–Bernoulli beams are implemented; there is no shear deformation,

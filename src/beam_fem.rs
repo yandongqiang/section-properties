@@ -554,6 +554,30 @@ impl BeamElement {
         T
     }
 
+    /// Rotate a **global** force (or load-intensity) vector into this element's
+    /// **local** axes.
+    ///
+    /// Distributed loads and point loads are specified in LOCAL coordinates
+    /// (local x along `node_i -> node_j`, local y transverse), while nodal
+    /// forces are global — see `docs/beam_fem.md`. Use this helper when your
+    /// input data is global, e.g.
+    ///
+    /// ```text
+    /// let (qx, qy) = element.to_local_force(ni, nj, gx, gy)?;
+    /// model.add_distributed_load(elem, qx, qy)?;
+    /// ```
+    ///
+    /// A load intensity (N/m) transforms exactly like a force (N), so the same
+    /// helper applies to both. This is a pure coordinate rotation: it changes
+    /// no FEM convention and performs no calculation on the model.
+    pub fn to_local_force(&self, node_i: Point, node_j: Point, gx: f64, gy: f64) -> (f64, f64) {
+        let t = self.transformation_matrix(node_i, node_j);
+        // u_local = T · u_global, restricted to the translational block:
+        //   fx_local =  c·gx + s·gy
+        //   fy_local = -s·gx + c·gy
+        (t[0][0] * gx + t[0][1] * gy, t[1][0] * gx + t[1][1] * gy)
+    }
+
     /// Compute global stiffness matrix (6x6) by transforming local stiffness
     pub fn global_stiffness(&self, node_i: Point, node_j: Point) -> [[f64; 6]; 6] {
         let k_local = self.local_stiffness(node_i, node_j);
@@ -877,6 +901,80 @@ impl AppliedMoment {
     }
 }
 
+/// A single degree of freedom of a beam node.
+///
+/// Ergonomic typed alternative to the raw `0/1/2` DOF indices used by
+/// [`BeamModel::dof_index`] and [`BeamModel::try_fix_dof`]. The mapping is
+/// fixed by the frozen Beam FEM contract (`docs/beam_fem.md`):
+///
+/// ```text
+/// Dof::Ux -> 0   global translation along X
+/// Dof::Uy -> 1   global translation along Y
+/// Dof::Rz -> 2   global rotation about Z, counter-clockwise positive
+/// ```
+///
+/// This is a naming layer only: the internal representation remains
+/// `[ux, uy, rz]` in that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Dof {
+    /// Global translation along X (`ux`).
+    Ux,
+    /// Global translation along Y (`uy`).
+    Uy,
+    /// Global rotation about Z (`rz`), counter-clockwise positive.
+    Rz,
+}
+
+impl Dof {
+    /// All three DOFs in the canonical ordering `[ux, uy, rz]`.
+    pub const ALL: [Dof; 3] = [Dof::Ux, Dof::Uy, Dof::Rz];
+
+    /// Raw index of this DOF inside a node: `dof(node, d) = 3*node + d`.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Ux => 0,
+            Self::Uy => 1,
+            Self::Rz => 2,
+        }
+    }
+
+    /// Human-readable name (`"ux"`, `"uy"`, `"rz"`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ux => "ux",
+            Self::Uy => "uy",
+            Self::Rz => "rz",
+        }
+    }
+}
+
+impl From<Dof> for usize {
+    fn from(dof: Dof) -> Self {
+        dof.index()
+    }
+}
+
+impl TryFrom<usize> for Dof {
+    type Error = FemError;
+
+    /// Convert a raw DOF index into a [`Dof`].
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `value` is not 0, 1 or 2.
+    fn try_from(value: usize) -> Result<Self, FemError> {
+        match value {
+            0 => Ok(Self::Ux),
+            1 => Ok(Self::Uy),
+            2 => Ok(Self::Rz),
+            other => Err(FemError::InvalidInput(format!(
+                "Invalid DOF: {} (must be 0, 1, or 2)",
+                other
+            ))),
+        }
+    }
+}
+
 /// Beam model with nodes, elements, loads, and boundary conditions.
 ///
 /// # Conventions
@@ -1041,6 +1139,72 @@ impl BeamModel {
         self.try_fix_dof(node_idx, 0, 0.0)?;
         self.try_fix_dof(node_idx, 1, 0.0)?;
         self.try_fix_dof(node_idx, 2, 0.0)?;
+        Ok(())
+    }
+
+    /// Typed counterpart of [`Self::try_fix_dof`]: constrain `(node_idx, dof)`
+    /// to `value`.
+    ///
+    /// ```text
+    /// model.try_fix(0, Dof::Uy, 0.0)?;   // == model.try_fix_dof(0, 1, 0.0)?
+    /// ```
+    ///
+    /// `dof` is always a **global** DOF; there is no local DOF variant. This
+    /// delegates to [`Self::try_fix_dof`] and therefore shares the same
+    /// boundary-condition storage, validation and static-condensation path.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] for an out-of-bounds node index or a
+    /// non-finite prescribed value.
+    pub fn try_fix(&mut self, node_idx: usize, dof: Dof, value: f64) -> Result<(), FemError> {
+        self.try_fix_dof(node_idx, dof.index(), value)
+    }
+
+    /// Constrain all three DOFs of a node to the given prescribed values.
+    ///
+    /// Use this for a prescribed displacement/rotation (e.g. a support
+    /// settlement such as `try_fix_node_with_values(0, 0.0, -0.01, 0.0)`); a
+    /// fully fixed node is `try_fix_node_with_values(i, 0.0, 0.0, 0.0)`, which
+    /// is what [`Self::try_fix_node`] does.
+    ///
+    /// This is a convenience wrapper: it delegates to [`Self::try_fix_dof`]
+    /// for `ux`, `uy` and `rz`, so it uses the same boundary-condition storage
+    /// and the same static-condensation path. It does not add a second BC
+    /// representation and does not change reaction recovery.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] for an out-of-bounds node index or any
+    /// non-finite prescribed value. All inputs are validated **before** any
+    /// boundary condition is recorded, so a rejected call leaves the model
+    /// unchanged (no partially fixed node).
+    pub fn try_fix_node_with_values(
+        &mut self,
+        node_idx: usize,
+        ux: f64,
+        uy: f64,
+        rz: f64,
+    ) -> Result<(), FemError> {
+        if node_idx >= self.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            )));
+        }
+        for (dof, value) in [(Dof::Ux, ux), (Dof::Uy, uy), (Dof::Rz, rz)] {
+            if !value.is_finite() {
+                return Err(FemError::InvalidInput(format!(
+                    "Prescribed value for {} must be finite, got {}",
+                    dof.name(),
+                    value
+                )));
+            }
+        }
+        self.try_fix_dof(node_idx, Dof::Ux.index(), ux)?;
+        self.try_fix_dof(node_idx, Dof::Uy.index(), uy)?;
+        self.try_fix_dof(node_idx, Dof::Rz.index(), rz)?;
         Ok(())
     }
 
