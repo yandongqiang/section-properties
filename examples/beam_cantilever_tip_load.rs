@@ -12,7 +12,9 @@
 //! reaction        Ry = +P = 100,  Rz = +P L = 100
 //! ```
 
-use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver};
+use section_properties::beam_fem::{
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof,
+};
 use section_properties::material::Material;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,24 +39,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let res = solver.results();
 
     // --- results -------------------------------------------------------------
-    let d = res.displacement(1)?;
+    // Typed DOF accessors on the solver (equivalent to the raw-index API):
+    //   solver.displacement_dof(1, Dof::Uy) == solver.displacement(1, 1)
+    let uy = solver.displacement_dof(1, Dof::Uy)?;
+    let rz = solver.displacement_dof(1, Dof::Rz)?;
+    let ry = solver.reaction_dof(0, Dof::Uy)?;
+    let moment = solver.reaction_dof(0, Dof::Rz)?;
+
     println!("solver backend : {:?}", res.solver_name());
     println!(
         "tip uy         : {:+.6}   (analytical {:+.6})",
-        d.uy,
+        uy,
         -p * l.powi(3) / (3.0 * e * i)
     );
     println!(
         "tip rz         : {:+.6}   (analytical {:+.6})",
-        d.rz,
+        rz,
         -p * l.powi(2) / (2.0 * e * i)
     );
-
-    let r0 = res.reaction(0)?;
-    println!("reaction Rx,Ry : {:+.6}, {:+.6}", r0.fx, r0.fy);
+    println!("reaction Ry    : {:+.6}   (analytical {:+.6})", ry, p);
     println!(
         "reaction Rz    : {:+.6}   (analytical {:+.6})",
-        r0.mz,
+        moment,
         p * l
     );
 

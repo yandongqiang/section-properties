@@ -915,6 +915,22 @@ impl AppliedMoment {
 ///
 /// This is a naming layer only: the internal representation remains
 /// `[ux, uy, rz]` in that order.
+///
+/// # Examples
+///
+/// ```rust
+/// use section_properties::beam_fem::{BeamModel, BeamNode, Dof};
+///
+/// // Explicit, checked DOF references instead of raw 0/1/2 indices:
+/// let mut model = BeamModel::new();
+/// model.add_node(BeamNode::new(0, 0.0, 0.0));
+/// model.try_fix(0, Dof::Uy, 0.0).unwrap();
+///
+/// assert_eq!(Dof::Ux.index(), 0);
+/// assert_eq!(Dof::Uy.index(), 1);
+/// assert_eq!(Dof::Rz.index(), 2);
+/// assert_eq!(Dof::ALL, [Dof::Ux, Dof::Uy, Dof::Rz]);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dof {
     /// Global translation along X (`ux`).
@@ -1325,7 +1341,47 @@ impl BeamModel {
     }
 }
 
-/// Beam FEM solver using the unified LinearSolver abstraction
+/// Beam FEM solver using the unified LinearSolver abstraction.
+///
+/// # Complete workflow
+///
+/// ```rust
+/// use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof};
+/// use section_properties::material::Material;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. model: unit cantilever (E = A = I = 1, L = 1)
+/// let mut model = BeamModel::new();
+/// model.add_node(BeamNode::new(0, 0.0, 0.0));
+/// model.add_node(BeamNode::new(1, 1.0, 0.0));
+/// model.add_element(BeamElement::new(
+///     0,
+///     1,
+///     Material::new(1.0, 0.3, 1.0, "unit"),
+///     BeamSection::new(1.0, 1.0),
+/// )?);
+///
+/// // 2. boundary condition: clamp node 0 (typed DOF API)
+/// model.try_fix_node_with_values(0, 0.0, 0.0, 0.0)?;
+///
+/// // 3. load: global transverse force at the tip
+/// model.add_nodal_force(1, 1, -100.0);
+///
+/// // 4. solve
+/// let mut solver = BeamSolver::from_model(&model)?;
+/// solver.solve_configured()?;
+///
+/// // 5. post-process: typed displacement and reaction access
+/// let uy = solver.displacement_dof(1, Dof::Uy)?; // -P L^3 / 3EI
+/// let rz = solver.displacement_dof(1, Dof::Rz)?; // -P L^2 / 2EI
+/// let ry = solver.reaction_dof(0, Dof::Uy)?; // +P
+///
+/// assert!((uy + 100.0 / 3.0).abs() < 1e-9);
+/// assert!((rz + 50.0).abs() < 1e-9);
+/// assert!((ry - 100.0).abs() < 1e-9);
+/// # Ok(())
+/// # }
+/// ```
 pub struct BeamSolver {
     /// Global stiffness matrix
     k_global: SparseMatrix,
@@ -1951,6 +2007,66 @@ impl BeamSolver {
         }
     }
 
+    /// Typed counterpart of [`Self::displacement`]: displacement of `dof` at
+    /// `node_idx`, in the **global** system.
+    ///
+    /// This is a direct extraction from the global displacement vector — no
+    /// recalculation, so the value is exactly what [`Self::displacement`]
+    /// returns for the corresponding raw index. Reading before a successful
+    /// solve yields `0.0` (the displacement vector is initialised to zero).
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds. (With a typed
+    /// [`Dof`] an out-of-range DOF is impossible.)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof};
+    /// use section_properties::material::Material;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut model = BeamModel::new();
+    /// model.add_node(BeamNode::new(0, 0.0, 0.0));
+    /// model.add_node(BeamNode::new(1, 1.0, 0.0));
+    /// model.add_element(BeamElement::new(
+    ///     0,
+    ///     1,
+    ///     Material::new(1.0, 0.3, 1.0, "unit"),
+    ///     BeamSection::new(1.0, 1.0),
+    /// )?);
+    /// model.fix_node(0);
+    /// model.add_nodal_force(1, 1, -100.0);
+    ///
+    /// let mut solver = BeamSolver::from_model(&model)?;
+    /// solver.solve_configured()?;
+    ///
+    /// // tip deflection = -P L^3 / 3EI = -33.333...
+    /// let uy = solver.displacement_dof(1, Dof::Uy)?;
+    /// assert!((uy + 100.0 / 3.0).abs() < 1e-9);
+    /// // identical to the raw-index accessor
+    /// assert_eq!(uy, solver.displacement(1, 1));
+    /// assert!(matches!(solver.displacement_dof(9, Dof::Uy), Err(_)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn displacement_dof(&self, node_idx: usize, dof: Dof) -> Result<f64, FemError> {
+        if node_idx >= self.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.model.nodes.len().saturating_sub(1)
+            )));
+        }
+        let idx = self.model.dof_index(node_idx, dof.index());
+        if idx < self.u_global.len() {
+            Ok(self.u_global[idx])
+        } else {
+            Ok(0.0)
+        }
+    }
+
     /// Get all displacements
     pub fn displacements(&self) -> &[f64] {
         &self.u_global
@@ -1997,6 +2113,70 @@ impl BeamSolver {
             self.reactions()[idx]
         } else {
             0.0
+        }
+    }
+
+    /// Typed counterpart of [`Self::reaction`]: **global** support reaction of
+    /// `dof` at `node_idx`.
+    ///
+    /// - `Dof::Ux` → translational X reaction;
+    /// - `Dof::Uy` → translational Y reaction;
+    /// - `Dof::Rz` → rotational reaction about Z (counter-clockwise positive).
+    ///
+    /// Delegates to the same [`Self::reactions`] vector, so the value is
+    /// exactly what [`Self::reaction`] returns for the corresponding raw index;
+    /// only a single reaction evaluation is performed. At a free DOF the value
+    /// is numerically zero.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use section_properties::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof};
+    /// use section_properties::material::Material;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut model = BeamModel::new();
+    /// model.add_node(BeamNode::new(0, 0.0, 0.0));
+    /// model.add_node(BeamNode::new(1, 1.0, 0.0));
+    /// model.add_element(BeamElement::new(
+    ///     0,
+    ///     1,
+    ///     Material::new(1.0, 0.3, 1.0, "unit"),
+    ///     BeamSection::new(1.0, 1.0),
+    /// )?);
+    /// model.fix_node(0);
+    /// model.add_nodal_force(1, 1, -100.0);
+    ///
+    /// let mut solver = BeamSolver::from_model(&model)?;
+    /// solver.solve_configured()?;
+    ///
+    /// // Support reactions: Ry = +P, Rz = +P·L
+    /// let ry = solver.reaction_dof(0, Dof::Uy)?;
+    /// let rz = solver.reaction_dof(0, Dof::Rz)?;
+    /// assert!((ry - 100.0).abs() < 1e-9);
+    /// assert!((rz - 100.0).abs() < 1e-9);
+    /// assert_eq!(ry, solver.reaction(0, 1));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn reaction_dof(&self, node_idx: usize, dof: Dof) -> Result<f64, FemError> {
+        if node_idx >= self.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.model.nodes.len().saturating_sub(1)
+            )));
+        }
+        let reactions = self.reactions();
+        let idx = self.model.dof_index(node_idx, dof.index());
+        if idx < reactions.len() {
+            Ok(reactions[idx])
+        } else {
+            Ok(0.0)
         }
     }
 
