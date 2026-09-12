@@ -14,7 +14,7 @@ The semantics below are exercised by:
 | --- | --- |
 | Reference solutions | `tests/beam_fem_reference.rs` |
 | Convergence / coverage | `tests/beam_fem_convergence.rs` |
-| Multi-solver cross-validation | `tests/beam_fem_rotated_beam` in `tests/beam_multisolver_cross_validation.rs` |
+| Multi-solver cross-validation | `test_e_rotated_beam` in `tests/beam_multisolver_cross_validation.rs` |
 | API / load / BC semantics | `tests/beam_fem_api_semantics.rs` |
 | Robustness / validation | `tests/beam_fem_robustness.rs` |
 | Core element/assembly | `tests/beam_fem.rs` |

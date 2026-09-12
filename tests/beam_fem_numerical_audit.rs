@@ -1084,3 +1084,124 @@ fn test_realistic_magnitude_symmetric_backends_accepted() {
         }
     }
 }
+
+// ===========================================================================
+// Phase 8/§6 — audit of the scale-aware symmetry predicate
+// ===========================================================================
+
+#[test]
+fn test_symmetry_predicate_audit() {
+    use section_properties::fea::SparseMatrix;
+
+    // Build a 3x3 sparse matrix from an explicit dense array.
+    let from_dense = |m: [[f64; 3]; 3]| {
+        let mut a = SparseMatrix::new(3);
+        for (i, row) in m.iter().enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    a.add(i, j, v);
+                }
+            }
+        }
+        a.compress();
+        a
+    };
+    let diag = |scale: f64| {
+        [
+            [scale, 0.0, 0.0],
+            [0.0, 0.5 * scale, 0.0],
+            [0.0, 0.0, 0.25 * scale],
+        ]
+    };
+
+    // (1) Exactly symmetric matrices across 12 orders of magnitude.
+    for &scale in &[1e-12_f64, 1.0, 1e4, 1e8, 1e12] {
+        assert!(
+            from_dense(diag(scale)).is_symmetric(1e-12),
+            "exactly symmetric at scale {} must be detected",
+            scale
+        );
+    }
+    // (2) Negative and mixed-scale entries, still symmetric.
+    assert!(
+        from_dense([[-5e8, 1e-9, 0.0], [1e-9, -2.0, 3e6], [0.0, 3e6, -1e12]]).is_symmetric(1e-12)
+    );
+    // (3) Zero matrix / all-zero off-diagonals.
+    assert!(from_dense([[0.0; 3]; 3]).is_symmetric(1e-12));
+    // (4) Very small but exactly mirrored nonzero entries.
+    assert!(
+        from_dense([[1e-14, 2e-14, 0.0], [2e-14, 1e-14, 0.0], [0.0, 0.0, 1.0]]).is_symmetric(1e-12)
+    );
+
+    // (5) T^T K T at realistic engineering magnitudes (round-off asymmetry).
+    for &deg in &[45.0_f64, 135.0] {
+        let th = deg.to_radians();
+        let (c, s) = (th.cos(), th.sin());
+        let (e, a, i, l) = (200e9, 5e-3, 2e-5, 2.0);
+        let mut m = BeamModel::new();
+        m.add_node(BeamNode::new(0, 0.0, 0.0));
+        m.add_node(BeamNode::new(1, l * c, l * s));
+        m.add_element(
+            BeamElement::new(
+                0,
+                1,
+                Material::new(e, 0.3, 7850.0, "S"),
+                BeamSection::new(a, i),
+            )
+            .unwrap(),
+        );
+        let (ni, nj) = (m.nodes[0].point(), m.nodes[1].point());
+        let el = &m.elements[0];
+        let k_local = el.local_stiffness(ni, nj);
+        let t = el.transformation_matrix(ni, nj);
+        // kg = T^T k_local T
+        let mut kt = [[0.0f64; 6]; 6];
+        for r in 0..6 {
+            for cc in 0..6 {
+                for k in 0..6 {
+                    kt[r][cc] += t[k][r] * k_local[k][cc];
+                }
+            }
+        }
+        let mut kg = [[0.0f64; 6]; 6];
+        for r in 0..6 {
+            for cc in 0..6 {
+                for k in 0..6 {
+                    kg[r][cc] += kt[r][k] * t[k][cc];
+                }
+            }
+        }
+        let mut sp = SparseMatrix::new(6);
+        for (r, row) in kg.iter().enumerate() {
+            for (cc, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    sp.add(r, cc, v);
+                }
+            }
+        }
+        sp.compress();
+        assert!(
+            sp.is_symmetric(1e-12),
+            "{:.0}°: T^T K T at realistic magnitude must be symmetric (asym rel ~1e-16)",
+            deg
+        );
+    }
+
+    // (6) Genuine asymmetry must NOT be hidden by large magnitudes.
+    //     Small matrix:
+    assert!(!from_dense([[1.0, 2.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]).is_symmetric(1e-12));
+    //     Large matrix, O(1) relative asymmetry:
+    assert!(!from_dense([[5e8, 1e8, 0.0], [4e8, 5e8, 0.0], [0.0, 0.0, 5e8]]).is_symmetric(1e-12));
+    //     One-sided missing entry at large magnitude (a_ij present, a_ji zero):
+    assert!(!from_dense([[5e8, 7e7, 0.0], [0.0, 5e8, 0.0], [0.0, 0.0, 5e8]]).is_symmetric(1e-12));
+    //     Mixed-scale: a genuine 1e-6 *relative* asymmetry at 1e8 magnitude is
+    //     far above the 1e-12 relative threshold and must be rejected.
+    assert!(
+        !from_dense([
+            [1e8, 1e8 * (1.0 + 1e-6), 0.0],
+            [1e8, 1e8, 0.0],
+            [0.0, 0.0, 1e8]
+        ])
+        .is_symmetric(1e-12)
+    );
+}
