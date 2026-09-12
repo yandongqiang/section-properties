@@ -382,17 +382,25 @@ fn test_near_singular_matrix_behavior() {
         match (fr, x) {
             (Err(e), _) => println!("[near-singular {:11}] reported error: {:?}", name, e),
             (Ok(()), Some(x)) => {
-                // If it does solve, the result must at least be finite: no
-                // NaN/Inf and no silently regularized garbage.
+                // If it does solve, the result must be a numerically valid
+                // solution: finite, with a small residual ||A x - b||_inf.
                 assert!(
                     all_finite(&x),
                     "{}: produced non-finite solution for near-singular system",
                     name
                 );
+                let res = residual_inf(&near, &x, &b);
+                let bound = 1e-6 * b.iter().fold(1.0f64, |m, &v| m.max(v.abs()));
+                assert!(
+                    res <= bound,
+                    "{}: near-singular solve has residual ||Ax-b||_inf = {:.3e} > {:.3e}",
+                    name,
+                    res,
+                    bound
+                );
                 println!(
                     "[near-singular {:11}] solved with finite x, residual={:.3e}",
-                    name,
-                    residual_inf(&near, &x, &b)
+                    name, res
                 );
             }
             _ => panic!("{}: inconsistent Ok/Err state", name),
@@ -402,25 +410,37 @@ fn test_near_singular_matrix_behavior() {
 
 #[test]
 fn test_iterative_report_failure_on_singular() {
+    // Singular AND inconsistent: A is rank-1, and b = [1, 2] is not in the
+    // range of A (its component along the null vector [1, -1] is 1 - 2 = -1),
+    // so the system has no solution. A correct iterative solver must either
+    // report an explicit error/non-convergence, or return an x whose residual
+    // is genuinely small.
     let singular = from_dense(&[&[1.0, 1.0], &[1.0, 1.0]]);
-    let b = vec![1.0, 1.0];
+    let b = vec![1.0, 2.0];
 
     for &name in &["cg", "iccg"] {
         let (fr, x) = attempt(name, &singular, &b);
         match (fr, x) {
             (Err(e), _) => println!("[iterative singular {:5}] error: {:?}", name, e),
             (Ok(()), Some(x)) => {
-                // Non-convergence must be explicit; an Ok result must not
-                // contain NaN/Inf.
                 assert!(
                     all_finite(&x),
                     "{}: non-finite solution on a singular system",
                     name
                 );
+                let res = residual_inf(&singular, &x, &b);
+                let bound = 1e-6 * b.iter().fold(1.0f64, |m, &v| m.max(v.abs()));
+                assert!(
+                    res <= bound,
+                    "{}: reported Ok on an inconsistent singular system but \
+                     residual ||Ax-b||_inf = {:.3e} > {:.3e}",
+                    name,
+                    res,
+                    bound
+                );
                 println!(
                     "[iterative singular {:5}] returned x (finite), residual={:.3e}",
-                    name,
-                    residual_inf(&singular, &x, &b)
+                    name, res
                 );
             }
             _ => panic!("{}: inconsistent state", name),
