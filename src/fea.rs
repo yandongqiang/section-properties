@@ -1124,7 +1124,17 @@ impl SparseMatrix {
                 if j > i {
                     let val_ij = self.csr_vals[k];
                     let val_ji = self.get(j, i);
-                    if (val_ij - val_ji).abs() > tol {
+                    // Scale-aware comparison: a matrix assembled in floating
+                    // point is symmetric only up to round-off, and that
+                    // round-off grows with the entry magnitude (a stiffness
+                    // matrix with EA/L ~ 1e8 carries ~1e-8 of asymmetry while
+                    // being symmetric to ~1e-16 *relative*). An absolute
+                    // tolerance would misclassify such matrices as
+                    // non-symmetric. `tol` is therefore relative to the entry
+                    // magnitude, with a floor of 1.0 so unit-scale problems
+                    // keep the previous absolute behaviour.
+                    let scale = val_ij.abs().max(val_ji.abs()).max(1.0);
+                    if (val_ij - val_ji).abs() > tol * scale {
                         return false;
                     }
                 }
