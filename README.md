@@ -29,6 +29,12 @@ library in a single, dependency-light Rust crate.
   protection, and fire resistance.
 - **Section library** (`section_library`): parametric steel (IPE/HE/etc.),
   cold-formed, concrete, timber, and composite sections.
+- **Beam FEM** (`beam_fem`): 2D Euler–Bernoulli frame analysis — nodes and
+  elements, distributed/point loads, applied moments, static-condensation
+  boundary conditions, element end forces, section resultants
+  `N(x)/V(x)/M(x)`, and pluggable `LinearSolver` backends
+  (dense, skyline LDLᵀ, sparse LU, CG/ICCG).
+  See [`docs/beam_fem.md`](docs/beam_fem.md) for the full contract.
 - **Database** (`database`): in-memory, filterable/searchable section database.
 - **I/O** (`io`): JSON, CSV, DXF, SVG, VTK and Nastran export/import.
 
@@ -79,4 +85,16 @@ Generate API docs with:
 
 ```bash
 cargo doc --open
+```
+
+Beam FEM conventions (DOF ordering, coordinate systems, sign conventions,
+load ownership, boundary conditions, model snapshot semantics, solver
+selection and error behaviour) are documented in
+[`docs/beam_fem.md`](docs/beam_fem.md). End-to-end usage is shown by the
+`beam_*` examples in `examples/`.
+
+```bash
+cargo run --example beam_cantilever_tip_load
+cargo run --example beam_cantilever_udl
+cargo run --example beam_rotated_mixed_loading
 ```

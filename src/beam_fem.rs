@@ -407,7 +407,12 @@ impl<'a> BeamAnalysisResult<'a> {
     }
 }
 
-/// 2D Beam Element
+/// 2D Euler–Bernoulli beam element between two nodes.
+///
+/// Local axes: x from `node_i` to `node_j`, y transverse (positive up), with
+/// counter-clockwise rotation. Element end forces are ordered
+/// `[N_i, V_i, M_i, N_j, V_j, M_j]` in these local axes; see
+/// [`BeamSolver::element_end_forces`] for the recovery formula.
 #[derive(Debug, Clone)]
 pub struct BeamElement {
     /// Node i index
@@ -872,7 +877,29 @@ impl AppliedMoment {
     }
 }
 
-/// Beam model with nodes, elements, loads, and boundary conditions
+/// Beam model with nodes, elements, loads, and boundary conditions.
+///
+/// # Conventions
+///
+/// - Each node has three **global** DOFs `[ux, uy, rz]`, ordered
+///   `dof(node, d) = 3*node + d`; `rz` is counter-clockwise positive.
+/// - Element local x runs from `node_i` to `node_j`, local y is transverse
+///   (positive up so that local rotation is counter-clockwise).
+/// - Load coordinate systems differ by kind: [`add_nodal_force`] is global,
+///   [`add_distributed_load`] and [`add_point_load`] are **local**,
+///   [`add_applied_moment`] is a **global** `theta` load.
+///
+/// # Snapshot semantics
+///
+/// [`BeamSolver::from_model`] clones the model and assembles the global
+/// stiffness matrix and force vector once. Mutating a `BeamModel` after a
+/// solver has been built does not affect that solver; build a new solver to
+/// pick up changes. See `docs/beam_fem.md` for the full contract.
+///
+/// [`add_nodal_force`]: Self::add_nodal_force
+/// [`add_distributed_load`]: Self::add_distributed_load
+/// [`add_point_load`]: Self::add_point_load
+/// [`add_applied_moment`]: Self::add_applied_moment
 #[derive(Debug, Clone)]
 pub struct BeamModel {
     /// Nodes
@@ -1765,7 +1792,18 @@ impl BeamSolver {
         &self.u_global
     }
 
-    /// Compute reaction forces: R = K_original * u - f_applied
+    /// Compute the global external support reactions.
+    ///
+    /// `R = K_original · u - f_global`, evaluated on the **unconstrained**
+    /// (assembled) system after the full displacement vector has been
+    /// reconstructed from static condensation:
+    ///
+    /// - at a constrained DOF, `R` is the support reaction;
+    /// - at a free DOF, `R` is numerically zero.
+    ///
+    /// Together with the applied loads the reactions satisfy global
+    /// equilibrium (`ΣF = 0`, `ΣM = 0`). They are **not** element end forces;
+    /// see [`Self::element_end_forces`] for those.
     pub fn reactions(&self) -> Vec<f64> {
         // R = K_original * u - f_global
         let mut reactions = vec![0.0; self.n_dof];
@@ -1838,10 +1876,10 @@ impl BeamSolver {
     /// the end values here include the consistent-load contributions and say
     /// nothing about `N(x)`, `V(x)`, `M(x)` *inside* the element.
     ///
-    /// A future section-force API (`section_forces(xi)` /
-    /// `element_internal_force(xi)`) will compute the true internal resultants
-    /// at an arbitrary `ξ` via `f_int(ξ) = K·u` sectional relations plus the
-    /// load terms. Do not overload this method to mean both.
+    /// For the internal resultants at an arbitrary `ξ`, use
+    /// [`Self::element_section_forces`], which recovers `N(x)`, `V(x)`, `M(x)`
+    /// from equilibrium (including the correct jumps across point loads and
+    /// moments). Do not overload this method to mean both.
     ///
     /// # Errors
     ///
