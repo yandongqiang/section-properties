@@ -915,53 +915,106 @@ impl BeamModel {
         self.elements.push(element);
     }
 
-    /// Add nodal force
-    /// dof: 0=u, 1=v, 2=θ
-    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    /// Add nodal force.
+    ///
+    /// Panics if `node_idx` is out of bounds or `dof` is not 0/1/2 (programmer
+    /// error). Use [`Self::try_add_nodal_force`] for a fallible version.
     pub fn add_nodal_force(&mut self, node_idx: usize, dof: usize, value: f64) {
+        self.try_add_nodal_force(node_idx, dof, value)
+            .unwrap_or_else(|e| panic!("{}", e));
+    }
+
+    /// Fallible counterpart of [`Self::add_nodal_force`]: returns a structured
+    /// error for an out-of-bounds node index, an invalid DOF (must be 0, 1 or 2),
+    /// or a non-finite force value, instead of panicking.
+    pub fn try_add_nodal_force(
+        &mut self,
+        node_idx: usize,
+        dof: usize,
+        value: f64,
+    ) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
-            panic!(
+            return Err(FemError::InvalidInput(format!(
                 "Invalid node index: {} (max: {})",
                 node_idx,
                 self.nodes.len().saturating_sub(1)
-            );
+            )));
         }
         if dof >= 3 {
-            panic!("Invalid DOF: {} (must be 0, 1, or 2)", dof);
+            return Err(FemError::InvalidInput(format!(
+                "Invalid DOF: {} (must be 0, 1, or 2)",
+                dof
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Nodal force must be finite, got {}",
+                value
+            )));
         }
         self.nodal_forces.push((node_idx, dof, value));
+        Ok(())
     }
 
-    /// Fix a DOF to a prescribed value
-    /// dof: 0=u, 1=v, 2=θ
-    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    /// Fix a single DOF to a prescribed value.
+    ///
+    /// Panics if `node_idx` is out of bounds or `dof` is not 0/1/2 (programmer
+    /// error). Use [`Self::try_fix_dof`] for a fallible version.
     pub fn fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) {
+        self.try_fix_dof(node_idx, dof, value)
+            .unwrap_or_else(|e| panic!("{}", e));
+    }
+
+    /// Fallible counterpart of [`Self::fix_dof`]: returns a structured error for
+    /// an out-of-bounds node index, an invalid DOF (must be 0, 1 or 2), or a
+    /// non-finite prescribed value, instead of panicking.
+    pub fn try_fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
-            panic!(
+            return Err(FemError::InvalidInput(format!(
                 "Invalid node index: {} (max: {})",
                 node_idx,
                 self.nodes.len().saturating_sub(1)
-            );
+            )));
         }
         if dof >= 3 {
-            panic!("Invalid DOF: {} (must be 0, 1, or 2)", dof);
+            return Err(FemError::InvalidInput(format!(
+                "Invalid DOF: {} (must be 0, 1, or 2)",
+                dof
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Prescribed value must be finite, got {}",
+                value
+            )));
         }
         self.fixed_dofs.push((node_idx, dof, value));
+        Ok(())
     }
 
-    /// Fix a node completely (all 3 DOFs to 0)
-    /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
+    /// Fix a node completely (all 3 DOFs to 0).
+    ///
+    /// Panics if `node_idx` is out of bounds (programmer error). Use
+    /// [`Self::try_fix_node`] for a fallible version.
     pub fn fix_node(&mut self, node_idx: usize) {
+        self.try_fix_node(node_idx)
+            .unwrap_or_else(|e| panic!("{}", e));
+    }
+
+    /// Fallible counterpart of [`Self::fix_node`]: returns a structured error
+    /// for an out-of-bounds node index instead of panicking.
+    pub fn try_fix_node(&mut self, node_idx: usize) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
-            panic!(
+            return Err(FemError::InvalidInput(format!(
                 "Invalid node index: {} (max: {})",
                 node_idx,
                 self.nodes.len().saturating_sub(1)
-            );
+            )));
         }
-        self.fix_dof(node_idx, 0, 0.0);
-        self.fix_dof(node_idx, 1, 0.0);
-        self.fix_dof(node_idx, 2, 0.0);
+        self.try_fix_dof(node_idx, 0, 0.0)?;
+        self.try_fix_dof(node_idx, 1, 0.0)?;
+        self.try_fix_dof(node_idx, 2, 0.0)?;
+        Ok(())
     }
 
     /// Add a distributed load on an element (in LOCAL coordinates)
@@ -977,6 +1030,12 @@ impl BeamModel {
                 "Invalid element index: {} (max: {})",
                 element_idx,
                 self.elements.len().saturating_sub(1)
+            )));
+        }
+        if !qx.is_finite() || !qy.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Distributed load must be finite, got qx = {}, qy = {}",
+                qx, qy
             )));
         }
         self.distributed_loads
@@ -1006,6 +1065,12 @@ impl BeamModel {
             return Err(FemError::InvalidInput(format!(
                 "Point load position must be in [0, 1], got {}",
                 position
+            )));
+        }
+        if !fx.is_finite() || !fy.is_finite() || !mz.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Point load must be finite, got fx = {}, fy = {}, mz = {}",
+                fx, fy, mz
             )));
         }
         self.point_loads
@@ -1041,6 +1106,12 @@ impl BeamModel {
                 "Invalid node index: {} (max: {})",
                 node_idx,
                 self.nodes.len().saturating_sub(1)
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Applied moment must be finite, got {}",
+                value
             )));
         }
         self.applied_moments
@@ -1117,6 +1188,86 @@ impl BeamSolver {
                 return Err(FemError::InvalidModel(format!(
                     "Element {}: node_i and node_j cannot be the same",
                     elem_idx
+                )));
+            }
+        }
+
+        // Validate node coordinates are finite.
+        for (idx, node) in model.nodes.iter().enumerate() {
+            if !node.x.is_finite() || !node.y.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Node {} has non-finite coordinates: ({}, {})",
+                    idx, node.x, node.y
+                )));
+            }
+        }
+
+        // Validate material and section parameters (finite and positive). These
+        // have no fallible constructor, so this is the authoritative boundary;
+        // it also covers elements built via struct literal.
+        for (elem_idx, element) in model.elements.iter().enumerate() {
+            let e = element.material.youngs_modulus;
+            let a = element.section.area;
+            let i = element.section.second_moment;
+            if !e.is_finite() || e <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: Young's modulus must be finite and positive, got {}",
+                    elem_idx, e
+                )));
+            }
+            if !a.is_finite() || a <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: cross-section area must be finite and positive, got {}",
+                    elem_idx, a
+                )));
+            }
+            if !i.is_finite() || i <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Element {}: second moment of area must be finite and positive, got {}",
+                    elem_idx, i
+                )));
+            }
+        }
+
+        // Validate that every load and prescribed value is finite. Model fields
+        // are public, so this cannot be delegated solely to the add_* helpers.
+        for (node_id, dof, value) in &model.nodal_forces {
+            if !value.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Nodal force at node {} DOF {} is non-finite: {}",
+                    node_id, dof, value
+                )));
+            }
+        }
+        for dl in &model.distributed_loads {
+            if !dl.qx.is_finite() || !dl.qy.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Distributed load on element {} is non-finite: qx = {}, qy = {}",
+                    dl.element_idx, dl.qx, dl.qy
+                )));
+            }
+        }
+        for pl in &model.point_loads {
+            if !pl.fx.is_finite() || !pl.fy.is_finite() || !pl.mz.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Point load on element {} is non-finite: fx = {}, fy = {}, mz = {}",
+                    pl.element_idx, pl.fx, pl.fy, pl.mz
+                )));
+            }
+        }
+        for am in &model.applied_moments {
+            if !am.value.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Applied moment at node {} is non-finite: {}",
+                    am.node_idx, am.value
+                )));
+            }
+        }
+        for (node_id, dof, value) in &model.fixed_dofs {
+            if !value.is_finite() {
+                return Err(FemError::InvalidModel(format!(
+                    "Prescribed value at node {} DOF {} is non-finite: {}",
+                    node_id, dof, value
                 )));
             }
         }
