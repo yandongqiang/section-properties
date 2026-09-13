@@ -1,0 +1,59 @@
+{
+  "case": "rect_scale_p3",
+  "description": "Rectangle 100x50 geometrically scaled by alpha=1000",
+  "environment": {
+    "generator": "generate_cross_validation_reference.py",
+    "numpy": "2.5.1",
+    "python": "3.14.2",
+    "scipy": "1.18.0",
+    "sectionproperties": "3.10.2",
+    "shapely": "2.1.2"
+  },
+  "geometry": {
+    "holes": [],
+    "outer": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        50000.0,
+        0.0
+      ],
+      [
+        50000.0,
+        100000.0
+      ],
+      [
+        0.0,
+        100000.0
+      ]
+    ]
+  },
+  "mesh_size": 5000.0,
+  "properties": {
+    "area": 4999999999.999945,
+    "centroid": [
+      24999.999999999927,
+      49999.99999999951
+    ],
+    "i11": 4.1666666666669076e+18,
+    "i22": 1.0416666666666089e+18,
+    "ixx": 4.1666666666669076e+18,
+    "ixy": 233472.0,
+    "iyy": 1.0416666666666092e+18,
+    "phi": 0.0,
+    "q": [
+      249999999999994.8,
+      124999999999998.25
+    ],
+    "rx": 28867.51345948228,
+    "ry": 14433.756729740326,
+    "warping": null,
+    "warping_error": "MemoryError: Out of memory during gssv",
+    "zxx_minus": 83333333333338.97,
+    "zxx_plus": 83333333333337.34,
+    "zyy_minus": 41666666666664.484,
+    "zyy_plus": 41666666666664.24
+  }
+}

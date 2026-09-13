@@ -1,0 +1,181 @@
+{
+  "cases": [
+    {
+      "case": "rect_100x50",
+      "description": "Rectangle 100 (depth) x 50 (width), no holes",
+      "file": "rect_100x50.json",
+      "mesh_size": 5.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "square_100",
+      "description": "Square 100 x 100",
+      "file": "square_100.json",
+      "mesh_size": 5.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "circle_r50",
+      "description": "Circle radius 50 as a 64-segment polygon",
+      "file": "circle_r50.json",
+      "mesh_size": 5.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "triangle_right",
+      "description": "Right triangle (0,0)-(100,0)-(0,80)",
+      "file": "triangle_right.json",
+      "mesh_size": 5.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "i_300x150",
+      "description": "I section 300 deep, 150 wide, tf=12, tw=8",
+      "file": "i_300x150.json",
+      "mesh_size": 10.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "channel_200x75",
+      "description": "Channel 200 deep, 75 wide, tf=10, tw=8",
+      "file": "channel_200x75.json",
+      "mesh_size": 6.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "angle_100x100",
+      "description": "Equal angle 100 x 100 x 8 (asymmetric)",
+      "file": "angle_100x100.json",
+      "mesh_size": 4.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "tee_200x100",
+      "description": "Tee section 200 deep, 100 wide, tf=12, tw=8",
+      "file": "tee_200x100.json",
+      "mesh_size": 6.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rhs_200x100",
+      "description": "Rectangular hollow section 200 x 100 x 8",
+      "file": "rhs_200x100.json",
+      "mesh_size": 5.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "zed_200x100",
+      "description": "Zed section 200 x 100, t=8 (asymmetric, mono-symmetric axis)",
+      "file": "zed_200x100.json",
+      "mesh_size": 6.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rect_hole_centered",
+      "description": "200 x 100 rectangle with centred circular hole r=25",
+      "file": "rect_hole_centered.json",
+      "mesh_size": 6.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rect_hole_eccentric",
+      "description": "200 x 100 rectangle with eccentric circular hole r=20 at (60,30)",
+      "file": "rect_hole_eccentric.json",
+      "mesh_size": 6.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rhs_thin_wall",
+      "description": "Thin-walled RHS 200 x 100 x 3",
+      "file": "rhs_thin_wall.json",
+      "mesh_size": 3.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "angle_rot45",
+      "description": "Angle 100x100x8 rotated 45.0 degrees about the origin",
+      "file": "angle_rot45.json",
+      "mesh_size": 4.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "angle_rot90",
+      "description": "Angle 100x100x8 rotated 90.0 degrees about the origin",
+      "file": "angle_rot90.json",
+      "mesh_size": 4.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "angle_rotm45",
+      "description": "Angle 100x100x8 rotated -45.0 degrees about the origin",
+      "file": "angle_rotm45.json",
+      "mesh_size": 4.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "angle_rot135",
+      "description": "Angle 100x100x8 rotated 135.0 degrees about the origin",
+      "file": "angle_rot135.json",
+      "mesh_size": 4.0,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rect_scale_m3",
+      "description": "Rectangle 100x50 geometrically scaled by alpha=0.001",
+      "file": "rect_scale_m3.json",
+      "mesh_size": 0.005,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "i_scale_m3",
+      "description": "I section 300x150 geometrically scaled by alpha=0.001",
+      "file": "i_scale_m3.json",
+      "mesh_size": 0.01,
+      "warping": true,
+      "warping_error": null
+    },
+    {
+      "case": "rect_scale_p3",
+      "description": "Rectangle 100x50 geometrically scaled by alpha=1000",
+      "file": "rect_scale_p3.json",
+      "mesh_size": 5000.0,
+      "warping": false,
+      "warping_error": "MemoryError: Out of memory during gssv"
+    },
+    {
+      "case": "i_scale_p3",
+      "description": "I section 300x150 geometrically scaled by alpha=1000",
+      "file": "i_scale_p3.json",
+      "mesh_size": 10000.0,
+      "warping": false,
+      "warping_error": "MemoryError: "
+    }
+  ],
+  "environment": {
+    "generator": "generate_cross_validation_reference.py",
+    "numpy": "2.5.1",
+    "python": "3.14.2",
+    "scipy": "1.18.0",
+    "sectionproperties": "3.10.2",
+    "shapely": "2.1.2"
+  },
+  "notes": "Deterministic Python sectionproperties reference data for the Rust/Python differential cross-validation suite. Geometry coordinates are exported so the Rust side rebuilds an identical polygon; do not compare polygon vertex ordering."
+}
