@@ -49,13 +49,55 @@ element stiffness, transformation, assembly, condensation or recovery code.
 | empty model, orphan node, disconnected components | `solve` (via `validate`) | `InvalidModel` / `OrphanNode` / `DisconnectedStructure` |
 | insufficient restraint (mechanism) | `solve` | **`SolverError`** (singular system) - deliberately not a targeted diagnostic; distinguishing a mechanism from a very soft structure is not reliable with the current infrastructure |
 
+### Lifecycle contract (Phase 14)
+
+```text
+FrameModel  --(solve / solve_with / solver().solve())-->  FrameAnalysisResult
+   ^                                                             |
+   |  mutators (add_node/add_member/fix/pin/roller_*/restrain/    |  read-only
+   |            nodal_load/nodal_moment/member_udl/              |  accessors
+   |            member_point_load)                                |
+   +--------------------------------------------------------------+
+             a result is never modified by a later mutation
+```
+
+`FrameModel` **owns no solution**. It is a pure model description: nodes,
+members, supports and loads. `FrameModel::solve` / `solve_with` take `&self`,
+validate, assemble a **fresh** `BeamSolver` from the *current* model state and
+return an owned `FrameAnalysisResult` that holds its own solved state plus a
+private snapshot of the model.
+
+| Situation | Behaviour |
+| --- | --- |
+| read a result before a solve | not expressible: `FrameModel` has no result accessor; the only way to obtain one is `solve()`, which returns `Err` for an incomplete model (`InvalidModel` / `OrphanNode` / `DisconnectedStructure` / `SolverError`). No placeholder, no zeros, no panic |
+| modify the model after a solve | the already-returned `FrameAnalysisResult` is a detached snapshot and is **not** touched or invalidated in place; it keeps reporting the solve it came from (displacements, reactions, end forces, and the applied loads in `equilibrium()`). There is therefore no "stale result" state and no invalidation machinery is needed |
+| solve twice with no modification | deterministic; the second solve re-assembles the same K and f and returns a bitwise-identical solution |
+| solve → change load → solve | each solve assembles from the current model, so the previous RHS is **not** carried over; the new result reflects the model's accumulated loads exactly |
+| solve → change BC → solve | identical: constraints are re-read from the model on every solve; the old result keeps the BC set it was solved with |
+
+Load and support mutators **accumulate** on the model (core semantics, no
+replace/clear API): repeated `nodal_load` / `nodal_moment` / `member_udl` /
+`member_point_load` calls add to the previous ones, and repeated `restrain` /
+support calls add constraints. This is a property of the model, not of the
+solver: accumulation happens only when the caller calls the mutator, never
+inside `solve()`.
+
+There is deliberately **no** auto-resolve: after a mutation the caller must
+call `solve()` again to get an updated result. Frame is append-only - no
+remove/reorder APIs.
+
 ### Evidence
 
-* `tests/frame_api.rs` - 14 tests: the seven Phase 12 reference cases
+* `tests/frame_api.rs` - 20 tests: the seven Phase 12 reference cases
   (axial, cantilever tip force/moment, portal, apex with base thrust,
   prescribed settlement, member subdivision), solver cross-validation, the
   support vocabulary (pin + roller simply supported beam, `5qL^4/384EI`), and
-  every validation rule above.
+  every validation rule above. Six further tests pin down the lifecycle
+  contract: a result is an independent snapshot, a repeated solve is bitwise
+  identical, a member-load change is re-solved against the analytically expected
+  total, a BC change takes effect on the next solve, invalid handles (including
+  `from_index(usize::MAX)`) always return typed errors, and empty / member-less /
+  unrestrained models fail cleanly and then recover.
 * `tests/frame_correctness.rs` - 19 tests: closed-form single-member cases for
   every load type (tip transverse/axial force, tip applied moment, uniform
   transverse/axial distributed load, combined loading), the tip-moment sign
