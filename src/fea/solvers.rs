@@ -286,7 +286,6 @@ impl SparseLu {
 
     /// Verify PA = LU for debugging purposes.
     /// Returns max absolute difference between PA and LU.
-    #[cfg(debug_assertions)]
     pub fn verify_pa_eq_lu(&self, a: &SparseMatrix) -> f64 {
         let n = self.n;
         // Build A dense
