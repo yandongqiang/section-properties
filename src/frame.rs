@@ -497,8 +497,8 @@ impl FrameModel {
     /// order from the solver's own free-DOF map, so no independent reassembly
     /// of `K_ff` is involved.
     fn classify(&self, reduced: &ReducedSystem) -> StructuralDiagnostic {
-        let rigid = self.rigid_candidates(&reduced.free_to_global);
-        diagnose_reduced(&reduced.k_ff, &rigid)
+        let rigid = self.rigid_candidates(reduced.free_to_global());
+        diagnose_reduced(reduced.k_ff(), &rigid)
     }
 
     /// The three global rigid-body motions (Tx, Ty, Rz) restricted to the free
@@ -1036,21 +1036,18 @@ mod reduced_system_single_source_tests {
         // Forge a reduced system with the first free DOF (tip `ux`) removed. If
         // `classify` reassembled its own matrix instead of reading its argument,
         // this forgery would have no effect at all.
-        let n = real.k_ff.n;
+        let n = real.k_ff().n;
         let mut forged_k = SparseMatrix::new(n);
         for i in 0..n {
             for j in 0..n {
-                let v = real.k_ff.get(i, j);
+                let v = real.k_ff().get(i, j);
                 if i != 0 && j != 0 && v != 0.0 {
                     forged_k.add(i, j, v);
                 }
             }
         }
         forged_k.compress();
-        let forged = ReducedSystem {
-            k_ff: forged_k,
-            free_to_global: real.free_to_global.clone(),
-        };
+        let forged = ReducedSystem::new(forged_k, real.free_to_global().to_vec());
 
         let verdict = f.classify(&forged);
         assert_ne!(
@@ -1059,6 +1056,161 @@ mod reduced_system_single_source_tests {
         );
         // The public diagnostic still reads the untouched, real system.
         assert_eq!(f.diagnostic()?, stable);
+        Ok(())
+    }
+
+    /// The failed-solve diagnostic must be driven by the solver's **retained**
+    /// `K_ff`, not by a reassembly: the frame solve's error carries exactly the
+    /// verdict that classifying the retained system produces.
+    #[test]
+    fn failed_solve_diagnosis_reads_the_solver_retained_system() -> Result<(), FemError> {
+        // A free beam has the three rigid-body modes and cannot be solved.
+        let mut f = FrameModel::new();
+        let a = f.add_node(0.0, 0.0)?;
+        let b = f.add_node(2.0, 0.0)?;
+        f.add_member(a, b, steel(), sec())?;
+
+        let expected = StructuralDiagnostic::RigidBodyMode {
+            n_free: 6,
+            rank: 3,
+            rigid_modes: 3,
+        };
+
+        // (a) the frame solve fails as a `SolverError` that carries the verdict.
+        let err = f.solve().expect_err("a free beam must not solve");
+        match &err {
+            FemError::SolverError(msg) => assert!(
+                msg.contains("structural diagnosis") && msg.contains(&expected.to_string()),
+                "expected the retained-system diagnosis in the error, got {msg:?}"
+            ),
+            other => panic!("expected SolverError, got {other:?}"),
+        }
+
+        // (b) the verdict is exactly what the solver's retained reduced system
+        // classifies to: run the identical solve path on a `BeamSolver` built the
+        // same way, and classify the matrix that failed solve retained.
+        let mut beam = BeamSolver::from_model(&f.inner)?;
+        assert!(
+            beam.solve_configured().is_err(),
+            "the identical solve must also fail"
+        );
+        let retained = beam
+            .reduced_system()
+            .expect("a failed solve still retains the condensed system it factorised");
+        assert_eq!(
+            f.classify(retained),
+            expected,
+            "the diagnosis must come from the solver's retained K_ff"
+        );
+        Ok(())
+    }
+
+    /// A diagnosis that adds nothing (`Stable`) or is absent leaves the solver
+    /// error byte-for-byte unchanged; only a mechanism annotates it. This covers
+    /// the "failure before condensation leaves the error untouched" case: a
+    /// missing diagnosis (`None`) is a no-op.
+    #[test]
+    fn diagnosis_only_annotates_mechanism_errors() {
+        let err = || FemError::SolverError("singular matrix".to_string());
+        let untouched = err().to_string();
+        assert_eq!(
+            with_structural_diagnosis(err(), None).to_string(),
+            untouched
+        );
+        assert_eq!(
+            with_structural_diagnosis(err(), Some(StructuralDiagnostic::Stable)).to_string(),
+            untouched
+        );
+        let mechanism = StructuralDiagnostic::Mechanism { n_free: 4, rank: 3 };
+        let annotated = with_structural_diagnosis(err(), Some(mechanism));
+        assert!(
+            matches!(annotated, FemError::SolverError(_)),
+            "the error variant must be preserved"
+        );
+        assert_eq!(
+            annotated.to_string(),
+            format!("{untouched}; structural diagnosis: {mechanism}")
+        );
+    }
+
+    /// A model with **every** DOF restrained condenses to a 0x0 reduced system.
+    /// The verdict is `Stable` (no free DOF means no mechanism) and the probe
+    /// must not panic on the empty matrix / zero scale.
+    #[test]
+    fn fully_restrained_model_is_stable_and_does_not_panic() -> Result<(), FemError> {
+        let mut f = FrameModel::new();
+        let a = f.add_node(0.0, 0.0)?;
+        let b = f.add_node(2.0, 0.0)?;
+        f.add_member(a, b, steel(), sec())?;
+        f.fix(a)?;
+        f.fix(b)?;
+
+        let mut beam = BeamSolver::from_model(&f.inner)?;
+        let reduced = beam.condense();
+        assert_eq!(reduced.k_ff().n, 0, "every DOF is restrained");
+        assert!(reduced.free_to_global().is_empty());
+        assert_eq!(f.classify(reduced), StructuralDiagnostic::Stable);
+
+        // The public diagnostic agrees, and the fully prescribed solve is a
+        // clean success - no panic, no mechanism claim.
+        assert_eq!(f.diagnostic()?, StructuralDiagnostic::Stable);
+        let result = f.solve()?;
+        assert_eq!(result.displacement(a, Dof::Ux)?, 0.0);
+        assert_eq!(result.displacement(b, Dof::Rz)?, 0.0);
+        Ok(())
+    }
+
+    /// `condense()` is idempotent: repeated calls return the already-retained
+    /// system (the same object, no re-condensation). `BeamSolver` has no mutator
+    /// that can change the assembled system, so the cache cannot go stale.
+    #[test]
+    fn condense_is_idempotent_and_retained() -> Result<(), FemError> {
+        let mut f = FrameModel::new();
+        let base = f.add_node(0.0, 0.0)?;
+        let tip = f.add_node(2.0, 0.0)?;
+        f.add_member(base, tip, steel(), sec())?;
+        f.fix(base)?;
+
+        let mut beam = BeamSolver::from_model(&f.inner)?;
+        assert!(beam.reduced_system().is_none(), "nothing condensed yet");
+
+        let first = beam.condense() as *const ReducedSystem;
+        let second = beam.condense() as *const ReducedSystem;
+        assert_eq!(
+            first, second,
+            "repeated condense() must return the retained system, not rebuild it"
+        );
+
+        // A solve refreshes the retained system in place; after it, `condense()`
+        // returns that retained object rather than re-condensing.
+        beam.solve_configured()?;
+        let after_k = beam
+            .reduced_system()
+            .expect("retained after a successful solve")
+            .k_ff()
+            .clone();
+        let after_ptr = beam.reduced_system().unwrap() as *const ReducedSystem;
+        assert_eq!(after_k.n, 3, "cantilever tip has 3 free DOFs");
+        assert_eq!(
+            beam.condense() as *const ReducedSystem,
+            after_ptr,
+            "condense() after a solve still returns the retained system"
+        );
+
+        // `set_solver` only chooses a backend; it cannot invalidate `K_ff`. The
+        // retained content is unchanged across it.
+        beam.set_solver(SolverSelection::Auto);
+        let again = beam.condense();
+        assert_eq!(again.k_ff().n, after_k.n);
+        for i in 0..after_k.n {
+            for j in 0..after_k.n {
+                assert_eq!(
+                    again.k_ff().get(i, j),
+                    after_k.get(i, j),
+                    "K_ff entry ({i},{j}) changed without a model change"
+                );
+            }
+        }
         Ok(())
     }
 }
