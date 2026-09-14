@@ -1379,6 +1379,26 @@ impl BeamModel {
     }
 }
 
+/// The condensed (boundary-conditioned) free-free stiffness system of a
+/// [`BeamSolver`]: `K_ff` plus the reduced-index -> global-DOF map.
+///
+/// This is the **single** representation of the system that static
+/// condensation produces and that the linear solver factorises. It is retained
+/// so that structural diagnostics read the exact same matrix the solve path
+/// built, rather than reassembling an identical-looking second copy: two
+/// independent assemblies are mathematically equal but not necessarily
+/// bit-identical, and a rank probe sitting at a relative tolerance floor is
+/// exactly the kind of consumer that a ULP difference can flip.
+///
+/// Crate-internal on purpose - this is not part of the public surface.
+#[derive(Debug, Clone)]
+pub(crate) struct ReducedSystem {
+    /// The free-free stiffness block `K_ff` (already compressed).
+    pub(crate) k_ff: SparseMatrix,
+    /// Reduced DOF index -> global DOF index (`3 * node + dof`).
+    pub(crate) free_to_global: Vec<usize>,
+}
+
 /// Beam FEM solver using the unified LinearSolver abstraction.
 ///
 /// # Complete workflow
@@ -1441,6 +1461,11 @@ pub struct BeamSolver {
     solver_selection: SolverSelection,
     /// Name of the backend used by the most recent successful solve, if any.
     solver_name: Option<String>,
+    /// The condensed free-free system retained by
+    /// [`Self::apply_boundary_conditions`], if it has run. Populated before any
+    /// backend is created or factorisation attempted, so it is available even
+    /// after a failed solve.
+    reduced: Option<ReducedSystem>,
 }
 
 impl BeamSolver {
@@ -1782,13 +1807,18 @@ impl BeamSolver {
             model: model.clone(),
             solver_selection: SolverSelection::Auto,
             solver_name: None,
+            reduced: None,
         })
     }
 
     /// Apply boundary conditions using static condensation (exact enforcement)
     /// Returns (reduced stiffness matrix, reduced force vector, free_to_global mapping, constrained_indices, constrained_values)
+    ///
+    /// As a side effect it retains the condensed system (`K_ff` + the free DOF
+    /// map) in `self.reduced`, so diagnostics can read the exact matrix this
+    /// path built instead of reassembling it.
     fn apply_boundary_conditions(
-        &self,
+        &mut self,
     ) -> (SparseMatrix, Vec<f64>, Vec<usize>, Vec<usize>, Vec<f64>) {
         let n = self.n_dof;
         let fixed = &self.fixed_dofs;
@@ -1816,6 +1846,10 @@ impl BeamSolver {
         let n_free = free_dofs.len();
         if n_free == 0 {
             // All DOFs fixed - return empty system
+            self.reduced = Some(ReducedSystem {
+                k_ff: SparseMatrix::new(0),
+                free_to_global: Vec::new(),
+            });
             return (
                 SparseMatrix::new(0),
                 Vec::new(),
@@ -1871,6 +1905,12 @@ impl BeamSolver {
             f_reduced[free_idx] -= kfc_uc[free_idx];
         }
 
+        // Retain the condensed system for read-only diagnostics.
+        self.reduced = Some(ReducedSystem {
+            k_ff: k_ff.clone(),
+            free_to_global: free_to_global.clone(),
+        });
+
         (
             k_ff,
             f_reduced,
@@ -1878,6 +1918,34 @@ impl BeamSolver {
             constrained_dofs,
             constrained_values,
         )
+    }
+
+    /// The condensed free-free system most recently built by
+    /// [`Self::apply_boundary_conditions`], if it has run.
+    ///
+    /// The matrix is the exact one the solve path assembled and factorised -
+    /// diagnostics must read this, never reassemble their own copy.
+    pub(crate) fn reduced_system(&self) -> Option<&ReducedSystem> {
+        self.reduced.as_ref()
+    }
+
+    /// Condense the boundary conditions (without solving) and return the
+    /// resulting reduced system for read-only inspection.
+    ///
+    /// This runs the identical static-condensation code the solve path runs, so
+    /// the returned matrix is bit-identical to the one a solve would factorise.
+    /// It never panics: the system is stored and handed straight back from the
+    /// value that was just built.
+    pub(crate) fn condense(&mut self) -> &ReducedSystem {
+        let (k_ff, _f_reduced, free_to_global, _constrained_dofs, _constrained_values) =
+            self.apply_boundary_conditions();
+        // `apply_boundary_conditions` already retained its own copy for the solve
+        // path; re-store the just-built values so the returned borrow points at
+        // the retained system (no second assembly, no fallback).
+        self.reduced.insert(ReducedSystem {
+            k_ff,
+            free_to_global,
+        })
     }
 
     #[allow(dead_code)]

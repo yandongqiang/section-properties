@@ -139,10 +139,19 @@ structure). An under-constrained or rank-deficient frame stops being an opaque
 
 The classification is produced by `FrameModel::diagnostic`, which validates the
 model and classifies the **reduced** (boundary-conditioned) stiffness block
-`K_ff` - the matrix static condensation produces and the linear solver
-factorises - without solving, assembling with penalties or perturbing anything.
-A successful `solve` runs **no** diagnostic and costs exactly what it did
-before; only a *failed* solve classifies the reduced system and appends the
+`K_ff` - without solving, assembling with penalties or perturbing anything.
+
+**Architecture guarantee (single source of truth).** The diagnostic does not
+build its own copy of `K_ff`: it condenses through the *actual* Beam/Framework
+solve path (`BeamSolver`) and reads the retained reduced system, so the
+classified matrix is bit-identical to the one a solve would factorise. Two
+independent assemblies would be mathematically equal but not guaranteed
+bit-identical, and a rank probe at a relative tolerance floor is exactly the
+kind of consumer a ULP difference can flip. `K_ff` is never cached on
+`FrameModel`; every `diagnostic()` call is a fresh analysis.
+
+A successful `solve` runs **no** diagnostic and its numerical path is
+unchanged; only a *failed* solve classifies the reduced system and appends the
 verdict to the error message:
 
 ```text

@@ -64,8 +64,9 @@
 //! ```
 
 use crate::SolverSelection;
-use crate::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError};
-use crate::fea::SparseMatrix;
+use crate::beam_fem::{
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError, ReducedSystem,
+};
 use crate::fea::mechanism::diagnose_reduced;
 use crate::material::Material;
 
@@ -468,13 +469,13 @@ impl FrameModel {
     /// internally rank deficient (mechanism), or merely numerically
     /// ill-conditioned?
     ///
-    /// The diagnosis works on the free-free stiffness block that static
-    /// condensation produces — the same matrix the linear solver factorises —
-    /// with relative, scale-invariant probes (see
-    /// [`crate::fea::mechanism`] for the criterion and its limits). It never
-    /// assembles with penalties, never perturbs the matrix and never
-    /// fabricates displacements, and it does not run as part of a successful
-    /// [`Self::solve`].
+    /// The diagnosis reads the reduced free-free stiffness block `K_ff` that
+    /// the **actual solve path** condenses (`BeamSolver::condense`) — the exact
+    /// matrix a solve factorises, not a second assembly — and classifies it with
+    /// relative, scale-invariant probes (see [`crate::fea::mechanism`] for the
+    /// criterion and its limits). It never assembles with penalties, never
+    /// perturbs the matrix and never fabricates displacements, and it does not
+    /// run as part of a successful [`Self::solve`].
     ///
     /// The verdict is a property of the **structure**, not of the loads: the
     /// load vector is not consulted, so scaling or omitting the loads cannot
@@ -482,84 +483,38 @@ impl FrameModel {
     ///
     /// # Errors
     ///
-    /// The same model errors as [`Self::solve`] (via [`Self::validate`]).
+    /// The same model errors as [`Self::solve`]: [`Self::validate`] plus the
+    /// construction checks [`BeamSolver::from_model`] performs (its error
+    /// surface is slightly wider than `validate` alone).
     pub fn diagnostic(&self) -> Result<StructuralDiagnostic, FemError> {
         self.validate()?;
-        Ok(self.reduced_diagnostic())
+        let mut beam = BeamSolver::from_model(&self.inner)?;
+        Ok(self.classify(beam.condense()))
     }
 
-    /// Build the reduced free-free stiffness system and classify it. Performs
-    /// no validation and cannot fail.
-    fn reduced_diagnostic(&self) -> StructuralDiagnostic {
-        let (k_ff, rigid) = self.reduced_free_system();
-        diagnose_reduced(&k_ff, &rigid)
+    /// Classify a reduced (boundary-conditioned) stiffness system using this
+    /// model's geometry: the global rigid-body motions are built in *reduced*
+    /// order from the solver's own free-DOF map, so no independent reassembly
+    /// of `K_ff` is involved.
+    fn classify(&self, reduced: &ReducedSystem) -> StructuralDiagnostic {
+        let rigid = self.rigid_candidates(&reduced.free_to_global);
+        diagnose_reduced(&reduced.k_ff, &rigid)
     }
 
-    /// The reduced (free-free) stiffness block `K_ff` of the static
-    /// condensation, plus the three global rigid-body motions restricted to the
-    /// free DOFs.
+    /// The three global rigid-body motions (Tx, Ty, Rz) restricted to the free
+    /// DOFs, laid out in reduced order.
     ///
-    /// This mirrors the free-free extraction in the core solver
-    /// (`BeamSolver::apply_boundary_conditions`): the **element stiffness is
-    /// the core's own** ([`BeamElement::global_stiffness`]) and the DOF map is
-    /// the core's own ([`BeamModel::dof_index`]); only the constrained rows and
-    /// columns are dropped, exactly as the condensation does. It is used *only*
-    /// by [`Self::reduced_diagnostic`] — never on the solve path.
-    fn reduced_free_system(&self) -> (SparseMatrix, Vec<Vec<f64>>) {
-        let model = &self.inner;
-        let n_dof = model.n_dof();
-
-        let mut constrained = vec![false; n_dof];
-        for (node, dof, _) in &model.fixed_dofs {
-            constrained[model.dof_index(*node, *dof)] = true;
-        }
-
-        // Free DOF -> reduced index (`None` for a constrained DOF).
-        let mut reduced_of = vec![None; n_dof];
-        let mut n_free = 0;
-        for (i, slot) in reduced_of.iter_mut().enumerate() {
-            if !constrained[i] {
-                *slot = Some(n_free);
-                n_free += 1;
-            }
-        }
-
-        let mut k_ff = SparseMatrix::new(n_free);
-        for element in &model.elements {
-            let node_i = model.nodes[element.node_i].point();
-            let node_j = model.nodes[element.node_j].point();
-            let k_elem = element.global_stiffness(node_i, node_j);
-            let dof_map = [
-                model.dof_index(element.node_i, 0),
-                model.dof_index(element.node_i, 1),
-                model.dof_index(element.node_i, 2),
-                model.dof_index(element.node_j, 0),
-                model.dof_index(element.node_j, 1),
-                model.dof_index(element.node_j, 2),
-            ];
-            for a in 0..6 {
-                let Some(ra) = reduced_of[dof_map[a]] else {
-                    continue;
-                };
-                for b in 0..6 {
-                    let Some(rb) = reduced_of[dof_map[b]] else {
-                        continue;
-                    };
-                    k_ff.add(ra, rb, k_elem[a][b]);
-                }
-            }
-        }
-
-        // Global rigid-body motions restricted to the free DOFs (constrained
-        // entries are dropped, not displaced). Rotation by `theta` about the
-        // global origin is `ux = -theta*y`, `uy = theta*x`, `rz = theta`.
+    /// `free_to_global[r]` is the global DOF (`3 * node + dof`) of reduced index
+    /// `r`; constrained entries are dropped, not displaced. Rotation by `theta`
+    /// about the global origin is `ux = -theta*y`, `uy = theta*x`, `rz = theta`.
+    fn rigid_candidates(&self, free_to_global: &[usize]) -> Vec<Vec<f64>> {
+        let n_free = free_to_global.len();
         let mut tx = vec![0.0; n_free];
         let mut ty = vec![0.0; n_free];
         let mut rz = vec![0.0; n_free];
-        for (i, slot) in reduced_of.iter().enumerate() {
-            let Some(r) = *slot else { continue };
-            let point = model.nodes[i / 3].point();
-            match i % 3 {
+        for (r, &global) in free_to_global.iter().enumerate() {
+            let point = self.inner.nodes[global / 3].point();
+            match global % 3 {
                 0 => {
                     tx[r] = 1.0;
                     rz[r] = -point.y;
@@ -571,8 +526,7 @@ impl FrameModel {
                 _ => rz[r] = 1.0,
             }
         }
-
-        (k_ff, vec![tx, ty, rz])
+        vec![tx, ty, rz]
     }
 
     /// Handle of the node with the given index.
@@ -688,8 +642,8 @@ impl<'a> FrameSolver<'a> {
 
     /// Validate, assemble and solve the frame.
     ///
-    /// A successful solve runs **no** diagnostic and costs exactly what it did
-    /// before (see [`FrameModel::diagnostic`] for the on-demand API). Only a
+    /// A successful solve runs **no** diagnostic and its numerical path is
+    /// unchanged (see [`FrameModel::diagnostic`] for the on-demand API). Only a
     /// *failed* solve additionally classifies the reduced system, and appends
     /// that classification to the error message so an under-restrained or
     /// rank-deficient frame is not reported as an opaque "singular matrix".
@@ -705,10 +659,11 @@ impl<'a> FrameSolver<'a> {
         let mut beam = BeamSolver::from_model(&self.model.inner)?;
         beam.set_solver(self.selection.clone());
         if let Err(e) = beam.solve_configured() {
-            return Err(with_structural_diagnosis(
-                e,
-                self.model.reduced_diagnostic(),
-            ));
+            // The solver condensed the boundary conditions before attempting any
+            // backend, so its retained reduced system is the exact matrix the
+            // failed factorisation saw - no second assembly.
+            let diagnosis = beam.reduced_system().map(|rs| self.model.classify(rs));
+            return Err(with_structural_diagnosis(e, diagnosis));
         }
         Ok(FrameAnalysisResult {
             beam,
@@ -722,13 +677,15 @@ impl<'a> FrameSolver<'a> {
 /// The error **variant** is deliberately preserved (`SolverError` stays
 /// `SolverError`): the diagnosis is extra information, not a re-typing of the
 /// failure, so no existing caller or exhaustive match changes meaning. A
-/// `Stable` diagnosis adds nothing - the failure was not structural.
-fn with_structural_diagnosis(err: FemError, diagnosis: StructuralDiagnostic) -> FemError {
-    match err {
-        FemError::SolverError(msg) if !matches!(diagnosis, StructuralDiagnostic::Stable) => {
-            FemError::SolverError(format!("{msg}; structural diagnosis: {diagnosis}"))
+/// `Stable` diagnosis adds nothing - the failure was not structural - and a
+/// missing diagnosis (`None`, i.e. no reduced system was available) leaves the
+/// error untouched.
+fn with_structural_diagnosis(err: FemError, diagnosis: Option<StructuralDiagnostic>) -> FemError {
+    match (err, diagnosis) {
+        (FemError::SolverError(msg), Some(d)) if !matches!(d, StructuralDiagnostic::Stable) => {
+            FemError::SolverError(format!("{msg}; structural diagnosis: {d}"))
         }
-        other => other,
+        (other, _) => other,
     }
 }
 
@@ -965,4 +922,143 @@ fn member_points(
         model.nodes[el.node_i].point(),
         model.nodes[el.node_j].point(),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Single-source guarantee: the diagnostic reads the solver's condensed system
+// ---------------------------------------------------------------------------
+//
+// These are in-crate tests on purpose: `tests/*.rs` are integration tests and
+// cannot see `pub(crate)` items such as `BeamSolver::condense` /
+// `FrameModel::classify`, so this guarantee is not testable from there.
+#[cfg(test)]
+mod reduced_system_single_source_tests {
+    use super::*;
+    use crate::fea::SparseMatrix;
+
+    fn steel() -> Material {
+        Material::new(200e9, 0.3, 7850.0, "Steel")
+    }
+
+    fn sec() -> BeamSection {
+        BeamSection::new(5e-3, 2e-5)
+    }
+
+    /// The diagnostic must classify exactly the system the solver's own
+    /// condensation produced: reading the live solver and the public API must
+    /// agree on every structure in the battery.
+    fn assert_agrees(f: &FrameModel, label: &str) -> Result<(), FemError> {
+        let mut beam = BeamSolver::from_model(&f.inner)?;
+        let from_solver = f.classify(beam.condense());
+        assert_eq!(
+            from_solver,
+            f.diagnostic()?,
+            "{label}: diagnostic disagrees with the solver's condensed system"
+        );
+        Ok(())
+    }
+
+    /// Two-column portal: `base1 - top1 - top2 - base2`, with the given supports
+    /// on the two base nodes.
+    fn portal(base_1: &[Dof], base_2: &[Dof]) -> Result<FrameModel, FemError> {
+        let mut f = FrameModel::new();
+        let b1 = f.add_node(0.0, 0.0)?;
+        let t1 = f.add_node(0.0, 3.0)?;
+        let t2 = f.add_node(4.0, 3.0)?;
+        let b2 = f.add_node(4.0, 0.0)?;
+        f.add_member(b1, t1, steel(), sec())?;
+        f.add_member(t1, t2, steel(), sec())?;
+        f.add_member(b2, t2, steel(), sec())?;
+        for dof in base_1 {
+            f.restrain(b1, *dof, 0.0)?;
+        }
+        for dof in base_2 {
+            f.restrain(b2, *dof, 0.0)?;
+        }
+        Ok(f)
+    }
+
+    #[test]
+    fn diagnostic_classifies_the_solver_condensed_system() -> Result<(), FemError> {
+        // Completely free beam - three rigid-body modes.
+        let mut free = FrameModel::new();
+        let a = free.add_node(0.0, 0.0)?;
+        let b = free.add_node(2.0, 0.0)?;
+        free.add_member(a, b, steel(), sec())?;
+        assert_agrees(&free, "free beam")?;
+
+        // One DOF restrained - still under-constrained.
+        let mut one = FrameModel::new();
+        let a = one.add_node(0.0, 0.0)?;
+        let b = one.add_node(2.0, 0.0)?;
+        one.add_member(a, b, steel(), sec())?;
+        one.restrain(a, Dof::Ux, 0.0)?;
+        assert_agrees(&one, "one-DOF-restrained beam")?;
+
+        // Stable cantilever.
+        let mut cant = FrameModel::new();
+        let base = cant.add_node(0.0, 0.0)?;
+        let tip = cant.add_node(2.0, 0.0)?;
+        cant.add_member(base, tip, steel(), sec())?;
+        cant.fix(base)?;
+        assert_agrees(&cant, "stable cantilever")?;
+
+        // Portal with several support sets, stable and deficient.
+        let fixed = portal(&[Dof::Ux, Dof::Uy, Dof::Rz], &[Dof::Ux, Dof::Uy, Dof::Rz])?;
+        assert_agrees(&fixed, "portal, both bases fixed")?;
+        let pinned = portal(&[Dof::Ux, Dof::Uy], &[Dof::Ux, Dof::Uy])?;
+        assert_agrees(&pinned, "portal, both bases pinned")?;
+        let roller = portal(&[Dof::Ux, Dof::Uy, Dof::Rz], &[Dof::Uy])?;
+        assert_agrees(&roller, "portal, fixed base + roller")?;
+        let mechanism = portal(&[Dof::Ux, Dof::Uy], &[])?;
+        assert_agrees(&mechanism, "portal, single pin (mechanism)")?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_uses_the_supplied_matrix_not_a_copy() -> Result<(), FemError> {
+        let mut f = FrameModel::new();
+        let base = f.add_node(0.0, 0.0)?;
+        let tip = f.add_node(2.0, 0.0)?;
+        f.add_member(base, tip, steel(), sec())?;
+        f.fix(base)?;
+
+        let mut beam = BeamSolver::from_model(&f.inner)?;
+        let real = beam.condense().clone();
+        let stable = f.classify(&real);
+        assert_eq!(
+            stable,
+            StructuralDiagnostic::Stable,
+            "control must be stable"
+        );
+
+        // Forge a reduced system with the first free DOF (tip `ux`) removed. If
+        // `classify` reassembled its own matrix instead of reading its argument,
+        // this forgery would have no effect at all.
+        let n = real.k_ff.n;
+        let mut forged_k = SparseMatrix::new(n);
+        for i in 0..n {
+            for j in 0..n {
+                let v = real.k_ff.get(i, j);
+                if i != 0 && j != 0 && v != 0.0 {
+                    forged_k.add(i, j, v);
+                }
+            }
+        }
+        forged_k.compress();
+        let forged = ReducedSystem {
+            k_ff: forged_k,
+            free_to_global: real.free_to_global.clone(),
+        };
+
+        let verdict = f.classify(&forged);
+        assert_ne!(
+            verdict, stable,
+            "classify must read the supplied matrix: zeroing a free DOF changed nothing"
+        );
+        // The public diagnostic still reads the untouched, real system.
+        assert_eq!(f.diagnostic()?, stable);
+        Ok(())
+    }
 }
