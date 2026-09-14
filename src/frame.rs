@@ -65,9 +65,13 @@
 
 use crate::SolverSelection;
 use crate::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError};
+use crate::fea::SparseMatrix;
+use crate::fea::mechanism::diagnose_reduced;
 use crate::material::Material;
 
 use std::collections::VecDeque;
+
+pub use crate::fea::mechanism::StructuralDiagnostic;
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -419,9 +423,10 @@ impl FrameModel {
     /// Per-element checks (zero length, duplicate connectivity, invalid
     /// material/section) are enforced when the member is added.
     ///
-    /// Insufficient restraint is *not* diagnosed here: that remains the
-    /// solver's singular-system error, because distinguishing a mechanism from
-    /// a very soft structure is not reliable with the current infrastructure.
+    /// Insufficient restraint is *not* diagnosed here: [`Self::diagnostic`]
+    /// classifies the boundary-conditioned system separately, without
+    /// rejecting the model, and [`FrameSolver::solve`] attaches that
+    /// classification to the solver error when the solve fails.
     pub fn validate(&self) -> Result<(), FemError> {
         let inner = &self.inner;
         if inner.nodes.is_empty() {
@@ -456,6 +461,118 @@ impl FrameModel {
             )));
         }
         Ok(())
+    }
+
+    /// Diagnose the **boundary-conditioned** (reduced) system without solving
+    /// it: is this structure stable, under-restrained (rigid-body mechanism),
+    /// internally rank deficient (mechanism), or merely numerically
+    /// ill-conditioned?
+    ///
+    /// The diagnosis works on the free-free stiffness block that static
+    /// condensation produces — the same matrix the linear solver factorises —
+    /// with relative, scale-invariant probes (see
+    /// [`crate::fea::mechanism`] for the criterion and its limits). It never
+    /// assembles with penalties, never perturbs the matrix and never
+    /// fabricates displacements, and it does not run as part of a successful
+    /// [`Self::solve`].
+    ///
+    /// The verdict is a property of the **structure**, not of the loads: the
+    /// load vector is not consulted, so scaling or omitting the loads cannot
+    /// change the result.
+    ///
+    /// # Errors
+    ///
+    /// The same model errors as [`Self::solve`] (via [`Self::validate`]).
+    pub fn diagnostic(&self) -> Result<StructuralDiagnostic, FemError> {
+        self.validate()?;
+        Ok(self.reduced_diagnostic())
+    }
+
+    /// Build the reduced free-free stiffness system and classify it. Performs
+    /// no validation and cannot fail.
+    fn reduced_diagnostic(&self) -> StructuralDiagnostic {
+        let (k_ff, rigid) = self.reduced_free_system();
+        diagnose_reduced(&k_ff, &rigid)
+    }
+
+    /// The reduced (free-free) stiffness block `K_ff` of the static
+    /// condensation, plus the three global rigid-body motions restricted to the
+    /// free DOFs.
+    ///
+    /// This mirrors the free-free extraction in the core solver
+    /// (`BeamSolver::apply_boundary_conditions`): the **element stiffness is
+    /// the core's own** ([`BeamElement::global_stiffness`]) and the DOF map is
+    /// the core's own ([`BeamModel::dof_index`]); only the constrained rows and
+    /// columns are dropped, exactly as the condensation does. It is used *only*
+    /// by [`Self::reduced_diagnostic`] — never on the solve path.
+    fn reduced_free_system(&self) -> (SparseMatrix, Vec<Vec<f64>>) {
+        let model = &self.inner;
+        let n_dof = model.n_dof();
+
+        let mut constrained = vec![false; n_dof];
+        for (node, dof, _) in &model.fixed_dofs {
+            constrained[model.dof_index(*node, *dof)] = true;
+        }
+
+        // Free DOF -> reduced index (`None` for a constrained DOF).
+        let mut reduced_of = vec![None; n_dof];
+        let mut n_free = 0;
+        for (i, slot) in reduced_of.iter_mut().enumerate() {
+            if !constrained[i] {
+                *slot = Some(n_free);
+                n_free += 1;
+            }
+        }
+
+        let mut k_ff = SparseMatrix::new(n_free);
+        for element in &model.elements {
+            let node_i = model.nodes[element.node_i].point();
+            let node_j = model.nodes[element.node_j].point();
+            let k_elem = element.global_stiffness(node_i, node_j);
+            let dof_map = [
+                model.dof_index(element.node_i, 0),
+                model.dof_index(element.node_i, 1),
+                model.dof_index(element.node_i, 2),
+                model.dof_index(element.node_j, 0),
+                model.dof_index(element.node_j, 1),
+                model.dof_index(element.node_j, 2),
+            ];
+            for a in 0..6 {
+                let Some(ra) = reduced_of[dof_map[a]] else {
+                    continue;
+                };
+                for b in 0..6 {
+                    let Some(rb) = reduced_of[dof_map[b]] else {
+                        continue;
+                    };
+                    k_ff.add(ra, rb, k_elem[a][b]);
+                }
+            }
+        }
+
+        // Global rigid-body motions restricted to the free DOFs (constrained
+        // entries are dropped, not displaced). Rotation by `theta` about the
+        // global origin is `ux = -theta*y`, `uy = theta*x`, `rz = theta`.
+        let mut tx = vec![0.0; n_free];
+        let mut ty = vec![0.0; n_free];
+        let mut rz = vec![0.0; n_free];
+        for (i, slot) in reduced_of.iter().enumerate() {
+            let Some(r) = *slot else { continue };
+            let point = model.nodes[i / 3].point();
+            match i % 3 {
+                0 => {
+                    tx[r] = 1.0;
+                    rz[r] = -point.y;
+                }
+                1 => {
+                    ty[r] = 1.0;
+                    rz[r] = point.x;
+                }
+                _ => rz[r] = 1.0,
+            }
+        }
+
+        (k_ff, vec![tx, ty, rz])
     }
 
     /// Handle of the node with the given index.
@@ -571,20 +688,47 @@ impl<'a> FrameSolver<'a> {
 
     /// Validate, assemble and solve the frame.
     ///
+    /// A successful solve runs **no** diagnostic and costs exactly what it did
+    /// before (see [`FrameModel::diagnostic`] for the on-demand API). Only a
+    /// *failed* solve additionally classifies the reduced system, and appends
+    /// that classification to the error message so an under-restrained or
+    /// rank-deficient frame is not reported as an opaque "singular matrix".
+    ///
     /// # Errors
     ///
     /// Model-structure errors from [`FrameModel::validate`] plus any
     /// [`FemError::SolverError`] from the linear solver (e.g. insufficient
-    /// restraint).
+    /// restraint, or a conditioning limit at extreme scales). The variant is
+    /// unchanged; the message carries the diagnosis.
     pub fn solve(&self) -> Result<FrameAnalysisResult, FemError> {
         self.model.validate()?;
         let mut beam = BeamSolver::from_model(&self.model.inner)?;
         beam.set_solver(self.selection.clone());
-        beam.solve_configured()?;
+        if let Err(e) = beam.solve_configured() {
+            return Err(with_structural_diagnosis(
+                e,
+                self.model.reduced_diagnostic(),
+            ));
+        }
         Ok(FrameAnalysisResult {
             beam,
             model: self.model.clone(),
         })
+    }
+}
+
+/// Record the structural diagnosis of a failed solve in the error message.
+///
+/// The error **variant** is deliberately preserved (`SolverError` stays
+/// `SolverError`): the diagnosis is extra information, not a re-typing of the
+/// failure, so no existing caller or exhaustive match changes meaning. A
+/// `Stable` diagnosis adds nothing - the failure was not structural.
+fn with_structural_diagnosis(err: FemError, diagnosis: StructuralDiagnostic) -> FemError {
+    match err {
+        FemError::SolverError(msg) if !matches!(diagnosis, StructuralDiagnostic::Stable) => {
+            FemError::SolverError(format!("{msg}; structural diagnosis: {diagnosis}"))
+        }
+        other => other,
     }
 }
 

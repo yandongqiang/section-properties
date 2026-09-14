@@ -2122,6 +2122,7 @@ impl SkylineLdlt {
         Ok(u)
     }
 }
+pub mod mechanism;
 pub mod solver;
 pub mod solvers;
 #[cfg(test)]

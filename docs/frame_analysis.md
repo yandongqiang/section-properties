@@ -8,7 +8,9 @@ design/future items. Code references were verified against commit `3c445ab`
 
 Everything in this document that is **not** described as implemented is design
 intent or future work - specifically: connectivity diagnostics beyond what is
-listed, Timoshenko/3D/nonlinear/dynamic extensions, and mechanism detection.
+listed, and Timoshenko/3D/nonlinear/dynamic extensions. Structural mechanism
+diagnostics are implemented (Phase 15, see
+[below](#structural-mechanism-diagnostics-phase-15)).
 
 Related: [`docs/beam_fem.md`](beam_fem.md) is the frozen Beam FEM contract and
 remains authoritative for every convention reused here.
@@ -32,7 +34,7 @@ element stiffness, transformation, assembly, condensation or recovery code.
 
 `FrameModel` methods: `new`, `add_node`, `add_member`, `fix`, `pin`,
 `roller_y`, `roller_x`, `restrain`, `nodal_load`, `nodal_moment`, `member_udl`,
-`member_point_load`, `solve`, `solve_with`, `solver`, `validate`,
+`member_point_load`, `solve`, `solve_with`, `solver`, `validate`, `diagnostic`,
 `node_handle`, `member_handle`, `n_nodes`, `n_members`.
 
 ### Validation actually implemented
@@ -47,7 +49,7 @@ element stiffness, transformation, assembly, condensation or recovery code.
 | non-finite / non-positive `E`, `A` or `I` | `add_member` | `InvalidInput` |
 | non-finite nodal force component | `nodal_load` | `InvalidInput` - **both** components are validated before either is recorded, so a rejected call leaves the model unchanged (no half-applied load) |
 | empty model, orphan node, disconnected components | `solve` (via `validate`) | `InvalidModel` / `OrphanNode` / `DisconnectedStructure` |
-| insufficient restraint (mechanism) | `solve` | **`SolverError`** (singular system) - deliberately not a targeted diagnostic; distinguishing a mechanism from a very soft structure is not reliable with the current infrastructure |
+| insufficient restraint (mechanism) | `solve` | **`SolverError`** (singular system), with the structural diagnosis appended to the message; the variant is kept so no caller changes meaning. The verdict itself is available on demand from `FrameModel::diagnostic` (Phase 15) |
 
 ### Lifecycle contract (Phase 14)
 
@@ -110,8 +112,112 @@ remove/reorder APIs.
   units) and requires a clean `SolverError` - never a silently wrong answer -
   outside f64's resolution.
 * `tests/frame_transformation_contract.rs` - transformation invariants.
+* `tests/mechanism_diagnostics.rs` - 11 Phase 15 tests: a completely free
+  structure, a single-DOF-restrained structure, a stable cantilever (with
+  bit-exact displacement/reaction reference values), a simply supported beam, a
+  multi-member portal mechanism (and its stable controls), geometric-similarity
+  scale invariance at `1e-6 ... 1e6`, load independence, ill-conditioning at an
+  extreme coordinate scale, the probe's size/symmetry limits, and a synthetic
+  reduced system for the internal-mechanism and shallow-deficiency verdicts.
 * `examples/frame_portal.rs` - end-to-end public-API usage; equilibrium
   residual ~1e-9 on a 20 kN load (balanced).
+
+## Structural mechanism diagnostics (Phase 15)
+
+Implemented in `src/fea/mechanism.rs` (the linear algebra) plus
+`FrameModel::diagnostic` / `FrameSolver::solve` in `src/frame.rs` (the
+structure). An under-constrained or rank-deficient frame stops being an opaque
+`solver error: singular matrix` and is classified as follows.
+
+| Verdict | Meaning |
+| --- | --- |
+| `StructuralDiagnostic::Stable` | full structural rank and not numerically singular: a direct solver can resolve the reduced system |
+| `StructuralDiagnostic::RigidBodyMode { n_free, rank, rigid_modes }` | rank deficient, and **every** null direction is a global rigid-body motion (Tx, Ty and/or Rz) that the supports do not remove - i.e. under-restraint |
+| `StructuralDiagnostic::Mechanism { n_free, rank }` | rank deficient with at least one null direction that is *not* a rigid-body motion - an internal mechanism |
+| `StructuralDiagnostic::IllConditioned { n_free, rank }` | full structural rank, but the **raw** reduced system is singular to the probe's scale-relative tolerance: a limit of the numbers, **not** a mechanism |
+| `StructuralDiagnostic::Indeterminate { n_free, reason }` | not classified (`SystemTooLarge` / `NotSymmetric` / `NotPositiveSemidefinite`); deliberately not a mechanism claim |
+
+The classification is produced by `FrameModel::diagnostic`, which validates the
+model and classifies the **reduced** (boundary-conditioned) stiffness block
+`K_ff` - the matrix static condensation produces and the linear solver
+factorises - without solving, assembling with penalties or perturbing anything.
+A successful `solve` runs **no** diagnostic and costs exactly what it did
+before; only a *failed* solve classifies the reduced system and appends the
+verdict to the error message:
+
+```text
+Solver error: singular matrix: Singular or near-singular matrix at column 3: ...
+  ; structural diagnosis: rigid-body mechanism: 2 unrestrained rigid-body
+    mode(s) (5 free DOFs, system rank 3); restrain the remaining translations/rotation
+```
+
+The error **variant** is deliberately unchanged (`SolverError` stays
+`SolverError`), so no caller or exhaustive match changes meaning. The verdict is
+a property of the *structure*: the load vector is never consulted, so scaling,
+reversing or removing loads cannot change it.
+
+### Criterion (scale-aware - no absolute epsilon)
+
+Two probes, both relative to the analysed matrix's own scale, never to an
+absolute epsilon:
+
+1. **Structural probe** on the equilibrated system `A = D K D`,
+   `D_ii = 1/sqrt(K_ii)`. Equilibration is a congruence, so it preserves the
+   rank of `K` exactly while removing the conditioning caused purely by
+   unit/stiffness/coordinate scaling. A **pivoted** Cholesky of `A` (pivot on the
+   largest remaining diagonal, so the trailing block is never divided by a
+   value at the noise level) gives the numerical rank; a remaining diagonal at
+   or below `n * eps` (the standard backward-error-bound threshold, relative to
+   `A`'s unit scale) is numerically zero.
+2. **Rigid-body test** (only for a deficiency). The supplied rigid motions are
+   mapped into the equilibrated metric, orthonormalised, and the restriction of
+   `K` to that space is ranked: `dim(span R) - rank(R^T K R)` is the number of
+   independent rigid-body motions in the null space. If it accounts for the
+   whole nullity the verdict is `RigidBodyMode` (under-restraint); otherwise
+   `Mechanism`. This is what makes a rigid rotation about a point other than the
+   origin - a *combination* of the supplied candidates - classify correctly.
+3. **Numerical probe** (only when the structure has full rank). The same
+   pivoted factorisation of the **raw** `K`: a deficiency there is
+   `IllConditioned`, never a mechanism.
+
+A deficiency counts as structural only when the residual stiffness after
+equilibration is at or below `PIVOT_TOL_BASE = 1e-15` (relative) - the project's
+own scale-invariant pivot criterion (`src/fea.rs`). Between that floor and the
+`n * eps` rank threshold the probe refuses the mechanism verdict and reports
+`IllConditioned`: that is the band in which a rank deficiency cannot be
+separated from extreme conditioning in double precision.
+
+### What is and is not claimed
+
+* For this element type a frame-level mechanism is **always** an
+  under-restraint. The beam element's only zero-energy deformations are its own
+  rigid-body motions and a rigid joint shares all three DOFs, so
+  `v^T K_ff v = 0` implies the zero-padded vector lies in `null(K)`, i.e. it is a
+  global rigid-body motion. `Mechanism` is therefore the mathematically general
+  verdict, reachable for a reduced system supplied with a non-rigid null
+  direction (tested directly on the probe), rather than the one a rigid-jointed
+  frame produces.
+* `Stable` means "this structure is not rank deficient and is not numerically
+  singular". It is **not** a promise that the solve succeeds (a bad backend
+  selection still fails) and it says nothing about load equilibrium.
+
+### Limitations (documented, not papered over)
+
+* The probe is **bounded and dense**: `O(n^3)` time / `O(n^2)` memory, and it
+  refuses a reduced system larger than `MAX_DENSE_PROBE_DOF = 500` - the size at
+  which this project already accepts a dense factorisation
+  (`SolverCapabilities::dense().max_size`) - with
+  `DiagnosticLimit::SystemTooLarge` instead of allocating. Mechanisms in larger
+  frames are therefore **not** classified: only the solver error remains.
+* `IllConditioned` versus a mechanism is decided by tolerance-based probes, not
+  exact arithmetic. A deficiency shallower than `1e-15` relative (a scaled
+  condition number beyond ~`1e15`) is not claimed as a mechanism.
+* A non-symmetric or non-positive-semi-definite reduced matrix is reported as
+  `Indeterminate`: the probe is only rank-revealing for symmetric PSD matrices,
+  so no mechanism claim is made at all.
+* Per-DOF attribution (which node/DOF is unrestrained) is not reported; the
+  verdict carries the rank, the nullity via `n_free - rank`, and the number of
+  rigid-body modes.
 
 ## 1. What the existing core already provides
 
@@ -357,7 +463,7 @@ makes every extension twice as expensive.
 | 3 | No connectivity validation (duplicate members, disconnected components, orphan nodes) - only per-element checks | TEST GAP / API DESIGN ISSUE - **resolved** for the frame layer (`merge/duplicate/orphan/disconnected` diagnostics) |
 | 4 | No support vocabulary (`pin`, `roller`); users must call `try_fix_dof` per DOF | API DESIGN ISSUE - **resolved**: `fix` / `pin` / `roller_x` / `roller_y` / `restrain` |
 | 5 | Branched models work but are undocumented as such; `docs/beam_fem.md` describes a beam, and arclength helpers (`sample_forces`, `beam_force_diagram`) assume a single beam axis | DOCUMENTATION GAP |
-| 6 | A disconnected component with no support produces a singular system error, not a targeted diagnostic | NUMERICAL CONTRACT ISSUE - **partially resolved**: disconnected/orphan are now targeted; *mechanism* still reports `SolverError` (documented future item) |
+| 6 | A disconnected component with no support produces a singular system error, not a targeted diagnostic | NUMERICAL CONTRACT ISSUE - **resolved**: disconnected/orphan are targeted, and an under-restrained frame is classified as a rigid-body mechanism with the verdict carried in the `SolverError` message (Phase 15) |
 | 7 | Frame-level equilibrium reporting (ΣFx/ΣFy/ΣMz about origin) does not exist as an API; tests must recompute it | TEST GAP / FUTURE DESIGN ITEM - **resolved**: `FrameAnalysisResult::equilibrium` |
 | 8 | The `!ear_found` fan fallback in the triangulation (Phase 11) remains unsafe-but-unreachable; unrelated to frames | FUTURE DESIGN ITEM (pre-existing) |
 | - | Beam FEM formulation, solver implementations, geometry, triangulation, warping | NO ISSUE |

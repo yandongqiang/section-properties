@@ -591,8 +591,10 @@ fn validation_material_section_coordinates_and_loads() -> Result<(), FemError> {
 
 #[test]
 fn validation_insufficient_restraint_is_a_solver_error() -> Result<(), FemError> {
-    // Mechanism detection is deliberately NOT attempted: an unrestrained frame
-    // reports the solver's singular-system error, not a targeted diagnostic.
+    // An unrestrained frame reports the solver's singular-system error (the
+    // `SolverError` variant is part of the contract); since Phase 15 that error
+    // also carries the structural diagnosis of the reduced system, which
+    // `tests/mechanism_diagnostics.rs` covers in full.
     let mut f = FrameModel::new();
     let a = f.add_node(0.0, 0.0)?;
     let b = f.add_node(2.0, 0.0)?;
