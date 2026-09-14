@@ -2867,6 +2867,19 @@ pub enum FemError {
     InvalidInput(String),
     #[error("Singular matrix: {0}")]
     SingularMatrix(String),
+    // ---- frame-level structural diagnostics (see `crate::frame`) ----------
+    #[error("Invalid node: {0}")]
+    InvalidNode(String),
+    #[error("Invalid member: {0}")]
+    InvalidMember(String),
+    #[error("Zero-length member: {0}")]
+    ZeroLengthMember(String),
+    #[error("Duplicate member: {0}")]
+    DuplicateMember(String),
+    #[error("Orphan node: {0}")]
+    OrphanNode(String),
+    #[error("Disconnected structure: {0}")]
+    DisconnectedStructure(String),
 }
 
 impl From<SolverError> for FemError {

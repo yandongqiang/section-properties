@@ -3,6 +3,7 @@ pub mod cold_formed_analysis;
 pub mod database;
 pub mod fea;
 pub mod fire;
+pub mod frame;
 pub mod geometry;
 pub mod io;
 pub mod material;
@@ -45,6 +46,9 @@ pub use crate::fea::{
     solver::SelectionReason, solver::SolverBackend, solver::SolverCapabilities,
     solver::SolverError, solver::SolverRegistry, solver::SolverSelection,
     solver::SolverSelectionInfo, solvers,
+};
+pub use crate::frame::{
+    EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,
 };
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;

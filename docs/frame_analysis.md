@@ -1,14 +1,63 @@
 # 2D frame analysis - architecture audit and design contract
 
-**Status:** audit / design only. **Nothing in this document is implemented.**
-It records what the existing Beam FEM core already provides, what a future 2D
-frame layer must add, and the contracts that layer must preserve. Code
-references were verified against commit `3c445ab`.
+**Status:** the façade described here is **implemented** (Phase 13) in
+`src/frame.rs`; see [Implemented API](#implemented-api-phase-13) for the exact
+surface, and the sections below for the rationale (Phase 12) and the remaining
+design/future items. Code references were verified against commit `3c445ab`
+(the audit) and updated for the implementation.
+
+Everything in this document that is **not** described as implemented is design
+intent or future work - specifically: connectivity diagnostics beyond what is
+listed, Timoshenko/3D/nonlinear/dynamic extensions, and mechanism detection.
 
 Related: [`docs/beam_fem.md`](beam_fem.md) is the frozen Beam FEM contract and
 remains authoritative for every convention reused here.
 
 ---
+
+
+## Implemented API (Phase 13)
+
+Implemented in `src/frame.rs` and re-exported from the crate root. The façade
+delegates **all** mechanics to the existing Beam FEM core - it contains no
+element stiffness, transformation, assembly, condensation or recovery code.
+
+| Type | Purpose |
+| --- | --- |
+| `NodeHandle` / `MemberHandle` | typed, `Copy` handles (`index()`, `from_index()`); cannot be confused with a DOF index |
+| `FrameModel` | node/member construction, supports, loads, validation, `solve` / `solve_with` / `solver()` |
+| `FrameSolver<'a>` | builder for an explicit backend (`with_selection` / `set_solver`), then `solve()` |
+| `FrameAnalysisResult` | typed displacement/reaction access, member end forces (local + global), `equilibrium()` |
+| `EquilibriumReport` | ΣFx/ΣFy/ΣMz residuals about the global origin, plus the applied and reaction totals and `is_balanced()` |
+
+`FrameModel` methods: `new`, `add_node`, `add_member`, `fix`, `pin`,
+`roller_y`, `roller_x`, `restrain`, `nodal_load`, `nodal_moment`, `member_udl`,
+`member_point_load`, `solve`, `solve_with`, `solver`, `validate`,
+`node_handle`, `member_handle`, `n_nodes`, `n_members`.
+
+### Validation actually implemented
+
+| Rule | When | Error |
+| --- | --- | --- |
+| non-finite node coordinates | `add_node` | `InvalidInput` |
+| invalid node handle | every node-taking method | `InvalidNode` |
+| invalid member handle | every member-taking method | `InvalidMember` |
+| member connecting a node to itself, or coincident nodes | `add_member` | `ZeroLengthMember` |
+| duplicate connectivity `(i,j)` / `(j,i)` | `add_member` | `DuplicateMember` |
+| non-finite / non-positive `E`, `A` or `I` | `add_member` | `InvalidInput` |
+| empty model, orphan node, disconnected components | `solve` (via `validate`) | `InvalidModel` / `OrphanNode` / `DisconnectedStructure` |
+| insufficient restraint (mechanism) | `solve` | **`SolverError`** (singular system) - deliberately not a targeted diagnostic; distinguishing a mechanism from a very soft structure is not reliable with the current infrastructure |
+
+### Evidence
+
+* `tests/frame_api.rs` - 14 tests: the seven Phase 12 reference cases
+  (axial, cantilever tip force/moment, portal, apex with base thrust,
+  prescribed settlement, member subdivision), solver cross-validation, the
+  support vocabulary (pin + roller simply supported beam, `5qL^4/384EI`), and
+  every validation rule above.
+* `tests/frame_transformation_contract.rs` - transformation invariants.
+* `examples/frame_portal.rs` - end-to-end public-API usage; equilibrium
+  residual ~1e-9 on a 20 kN load (balanced).
 
 ## 1. What the existing core already provides
 
@@ -107,7 +156,7 @@ layout behind the same façade pattern.
 without numerical benefit) and duplicating the element/solver code in a parallel
 frame module (two divergent implementations of the same mechanics).
 
-## 4. Proposed public API (design only - not implemented)
+## 4. Proposed public API (design record - implemented in Phase 13)
 
 ```rust
 // Addressing: node handles are returned by construction.
@@ -214,7 +263,7 @@ and `f` (point load) acting at `xi·L`, with the local→global rotation applied
 before the moment sum. Equilibrium must hold independently of the displacement
 solution; it is a property of the assembled system and the recovered reactions.
 
-## 8. Analytical reference cases (to implement later)
+## 8. Analytical reference cases (cases 1-7 implemented in `tests/frame_api.rs`)
 
 | # | Case | Expected quantities | Sign convention |
 | --- | --- | --- | --- |
@@ -226,9 +275,9 @@ solution; it is a property of the assembled system and the recovered reactions.
 | 6 | multi-element straight beam | member subdivision must not change nodal results for consistent loads (nodal exactness) | already covered by Beam FEM tests |
 | 7 | prescribed displacement | prescribed value exact; reactions self-equilibrated when there is no external load | `K_ff u_f = f_f - K_fc u_c` |
 
-Cases 4, 5 and 7 already have executable coverage in
-`tests/frame_transformation_contract.rs`, so the future implementation starts
-from a validated reference for transformation, assembly and condensation.
+All seven cases now have executable coverage: cases 4, 5 and 7 through
+`tests/frame_api.rs` and `tests/frame_transformation_contract.rs`; cases 1, 2, 3
+and 6 through `tests/frame_api.rs`.
 
 ## 9. Future extensibility
 
@@ -249,20 +298,20 @@ makes every extension twice as expensive.
 
 | # | Finding | Classification |
 | --- | --- | --- |
-| 1 | `BeamNode::id` is stored but **never used**; node references are positional vector indices | API DESIGN ISSUE (frame-facing) |
-| 2 | `add_node` / `add_element` return `()`; callers must track indices themselves | API DESIGN ISSUE |
-| 3 | No connectivity validation (duplicate members, disconnected components, orphan nodes, duplicate `node_i == node_j` across elements) - only per-element checks | TEST GAP / API DESIGN ISSUE |
-| 4 | No support vocabulary (`pin`, `roller`); users must call `try_fix_dof` per DOF | API DESIGN ISSUE (ergonomics) |
+| 1 | `BeamNode::id` is stored but **never used**; node references are positional vector indices | API DESIGN ISSUE - **resolved in the frame façade** by `NodeHandle`; `BeamModel` unchanged |
+| 2 | `add_node` / `add_element` return `()`; callers must track indices themselves | API DESIGN ISSUE - **resolved**: `FrameModel::add_node` returns a handle |
+| 3 | No connectivity validation (duplicate members, disconnected components, orphan nodes) - only per-element checks | TEST GAP / API DESIGN ISSUE - **resolved** for the frame layer (`merge/duplicate/orphan/disconnected` diagnostics) |
+| 4 | No support vocabulary (`pin`, `roller`); users must call `try_fix_dof` per DOF | API DESIGN ISSUE - **resolved**: `fix` / `pin` / `roller_x` / `roller_y` / `restrain` |
 | 5 | Branched models work but are undocumented as such; `docs/beam_fem.md` describes a beam, and arclength helpers (`sample_forces`, `beam_force_diagram`) assume a single beam axis | DOCUMENTATION GAP |
-| 6 | A disconnected component with no support produces a singular system error, not a targeted "unsupported/disconnected" diagnostic | NUMERICAL CONTRACT ISSUE (error quality) |
-| 7 | Frame-level equilibrium reporting (ΣFx/ΣFy/ΣMz about origin) does not exist as an API; tests must recompute it | TEST GAP / FUTURE DESIGN ITEM |
+| 6 | A disconnected component with no support produces a singular system error, not a targeted diagnostic | NUMERICAL CONTRACT ISSUE - **partially resolved**: disconnected/orphan are now targeted; *mechanism* still reports `SolverError` (documented future item) |
+| 7 | Frame-level equilibrium reporting (ΣFx/ΣFy/ΣMz about origin) does not exist as an API; tests must recompute it | TEST GAP / FUTURE DESIGN ITEM - **resolved**: `FrameAnalysisResult::equilibrium` |
 | 8 | The `!ear_found` fan fallback in the triangulation (Phase 11) remains unsafe-but-unreachable; unrelated to frames | FUTURE DESIGN ITEM (pre-existing) |
 | - | Beam FEM formulation, solver implementations, geometry, triangulation, warping | NO ISSUE |
 
 **No production defect was found that blocks a frame layer.** Items 1-7 are
 additive design work for the next phase, not bugs.
 
-## 11. Implementation plan for the next phase
+## 11. Implementation plan (Phase 13 completed the first four steps)
 
 1. `FrameModel` façade over `BeamModel`: `NodeHandle`/`MemberHandle`, `add_node`
    returning a handle, `add_member` with validation, support helpers
