@@ -153,6 +153,35 @@ fn is_ear(polygon: &[usize], _vertices: &[Point], i: usize, all_vertices: &[Poin
         }
     }
 
+    // The new diagonal (prev -> next) must be interior. If another polygon
+    // vertex lies exactly on that open segment, clipping this "ear" is invalid:
+    // it leaves a self-intersecting remainder, no further ear is found, and the
+    // fan fallback then covers the convex hull instead of the polygon. That
+    // silently inflated the mesh area for I-shaped sections (7.75x) and
+    // corrupted the warping FEM torsion constant.
+    //
+    // Only the diagonal is checked (not the two polygon edges prev-curr and
+    // curr-next, which may legitimately carry collinear vertices in bridged
+    // hole/keyhole polygons).
+    let ab = Point::new(c.x - a.x, c.y - a.y); // prev -> next
+    let ab_len2 = ab.x * ab.x + ab.y * ab.y;
+    let diag_tol = 1e-9 * ab_len2.sqrt().max(1.0);
+    for &idx in polygon.iter() {
+        if idx == prev || idx == curr || idx == next {
+            continue;
+        }
+        let p = all_vertices[idx];
+        let ap = Point::new(p.x - a.x, p.y - a.y);
+        let cross = ab.x * ap.y - ab.y * ap.x;
+        let dist = cross.abs() / ab_len2.max(f64::MIN_POSITIVE).sqrt();
+        if dist <= diag_tol {
+            let t = (ap.x * ab.x + ap.y * ab.y) / ab_len2.max(f64::MIN_POSITIVE);
+            if t > 1e-9 && t < 1.0 - 1e-9 {
+                return false; // Diagonal passes through another vertex
+            }
+        }
+    }
+
     true
 }
 
