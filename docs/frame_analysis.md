@@ -45,6 +45,7 @@ element stiffness, transformation, assembly, condensation or recovery code.
 | member connecting a node to itself, or coincident nodes | `add_member` | `ZeroLengthMember` |
 | duplicate connectivity `(i,j)` / `(j,i)` | `add_member` | `DuplicateMember` |
 | non-finite / non-positive `E`, `A` or `I` | `add_member` | `InvalidInput` |
+| non-finite nodal force component | `nodal_load` | `InvalidInput` - **both** components are validated before either is recorded, so a rejected call leaves the model unchanged (no half-applied load) |
 | empty model, orphan node, disconnected components | `solve` (via `validate`) | `InvalidModel` / `OrphanNode` / `DisconnectedStructure` |
 | insufficient restraint (mechanism) | `solve` | **`SolverError`** (singular system) - deliberately not a targeted diagnostic; distinguishing a mechanism from a very soft structure is not reliable with the current infrastructure |
 
@@ -55,6 +56,17 @@ element stiffness, transformation, assembly, condensation or recovery code.
   prescribed settlement, member subdivision), solver cross-validation, the
   support vocabulary (pin + roller simply supported beam, `5qL^4/384EI`), and
   every validation rule above.
+* `tests/frame_correctness.rs` - 19 tests: closed-form single-member cases for
+  every load type (tip transverse/axial force, tip applied moment, uniform
+  transverse/axial distributed load, combined loading), the tip-moment sign
+  convention (`M_j = -M`, derived from statics), distributed-load end-force
+  recovery (`f_end = f_equiv - K_e u_e`, with the applied moment never
+  re-deducted), two-member and portal internal-force transfer (`Σ f_end = 0` at
+  an unloaded joint, `f_end = -R` at a fixed base), API robustness, and
+  load / stiffness / coordinate scale sweeps. The coordinate sweep documents the
+  Euler-Bernoulli conditioning boundary (`κ = max(12/L², 4L²/3)` in absolute
+  units) and requires a clean `SolverError` - never a silently wrong answer -
+  outside f64's resolution.
 * `tests/frame_transformation_contract.rs` - transformation invariants.
 * `examples/frame_portal.rs` - end-to-end public-API usage; equilibrium
   residual ~1e-9 on a 20 kN load (balanced).

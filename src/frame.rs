@@ -334,8 +334,25 @@ impl FrameModel {
     }
 
     /// Apply a **global** nodal force `(fx, fy)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid, or
+    /// [`FemError::InvalidInput`] if either component is non-finite. Both
+    /// components are validated **before** either is recorded, so a rejected
+    /// call leaves the model unchanged (no half-applied load).
     pub fn nodal_load(&mut self, node: NodeHandle, fx: f64, fy: f64) -> Result<(), FemError> {
         let i = self.check_node(node)?;
+        if !fx.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "nodal force Fx must be finite, got {fx}"
+            )));
+        }
+        if !fy.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "nodal force Fy must be finite, got {fy}"
+            )));
+        }
         self.inner.try_add_nodal_force(i, Dof::Ux.index(), fx)?;
         self.inner.try_add_nodal_force(i, Dof::Uy.index(), fy)
     }
