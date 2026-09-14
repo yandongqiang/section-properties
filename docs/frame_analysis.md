@@ -432,6 +432,24 @@ and `f` (point load) acting at `xi·L`, with the local→global rotation applied
 before the moment sum. Equilibrium must hold independently of the displacement
 solution; it is a property of the assembled system and the recovered reactions.
 
+`is_balanced()` uses a **relative, never absolute** tolerance of `1e-6`
+(`EQUILIBRIUM_REL_TOL`) applied to scales built from the analysed system's own
+magnitudes:
+
+```text
+force_scale  = Σ|F| + Σ|M| / l_char
+moment_scale = Σ|M| + Σ|F| · l_char
+```
+
+with `l_char` the largest absolute nodal coordinate and `Σ|F|`, `Σ|M|` sums of
+per-term magnitudes (applied loads and recovered reactions). Because the moment
+scale carries the force × lever-arm term `Σ|F| · l_char`, a load system that nets
+zero applied moment — e.g. a portal symmetric about the origin — does not collapse
+the moment check to a constant. There is no absolute floor, so the verdict is
+invariant under a pure change of units (N/m ↔ kN/mm). If no force and no moment is
+present the scales are zero and the residual must be **exactly** zero, so an
+unloaded, properly restrained frame reports balanced.
+
 ## 8. Analytical reference cases (cases 1-7 implemented in `tests/frame_api.rs`)
 
 | # | Case | Expected quantities | Sign convention |

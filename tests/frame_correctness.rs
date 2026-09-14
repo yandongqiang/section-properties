@@ -1064,3 +1064,144 @@ fn scale_solver_selection_stable() -> Result<(), FemError> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Step 9 - equilibrium tolerance is relative and scale/unit invariant
+// ---------------------------------------------------------------------------
+
+/// Relative bound matching the crate's documented `EQUILIBRIUM_REL_TOL`.
+const EQ_REL: f64 = 1e-6;
+
+/// Portal symmetric about the origin: bases at `(-L/2, 0)` and `(L/2, 0)`, tops
+/// at `(-L/2, H)` and `(L/2, H)`, both bases fixed. One top carries the vertical
+/// load `-P`; the other carries the nodal moment that cancels its moment about
+/// the origin, so the applied system has `ΣMz == 0` while real force paths are
+/// present. This is the degenerate case for any moment scale built only from
+/// `|applied_mz|`.
+fn origin_symmetric_zero_moment_portal(
+    l: f64,
+    h: f64,
+    e: f64,
+    a: f64,
+    i: f64,
+    p: f64,
+) -> Result<FrameModel, FemError> {
+    let mut f = FrameModel::new();
+    let hl = l / 2.0;
+    let b1 = f.add_node(-hl, 0.0)?;
+    let t1 = f.add_node(-hl, h)?;
+    let t2 = f.add_node(hl, h)?;
+    let b2 = f.add_node(hl, 0.0)?;
+    f.add_member(
+        b1,
+        t1,
+        Material::new(e, 0.3, 7850.0, "Steel"),
+        BeamSection::new(a, i),
+    )?;
+    f.add_member(
+        t1,
+        t2,
+        Material::new(e, 0.3, 7850.0, "Steel"),
+        BeamSection::new(a, i),
+    )?;
+    f.add_member(
+        b2,
+        t2,
+        Material::new(e, 0.3, 7850.0, "Steel"),
+        BeamSection::new(a, i),
+    )?;
+    f.fix(b1)?;
+    f.fix(b2)?;
+    f.nodal_load(t1, 0.0, -p)?;
+    // The load's moment about the origin is `(-hl)·(-p) = +hl·p`; cancel it.
+    f.nodal_moment(t2, -hl * p)?;
+    Ok(f)
+}
+
+/// The same physical problem, expressed in two unit systems, must give the same
+/// `is_balanced()` verdict, and a zero net applied moment must not blind the
+/// moment check to the forces actually present.
+///
+/// A portal centred on the origin but with asymmetric loading is one of the
+/// symmetric-in-resultant load systems (`applied_mz == 0`) that used to collapse
+/// the moment tolerance to an absolute constant.
+#[test]
+fn equilibrium_tolerance_is_unit_invariant_with_zero_applied_moment() -> Result<(), FemError> {
+    // (span L, height H, load P) — realistic sizes, not extremes.
+    let cases = [(1.0e3, 3.0e2, 1.0e6), (80.0, 24.0, 8.0e4)];
+
+    for (l, h, p) in cases {
+        // SI: N, m.
+        let si = origin_symmetric_zero_moment_portal(l, h, 200e9, 5e-3, 2e-5, p)?.solve()?;
+        // kN, mm: E kN/mm^2, A mm^2, I mm^4, P kN.
+        let kmm =
+            origin_symmetric_zero_moment_portal(l * 1e3, h * 1e3, 200.0, 5.0e3, 2.0e7, p / 1e3)?
+                .solve()?;
+        let (e_si, e_kmm) = (si.equilibrium(), kmm.equilibrium());
+
+        // The defect's precondition: the applied system nets zero moment.
+        assert_eq!(e_si.applied_mz, 0.0, "L={l}: SI must net zero applied Mz");
+        assert_eq!(
+            e_kmm.applied_mz, 0.0,
+            "L={l}: kN/mm must net zero applied Mz"
+        );
+
+        // A pure change of units must not change the verdict.
+        assert_eq!(
+            e_si.is_balanced(),
+            e_kmm.is_balanced(),
+            "L={l}: unit change flipped is_balanced (SI={}, kN/mm={})",
+            e_si.is_balanced(),
+            e_kmm.is_balanced()
+        );
+        assert!(e_si.is_balanced(), "L={l}: SI report {e_si:?}");
+        assert!(e_kmm.is_balanced(), "L={l}: kN/mm report {e_kmm:?}");
+
+        // Independent relative check, with the structure's own geometry as the
+        // characteristic length (largest absolute nodal coordinate).
+        for (label, e, l_char) in [
+            ("SI", &e_si, (l / 2.0).max(h)),
+            ("kN/mm", &e_kmm, (l / 2.0).max(h) * 1e3),
+        ] {
+            let f_raw =
+                e.applied_fx.abs() + e.applied_fy.abs() + e.reaction_fx.abs() + e.reaction_fy.abs();
+            let m_raw = e.applied_mz.abs() + e.reaction_mz.abs();
+            let f_scale = f_raw + m_raw / l_char;
+            let m_scale = m_raw + f_raw * l_char;
+            assert!(
+                e.fx_residual.abs() <= EQ_REL * f_scale,
+                "{label} L={l}: ΣFx residual {:.3e} > {:.3e}",
+                e.fx_residual,
+                EQ_REL * f_scale
+            );
+            assert!(
+                e.fy_residual.abs() <= EQ_REL * f_scale,
+                "{label} L={l}: ΣFy residual {:.3e} > {:.3e}",
+                e.fy_residual,
+                EQ_REL * f_scale
+            );
+            assert!(
+                e.mz_residual.abs() <= EQ_REL * m_scale,
+                "{label} L={l}: ΣMz residual {:.3e} > {:.3e}",
+                e.mz_residual,
+                EQ_REL * m_scale
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Degenerate case: an unloaded but properly restrained frame has zero force and
+/// moment magnitudes, so the scales are zero and `is_balanced()` must hold
+/// exactly (no absolute floor was reintroduced to dodge it).
+#[test]
+fn equilibrium_unloaded_frame_is_balanced() -> Result<(), FemError> {
+    let (f, _base, _tip, _m) = single_cantilever(2.0)?;
+    let r = f.solve()?;
+    let e = r.equilibrium();
+    assert_eq!(e.fx_residual, 0.0, "unloaded: exact zero residual");
+    assert_eq!(e.fy_residual, 0.0, "unloaded: exact zero residual");
+    assert_eq!(e.mz_residual, 0.0, "unloaded: exact zero residual");
+    assert!(e.is_balanced(), "unloaded frame must be balanced: {e:?}");
+    Ok(())
+}

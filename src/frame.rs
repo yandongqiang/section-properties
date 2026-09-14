@@ -128,6 +128,11 @@ impl MemberHandle {
 // Equilibrium report
 // ---------------------------------------------------------------------------
 
+/// Relative equilibrium tolerance: residuals are compared against the analysed
+/// system's **own** force and moment magnitudes, never against an absolute
+/// floor, so the verdict is invariant under a change of units (N/m ↔ kN/mm).
+const EQUILIBRIUM_REL_TOL: f64 = 1e-6;
+
 /// Result of the global equilibrium check, summed **about the global origin
 /// `(0, 0)`**.
 ///
@@ -155,22 +160,70 @@ pub struct EquilibriumReport {
     pub reaction_fy: f64,
     /// Sum of reaction moments about the origin, including `x·Ry − y·Rx`.
     pub reaction_mz: f64,
-    /// Tolerance applied by [`Self::is_balanced`] for the force components.
+    /// Absolute force tolerance applied by [`Self::is_balanced`], equal to
+    /// `EQUILIBRIUM_REL_TOL · force_scale`, where `force_scale` is the total
+    /// force magnitude present (applied loads plus recovered reactions, with the
+    /// moments converted to an equivalent force through `l_char`). Purely
+    /// relative: there is no absolute floor.
     pub tolerance: f64,
+    /// Σ of the absolute applied and reaction **force** magnitudes actually
+    /// present (per load term, not per resultant — a self-cancelling load pair
+    /// must not collapse the scale to zero). Private: it only feeds
+    /// [`Self::is_balanced`].
+    f_mag: f64,
+    /// Σ of the absolute applied and reaction **moment** magnitudes actually
+    /// present, again per term. Private, as above.
+    m_mag: f64,
+    /// Characteristic length of the structure: the largest absolute nodal
+    /// coordinate (see [`characteristic_length`]). Private, as above.
+    l_char: f64,
+}
+
+/// The two scale factors behind [`EquilibriumReport::is_balanced`]:
+/// `(force_scale, moment_scale)`.
+///
+/// Both are built **only** from magnitudes the analysed system actually carries,
+/// so a pure change of units (N/m ↔ kN/mm) leaves the verdict unchanged:
+///
+/// * `force_scale = Σ|F| + Σ|M| / l_char` — the force magnitudes present
+///   (applied plus recovered reactions) plus the equivalent force of the moments
+///   present, so a pure-moment system still has a positive force scale.
+/// * `moment_scale = Σ|M| + Σ|F| · l_char` — the moment magnitudes present plus
+///   the moment the forces produce through their largest lever arm `l_char`.
+///   The `Σ|F| · l_char` term is what keeps the moment check sensitive for a load
+///   system that is symmetric about the origin (`applied_mz == 0`): the scale
+///   then reflects the real force × length magnitudes rather than collapsing to
+///   a constant.
+///
+/// `Σ|F|` and `Σ|M|` are sums of absolute **per-term** magnitudes (`f_mag`,
+/// `m_mag`), so equal-and-opposite terms that cancel in the resultant still keep
+/// the scale positive; `l_char` is the largest absolute nodal coordinate. All
+/// three are zero only for a model with no load and no reactions, in which case
+/// both scales are zero and the check degenerates to "the residual must be
+/// exactly zero".
+fn equilibrium_scales(f_mag: f64, m_mag: f64, l_char: f64) -> (f64, f64) {
+    if l_char > 0.0 {
+        (f_mag + m_mag / l_char, m_mag + f_mag * l_char)
+    } else {
+        (f_mag, m_mag)
+    }
 }
 
 impl EquilibriumReport {
-    /// Whether all three residuals are within the report's tolerance.
+    /// Whether all three residuals are within a tolerance **relative** to the
+    /// analysed system's own magnitudes (see [`equilibrium_scales`]).
     ///
-    /// The force tolerance is `1e-6 · max(1, |ΣFx| + |ΣFy|)` relative to the
-    /// applied load magnitude (the same order of tolerance used by the Beam FEM
-    /// equilibrium tests); the moment tolerance uses the same relative factor on
-    /// the applied moment magnitude.
+    /// Both tolerances are `EQUILIBRIUM_REL_TOL` times a scale derived from the
+    /// forces and moments actually present, so the verdict is invariant under a
+    /// change of units and the moment check stays sensitive even when a load
+    /// system is symmetric about the origin (`applied_mz == 0`). There is no
+    /// absolute floor: if every relevant magnitude is zero the scale is zero and
+    /// the residual must then be **exactly** zero for the frame to be balanced.
     pub fn is_balanced(&self) -> bool {
-        let m_scale = self.applied_mz.abs().max(self.tolerance * 10.0).max(1.0);
-        self.fx_residual.abs() <= self.tolerance
-            && self.fy_residual.abs() <= self.tolerance
-            && self.mz_residual.abs() <= 1e-6 * m_scale
+        let (f_scale, m_scale) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
+        self.fx_residual.abs() <= EQUILIBRIUM_REL_TOL * f_scale
+            && self.fy_residual.abs() <= EQUILIBRIUM_REL_TOL * f_scale
+            && self.mz_residual.abs() <= EQUILIBRIUM_REL_TOL * m_scale
     }
 }
 
@@ -805,6 +858,10 @@ impl FrameAnalysisResult {
         let mut applied_fx = 0.0;
         let mut applied_fy = 0.0;
         let mut applied_mz = 0.0;
+        // Absolute per-term magnitudes (not resultants): a load pair that cancels
+        // in the sum must still contribute to the equilibrium scale.
+        let mut applied_f_mag = 0.0;
+        let mut applied_m_mag = 0.0;
 
         // Global nodal loads and moments.
         for (node, dof, v) in &m.nodal_forces {
@@ -813,16 +870,22 @@ impl FrameAnalysisResult {
                 0 => {
                     applied_fx += v;
                     applied_mz += -p.y * v;
+                    applied_f_mag += v.abs();
                 }
                 1 => {
                     applied_fy += v;
                     applied_mz += p.x * v;
+                    applied_f_mag += v.abs();
                 }
-                _ => applied_mz += v,
+                _ => {
+                    applied_mz += v;
+                    applied_m_mag += v.abs();
+                }
             }
         }
         for am in &m.applied_moments {
             applied_mz += am.value;
+            applied_m_mag += am.value.abs();
         }
 
         // Member load resultants, rotated from local to global.
@@ -840,6 +903,7 @@ impl FrameAnalysisResult {
             applied_fx += gx;
             applied_fy += gy;
             applied_mz += xm * gy - ym * gx;
+            applied_f_mag += gx.abs() + gy.abs();
         }
         for pl in &m.point_loads {
             let Some((pi, _)) = member_points(m, pl.element_idx) else {
@@ -855,6 +919,8 @@ impl FrameAnalysisResult {
             applied_fx += gx;
             applied_fy += gy;
             applied_mz += xp * gy - yp * gx + pl.mz;
+            applied_f_mag += gx.abs() + gy.abs();
+            applied_m_mag += pl.mz.abs();
         }
 
         // Support reactions, per node.
@@ -862,6 +928,8 @@ impl FrameAnalysisResult {
         let mut reaction_fx = 0.0;
         let mut reaction_fy = 0.0;
         let mut reaction_mz = 0.0;
+        let mut reaction_f_mag = 0.0;
+        let mut reaction_m_mag = 0.0;
         for (idx, node) in m.nodes.iter().enumerate() {
             let p = node.point();
             let rx = reactions.get(3 * idx).copied().unwrap_or(0.0);
@@ -870,11 +938,19 @@ impl FrameAnalysisResult {
             reaction_fx += rx;
             reaction_fy += ry;
             reaction_mz += p.x * ry - p.y * rx + rz;
+            reaction_f_mag += rx.abs() + ry.abs();
+            reaction_m_mag += rz.abs();
         }
 
-        let tolerance = 1e-6
-            * (applied_fx.abs() + applied_fy.abs() + reaction_fx.abs() + reaction_fy.abs())
-                .max(1.0);
+        // Characteristic length of the structure: the largest absolute nodal
+        // coordinate. Positive for any solvable model (a zero-length member is
+        // rejected). It is what makes the moment scale `Σ|F|·l_char` reflect the
+        // structure rather than a constant.
+        let l_char = characteristic_length(m);
+        let f_mag = applied_f_mag + reaction_f_mag;
+        let m_mag = applied_m_mag + reaction_m_mag;
+        let (f_scale, _m_scale) = equilibrium_scales(f_mag, m_mag, l_char);
+
         EquilibriumReport {
             fx_residual: applied_fx + reaction_fx,
             fy_residual: applied_fy + reaction_fy,
@@ -885,7 +961,10 @@ impl FrameAnalysisResult {
             reaction_fx,
             reaction_fy,
             reaction_mz,
-            tolerance,
+            tolerance: EQUILIBRIUM_REL_TOL * f_scale,
+            f_mag,
+            m_mag,
+            l_char,
         }
     }
 
@@ -922,6 +1001,20 @@ fn member_points(
         model.nodes[el.node_i].point(),
         model.nodes[el.node_j].point(),
     ))
+}
+
+/// Characteristic length of the model: the largest absolute nodal coordinate.
+///
+/// The equilibrium moments are summed **about the origin**, so the length that
+/// relates the force and moment scales must be measured from the origin too —
+/// not a translation-invariant span. `0.0` for an empty model.
+fn characteristic_length(model: &BeamModel) -> f64 {
+    let mut l_char: f64 = 0.0;
+    for node in &model.nodes {
+        let p = node.point();
+        l_char = l_char.max(p.x.abs()).max(p.y.abs());
+    }
+    l_char
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,5 +1305,104 @@ mod reduced_system_single_source_tests {
             }
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Equilibrium tolerance: relative, scale/unit invariant, never absolute
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod equilibrium_tolerance_tests {
+    use super::*;
+
+    /// Build a report with the given residuals and raw magnitudes.
+    fn report(
+        fx_residual: f64,
+        fy_residual: f64,
+        mz_residual: f64,
+        f_mag: f64,
+        m_mag: f64,
+        l_char: f64,
+    ) -> EquilibriumReport {
+        let (f_scale, _) = equilibrium_scales(f_mag, m_mag, l_char);
+        EquilibriumReport {
+            fx_residual,
+            fy_residual,
+            mz_residual,
+            applied_fx: 0.0,
+            applied_fy: 0.0,
+            applied_mz: 0.0,
+            reaction_fx: 0.0,
+            reaction_fy: 0.0,
+            reaction_mz: 0.0,
+            tolerance: EQUILIBRIUM_REL_TOL * f_scale,
+            f_mag,
+            m_mag,
+            l_char,
+        }
+    }
+
+    #[test]
+    fn force_and_moment_scales_are_unit_invariant() {
+        // Same physical state: 2e6 N of force, 5e2 m lever arm, zero net moment.
+        let (f_si, m_si) = equilibrium_scales(2.0e6, 0.0, 5.0e2);
+        assert_eq!(f_si, 2.0e6);
+        assert_eq!(m_si, 1.0e9);
+        // kN / mm: force 2e3 kN, lever arm 5e5 mm.
+        let (f_kmm, m_kmm) = equilibrium_scales(2.0e3, 0.0, 5.0e5);
+        assert_eq!(f_kmm, 2.0e3);
+        // 1e9 kN·mm == 1e9 N·m: the moment scale is the same physical quantity.
+        assert_eq!(m_kmm, m_si);
+    }
+
+    #[test]
+    fn moment_scale_is_non_degenerate_with_zero_applied_moment() {
+        // Forces present but `applied_mz == 0`: the moment scale must not
+        // collapse to a constant (the old `|applied_mz|`-only definition did).
+        let (_, m_scale) = equilibrium_scales(2.0e6, 0.0, 5.0e2);
+        assert_eq!(m_scale, 2.0e6 * 5.0e2);
+        assert!(m_scale > 0.0);
+    }
+
+    #[test]
+    fn scales_vanish_only_when_nothing_is_present() {
+        assert_eq!(equilibrium_scales(0.0, 0.0, 5.0e2), (0.0, 0.0));
+        assert_eq!(equilibrium_scales(0.0, 0.0, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn unloaded_report_is_balanced_only_with_exact_zero_residual() {
+        assert!(report(0.0, 0.0, 0.0, 0.0, 0.0, 5.0e2).is_balanced());
+        assert!(!report(0.0, 0.0, f64::MIN_POSITIVE, 0.0, 0.0, 5.0e2).is_balanced());
+        assert!(!report(f64::MIN_POSITIVE, 0.0, 0.0, 0.0, 0.0, 5.0e2).is_balanced());
+    }
+
+    #[test]
+    fn corrupted_reaction_is_still_rejected() {
+        // No over-relaxation: the relative bound must still reject a genuine
+        // imbalance, while accepting round-off.
+        let (f_scale, m_scale) = equilibrium_scales(1.0e6, 0.0, 5.0e2);
+        assert!(
+            report(
+                1e-15 * f_scale,
+                1e-15 * f_scale,
+                1e-15 * m_scale,
+                1.0e6,
+                0.0,
+                5.0e2
+            )
+            .is_balanced()
+        );
+        assert!(
+            !report(
+                1e-3 * f_scale,
+                1e-3 * f_scale,
+                1e-3 * m_scale,
+                1.0e6,
+                0.0,
+                5.0e2
+            )
+            .is_balanced()
+        );
     }
 }
