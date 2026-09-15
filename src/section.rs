@@ -190,7 +190,7 @@ impl Section {
 
         let fp = self.frame_properties_full(material.poissons_ratio);
         let e = material.youngs_modulus;
-        let g = e / (2.0 * (1.0 + material.poissons_ratio));
+        let g = material.shear_modulus;
 
         Ok(TransformedFrameProperties {
             e_ref: e,
@@ -490,8 +490,8 @@ mod tests {
         let t_steel = sec.frame_properties_with_material(&steel).unwrap();
         assert!((t_steel.ea - steel.youngs_modulus * t_steel.area).abs() < 1e-6);
         assert!((t_steel.ei_xx - steel.youngs_modulus * geo.ixx).abs() < 1e-9);
-        // G = E / 2(1+nu)
-        let g_expected = steel.youngs_modulus / (2.0 * (1.0 + steel.poissons_ratio));
+        // G = material.shear_modulus (independent for orthotropic materials)
+        let g_expected = steel.shear_modulus;
         assert!((t_steel.gj - g_expected * geo.j).abs() < 1e-3);
 
         // Aluminium: E roughly 1/3 of steel -> EI scales proportionally.
@@ -591,5 +591,112 @@ mod tests {
         ]);
         let section = Section::new_validated(outer, vec![hole_a, hole_b]).unwrap();
         assert_eq!(section.holes.len(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 18.5: GJ must use Material::shear_modulus, not E/(2(1+ν)).
+    // -------------------------------------------------------------------------
+
+    /// Helper: build a rectangle and get its frame properties with a material.
+    fn rect_frame_props(mat: &crate::material::Material) -> TransformedFrameProperties {
+        let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+        sec.frame_properties_with_material(mat).unwrap()
+    }
+
+    /// Test A — TIMBER_GL24H GJ regression: GJ must use the stored
+    /// `shear_modulus` (0.725 GPa), NOT the isotropic relation E/(2(1+ν))
+    /// which would give 4.296 GPa (~5.9× too large).
+    #[test]
+    fn gj_uses_material_shear_modulus_timber() {
+        use crate::material::presets::TIMBER_GL24H;
+
+        let t = rect_frame_props(&TIMBER_GL24H);
+        let fp = {
+            let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+            sec.frame_properties_full(TIMBER_GL24H.poissons_ratio)
+        };
+
+        // GJ must equal material.shear_modulus * J.
+        let gj_expected = TIMBER_GL24H.shear_modulus * fp.j;
+        assert!(
+            (t.gj - gj_expected).abs() < 1e-3,
+            "GJ ({:.6e}) must use shear_modulus * J ({:.6e})",
+            t.gj,
+            gj_expected
+        );
+
+        // GJ must NOT equal the isotropic G * J.
+        let g_iso = TIMBER_GL24H.youngs_modulus / (2.0 * (1.0 + TIMBER_GL24H.poissons_ratio));
+        let gj_iso = g_iso * fp.j;
+        assert!(
+            (t.gj - gj_iso).abs() > 1e3,
+            "GJ ({:.6e}) must NOT use isotropic G * J ({:.6e})",
+            t.gj,
+            gj_iso
+        );
+    }
+
+    /// Test B — Custom independent-G material: Material::with_all() with
+    /// deliberately non-isotropic E/G/ν must produce GJ = G * J.
+    #[test]
+    fn gj_uses_independent_shear_modulus() {
+        let mat = crate::material::Material::with_all(
+            100e9, // E
+            10e9,  // G (deliberately non-isotropic: E/(2(1+0.3)) = 38.46 GPa)
+            0.30,  // ν
+            5000.0, 0.0, 0.0, 0.0, "custom",
+        );
+
+        let t = rect_frame_props(&mat);
+        let fp = {
+            let sec = crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+            sec.frame_properties_full(mat.poissons_ratio)
+        };
+
+        let gj_expected = mat.shear_modulus * fp.j;
+        assert!(
+            (t.gj - gj_expected).abs() < 1e-3,
+            "GJ ({:.6e}) must use independent G * J ({:.6e})",
+            t.gj,
+            gj_expected
+        );
+    }
+
+    /// Test C — Isotropic materials unchanged: for steel/aluminum/concrete
+    /// where G ≈ E/(2(1+ν)), GJ results remain the same as before the fix.
+    #[test]
+    fn gj_isotropic_materials_unchanged() {
+        use crate::material::presets::*;
+
+        for mat in &[STEEL_S355, ALUMINUM_6061_T6, CONCRETE_C25_30] {
+            let t = rect_frame_props(mat);
+            let fp = {
+                let sec =
+                    crate::section_library::primitive::RectangularSection::new(0.1, 0.2).build();
+                sec.frame_properties_full(mat.poissons_ratio)
+            };
+
+            // For isotropic materials, shear_modulus ≈ E/(2(1+ν)),
+            // so GJ should match both.
+            let gj_from_stored = mat.shear_modulus * fp.j;
+            let g_iso = mat.youngs_modulus / (2.0 * (1.0 + mat.poissons_ratio));
+            let gj_from_iso = g_iso * fp.j;
+
+            assert!(
+                (t.gj - gj_from_stored).abs() < 1e-3,
+                "{}: GJ ({:.6e}) must use stored G * J ({:.6e})",
+                mat.name,
+                t.gj,
+                gj_from_stored
+            );
+            // For truly isotropic materials, the two are close.
+            assert!(
+                (t.gj - gj_from_iso).abs() / gj_from_stored.abs() < 0.01,
+                "{}: GJ should be close to isotropic (stored={:.6e}, iso={:.6e})",
+                mat.name,
+                gj_from_stored,
+                gj_from_iso
+            );
+        }
     }
 }
