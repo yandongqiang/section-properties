@@ -236,6 +236,17 @@ pub enum ExactSolverFailure {
     RegularizedFallback,
 }
 
+/// Maximum matrix dimension for dense SparseLU factorization in the exact
+/// (non-regularized) diagnostic path.
+///
+/// `SparseLu::factor` allocates three dense n×n working matrices
+/// (~3·n²·8 bytes). For n > 8000 this exceeds ~1.5 GB and risks OOM
+/// followed by `STATUS_STACK_BUFFER_OVERRUN` on Windows. The exact solve
+/// is a **diagnostic comparison only**; the primary FEM solution always
+/// uses the sparse Skyline LDLᵀ solver, so skipping the exact path for
+/// large systems does not affect any numerical result.
+const MAX_DENSE_LU_N: usize = 8000;
+
 /// Result of exact Lagrange solve.
 #[derive(Debug, Clone)]
 struct ExactLagrangeSolution {
@@ -303,6 +314,32 @@ fn solve_compare_exact_vs_regularized(
     ),
     crate::mesh::fem::FemError,
 > {
+    let n = f.len();
+
+    // Skip dense LU for large systems — SparseLu::factor allocates three
+    // dense n×n matrices (O(n²) memory). For n > MAX_DENSE_LU_N this would
+    // exhaust memory and crash. The exact solve is diagnostic only; the
+    // primary FEM solution uses the sparse Skyline solver below.
+    if n > MAX_DENSE_LU_N {
+        eprintln!(
+            "[DIAG] Skipping exact dense LU: n={} > MAX_DENSE_LU_N={} (would need ~{:.1} GB)",
+            n,
+            MAX_DENSE_LU_N,
+            3.0 * (n as f64).powi(2) * 8.0 / 1e9
+        );
+        return Ok((
+            vec![],
+            vec![],
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            Some(ExactSolverFailure::RegularizedFallback),
+            true,
+        ));
+    }
+
     // Exact K (no regularization)
     let exact_sol = match solve_exact_lagrange(k_global, c, f) {
         Ok(sol) => sol,
