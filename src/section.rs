@@ -260,7 +260,8 @@ impl std::error::Error for MaterialError {}
 ///
 /// The geometric quantities (`area`, `ixx`, ...) are unchanged; the stiffness
 /// terms carry the material modulus:
-/// `ea = E·A`, `ei_x = E·Ixx`, ..., `ej = G·J` where `G = E / 2(1+nu)`.
+/// `ea = E·A`, `ei_x = E·Ixx`, ..., `ej = G·J` where `G` is the material's
+/// `shear_modulus` (equal to `E / 2(1+nu)` only for isotropic materials).
 ///
 /// For multi-material sections use
 /// [`CompositeSection::transformed_properties`](crate::section_library::CompositeSection::transformed_properties)
@@ -279,7 +280,7 @@ pub struct TransformedFrameProperties {
     pub ei_yy: f64,
     /// Effective warping stiffness, E·Iw.
     pub ei_w: f64,
-    /// Effective torsional stiffness G·J with G = E/2(1+nu).
+    /// Effective torsional stiffness G·J using the material's shear modulus.
     pub gj: f64,
     /// Mass per unit length rho·A.
     pub mass_per_length: f64,
@@ -696,6 +697,85 @@ mod tests {
                 mat.name,
                 gj_from_stored,
                 gj_from_iso
+            );
+        }
+    }
+
+    /// Test D - Regression guard: no production path may silently recompute
+    /// `G` from `E` and `nu` once the material supplies `shear_modulus`.
+    ///
+    /// Every preset must satisfy `gj == material.shear_modulus * J` to within
+    /// round-off. Any path re-deriving `G` from the isotropic relation fails
+    /// this for the orthotropic presets (e.g. TIMBER_GL24H).
+    #[test]
+    fn gj_never_recomputed_from_e_and_nu() {
+        use crate::material::presets::*;
+
+        let mats = [
+            STEEL_S235,
+            STEEL_S275,
+            STEEL_S355,
+            STEEL_S460,
+            STAINLESS_304,
+            STAINLESS_316,
+            ALUMINUM_6061_T6,
+            ALUMINUM_6063_T5,
+            ALUMINUM_7075_T6,
+            CONCRETE_C25_30,
+            CONCRETE_C30_37,
+            CONCRETE_C40_50,
+            TIMBER_GL24H,
+            TITANIUM_GR5,
+        ];
+
+        for mat in mats {
+            let t = rect_frame_props(&mat);
+            let j = t.geometric.j;
+            assert!(
+                j > 0.0 && j.is_finite(),
+                "{}: J must be finite and > 0, got {j}",
+                mat.name
+            );
+
+            let expected = mat.shear_modulus * j;
+            let rel = (t.gj - expected).abs() / expected.abs();
+            assert!(
+                rel < 1e-12,
+                "{}: gj={:.6e} but shear_modulus*J={:.6e} (rel={:.3e}); G was recomputed from E and nu",
+                mat.name,
+                t.gj,
+                expected,
+                rel
+            );
+        }
+    }
+
+    /// Test D2 - For a fixed independent `G`, GJ must not depend on `nu`:
+    /// the isotropic relation would scale G by 1/(2(1+nu)) and break this.
+    #[test]
+    fn gj_independent_of_nu_for_fixed_shear_modulus() {
+        for nu in [0.2, 0.3, 0.35] {
+            let mat = crate::material::Material::with_all(
+                200e9,
+                1e9,
+                nu,
+                7850.0,
+                1.2e-5,
+                355e6,
+                510e6,
+                "synthetic-g",
+            );
+            assert!(mat.is_valid(), "synthetic material must be valid");
+
+            let t = rect_frame_props(&mat);
+            let expected = mat.shear_modulus * t.geometric.j;
+            let rel = (t.gj - expected).abs() / expected.abs();
+            assert!(
+                rel < 1e-12,
+                "nu={nu}: gj={:.6e} but G*J={:.6e} (rel={:.3e})",
+                t.gj,
+                expected,
+                rel
             );
         }
     }
