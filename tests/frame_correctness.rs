@@ -1205,3 +1205,117 @@ fn equilibrium_unloaded_frame_is_balanced() -> Result<(), FemError> {
     assert!(e.is_balanced(), "unloaded frame must be balanced: {e:?}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Step 10 - conditioning-aware equilibrium tolerance
+// ---------------------------------------------------------------------------
+//
+// A fixed `EQUILIBRIUM_REL_TOL` flags a physically balanced but slender frame
+// as unbalanced: at large slenderness λ² = L²·A/I the forward error of the
+// solve is O(λ²·ε), and the recovered reactions inherit that error, so the
+// equilibrium residual can legitimately exceed 1e-6 relative. The fix relaxes
+// the tolerance to `max(1e-6, C·λ²·ε)` with C = 1e-2, while still rejecting
+// genuine imbalance above the floor.
+
+/// The defect: an origin-symmetric portal at span 1e6 m, load 1e12 N is
+/// physically balanced but has λ² ≈ 2.5e14, so the solver round-off in the
+/// recovered reactions exceeds the old fixed 1e-6 tolerance. The
+/// conditioning-aware tolerance must accept it.
+#[test]
+fn large_slender_portal_equilibrium_is_balanced() -> Result<(), FemError> {
+    let (l, h, p) = (1.0e6, 3.0e5, 1.0e12);
+    let f = origin_symmetric_zero_moment_portal(l, h, 200e9, 5e-3, 2e-5, p)?;
+    let r = f.solve()?;
+    let e = r.equilibrium();
+
+    // Sanity: the applied moment really is zero (the degenerate case).
+    assert_eq!(e.applied_mz, 0.0, "applied Mz must cancel exactly");
+
+    // The conditioning floor: λ² = L²·A/I = (1e6)²·5e-3/2e-5 = 2.5e14.
+    let lambda_sq = l * l * 5e-3 / 2e-5;
+    let cond_floor = 1e-2 * lambda_sq * f64::EPSILON;
+    assert!(
+        cond_floor > EQ_REL,
+        "this test needs the conditioning floor to dominate (floor={cond_floor:e})"
+    );
+
+    // The residual must be within the conditioning-relaxed tolerance.
+    assert!(
+        e.is_balanced(),
+        "large slender portal must be balanced: {e:?}\n\
+         λ²={lambda_sq:e}, cond_floor={cond_floor:e}"
+    );
+    Ok(())
+}
+
+/// The same physical structure in SI (m, N) and kN/mm (mm, kN) units must give
+/// the same `is_balanced()` verdict at large slenderness, where the
+/// conditioning floor dominates. This verifies the floor is unit-invariant.
+#[test]
+fn large_slender_portal_equilibrium_is_unit_invariant() -> Result<(), FemError> {
+    let (l, h, p) = (1.0e6, 3.0e5, 1.0e12);
+
+    let si = origin_symmetric_zero_moment_portal(l, h, 200e9, 5e-3, 2e-5, p)?.solve()?;
+    let kmm = origin_symmetric_zero_moment_portal(l * 1e3, h * 1e3, 200.0, 5.0e3, 2.0e7, p / 1e3)?
+        .solve()?;
+
+    let (e_si, e_kmm) = (si.equilibrium(), kmm.equilibrium());
+    assert_eq!(
+        e_si.is_balanced(),
+        e_kmm.is_balanced(),
+        "unit change flipped is_balanced (SI={}, kN/mm={})",
+        e_si.is_balanced(),
+        e_kmm.is_balanced()
+    );
+    assert!(e_si.is_balanced(), "SI report {e_si:?}");
+    assert!(e_kmm.is_balanced(), "kN/mm report {e_kmm:?}");
+    Ok(())
+}
+
+/// At normal slenderness (λ² < 4.5e9) the conditioning floor stays below
+/// `EQUILIBRIUM_REL_TOL`, so the tolerance is exactly 1e-6 — the fix must not
+/// relax the check for well-conditioned problems.
+#[test]
+fn normal_slender_portal_tolerance_is_unchanged() -> Result<(), FemError> {
+    let (l, h, p) = (1.0e3, 3.0e2, 1.0e6);
+    let f = origin_symmetric_zero_moment_portal(l, h, 200e9, 5e-3, 2e-5, p)?;
+    let r = f.solve()?;
+    let e = r.equilibrium();
+
+    // λ² = (1e3)²·5e-3/2e-5 = 2.5e8, cond_floor ≈ 5.5e-10 ≪ 1e-6.
+    let lambda_sq = l * l * 5e-3 / 2e-5;
+    let cond_floor = 1e-2 * lambda_sq * f64::EPSILON;
+    assert!(
+        cond_floor < EQ_REL,
+        "normal slenderness must not trigger the floor (floor={cond_floor:e})"
+    );
+
+    assert!(
+        e.is_balanced(),
+        "normal portal must be balanced with the base tolerance: {e:?}"
+    );
+    Ok(())
+}
+
+/// A scale sweep: the same origin-symmetric portal at span from 1e3 to 1e7 m
+/// must be `is_balanced()` at every scale. Before the fix, the largest scale
+/// (λ² ≈ 2.5e16) was rejected.
+#[test]
+fn large_slender_portal_scale_sweep_is_balanced() -> Result<(), FemError> {
+    let spans = [1.0e3, 1.0e4, 1.0e5, 1.0e6, 1.0e7];
+    for l in spans {
+        let h = 0.3 * l;
+        let p = 1.0e6 * l * l / 1.0e12;
+        let f = origin_symmetric_zero_moment_portal(l, h, 200e9, 5e-3, 2e-5, p)?;
+        let r = f.solve()?;
+        let e = r.equilibrium();
+        assert!(
+            e.is_balanced(),
+            "span={l:e}: portal must be balanced\n{e:?}\n\
+             λ²={:e}, cond_floor={:e}",
+            l * l * 5e-3 / 2e-5,
+            1e-2 * (l * l * 5e-3 / 2e-5) * f64::EPSILON
+        );
+    }
+    Ok(())
+}

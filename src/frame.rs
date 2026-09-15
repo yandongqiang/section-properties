@@ -133,6 +133,33 @@ impl MemberHandle {
 /// floor, so the verdict is invariant under a change of units (N/m ↔ kN/mm).
 const EQUILIBRIUM_REL_TOL: f64 = 1e-6;
 
+/// Conditioning-relief coefficient for [`EquilibriumReport::is_balanced`].
+///
+/// A Euler–Bernoulli frame's stiffness matrix is ill-conditioned when its
+/// transverse/axial stiffness ratio grows: for an element the dominant
+/// conditioning driver is `A·L²/I = (L/r)²`, the square of the slenderness
+/// ratio `L/r` (with `r² = I/A` the radius of gyration). The forward error of a
+/// direct solve is `O((L/r)² · ε)`, so equilibrium residuals — which inherit
+/// that error through the recovered reactions — can legitimately reach the same
+/// relative magnitude at large slenderness. A fixed `EQUILIBRIUM_REL_TOL` would
+/// then flag a physically balanced frame as unbalanced (catastrophic
+/// cancellation of large opposing reactions).
+///
+/// `effective_rel_tol = max(EQUILIBRIUM_REL_TOL, C · λ²_max · ε)` recovers the
+/// correct verdict: `λ²_max = max_elements(L²·A/I)` is **dimensionless** and
+/// **unit-invariant** (a consistent change of the length/area/inertia units
+/// multiplies numerator and denominator by the same power, leaving the ratio
+/// unchanged), so the tolerance itself is dimensionless and unit-invariant.
+///
+/// `C = 1e-2` is an experience-calibrated safety factor: the *measured*
+/// residual of a symmetric hyperstatic portal at `λ² ≈ 2.5e14` is `~1.7e-3 ·
+/// λ² · ε` (the reaction sum cancels far below the forward-error bound, which
+/// is why the coefficient is ≪ 1), so `1e-2` is a ~6× margin while still
+/// rejecting genuine imbalance above the relax floor. Below
+/// `λ² ≈ 4.5e9` (span ≈ 42 km for the reference section) the term stays below
+/// `EQUILIBRIUM_REL_TOL` and the tolerance is exactly `1e-6`, unchanged.
+const EQUILIBRIUM_COND_FACTOR: f64 = 1e-2;
+
 /// Result of the global equilibrium check, summed **about the global origin
 /// `(0, 0)`**.
 ///
@@ -177,6 +204,11 @@ pub struct EquilibriumReport {
     /// Characteristic length of the structure: the largest absolute nodal
     /// coordinate (see [`characteristic_length`]). Private, as above.
     l_char: f64,
+    /// Conditioning-relief relative floor `C · λ²_max · ε`, where `λ²_max` is
+    /// the maximum element slenderness squared `L²·A/I` (dimensionless,
+    /// unit-invariant). `0.0` when the frame has no element. Private: it only
+    /// feeds [`Self::is_balanced`]; see [`EQUILIBRIUM_COND_FACTOR`].
+    cond_rel_floor: f64,
 }
 
 /// The two scale factors behind [`EquilibriumReport::is_balanced`]:
@@ -221,9 +253,17 @@ impl EquilibriumReport {
     /// the residual must then be **exactly** zero for the frame to be balanced.
     pub fn is_balanced(&self) -> bool {
         let (f_scale, m_scale) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
-        self.fx_residual.abs() <= EQUILIBRIUM_REL_TOL * f_scale
-            && self.fy_residual.abs() <= EQUILIBRIUM_REL_TOL * f_scale
-            && self.mz_residual.abs() <= EQUILIBRIUM_REL_TOL * m_scale
+        let rel = self.effective_rel_tol();
+        self.fx_residual.abs() <= rel * f_scale
+            && self.fy_residual.abs() <= rel * f_scale
+            && self.mz_residual.abs() <= rel * m_scale
+    }
+
+    /// Effective relative tolerance: at least [`EQUILIBRIUM_REL_TOL`], relaxed
+    /// by the conditioning floor for a slender frame so pure solver round-off
+    /// is not mistaken for a physical imbalance.
+    fn effective_rel_tol(&self) -> f64 {
+        EQUILIBRIUM_REL_TOL.max(self.cond_rel_floor)
     }
 }
 
@@ -949,6 +989,8 @@ impl FrameAnalysisResult {
         let l_char = characteristic_length(m);
         let f_mag = applied_f_mag + reaction_f_mag;
         let m_mag = applied_m_mag + reaction_m_mag;
+        let cond_rel_floor = EQUILIBRIUM_COND_FACTOR * max_element_slenderness_sq(m) * f64::EPSILON;
+        let rel = EQUILIBRIUM_REL_TOL.max(cond_rel_floor);
         let (f_scale, _m_scale) = equilibrium_scales(f_mag, m_mag, l_char);
 
         EquilibriumReport {
@@ -961,10 +1003,11 @@ impl FrameAnalysisResult {
             reaction_fx,
             reaction_fy,
             reaction_mz,
-            tolerance: EQUILIBRIUM_REL_TOL * f_scale,
+            tolerance: rel * f_scale,
             f_mag,
             m_mag,
             l_char,
+            cond_rel_floor,
         }
     }
 
@@ -1015,6 +1058,34 @@ fn characteristic_length(model: &BeamModel) -> f64 {
         l_char = l_char.max(p.x.abs()).max(p.y.abs());
     }
     l_char
+}
+
+/// Maximum element slenderness squared `λ² = L²·A/I` over all members.
+///
+/// This is the dominant conditioning driver of an Euler–Bernoulli element
+/// stiffness matrix: the forward error of a direct solve is `O(λ²·ε)`, and the
+/// recovered reactions inherit that error, so equilibrium residuals of a
+/// physically balanced frame can legitimately reach the same relative
+/// magnitude. `0.0` for an empty model or a member with `I = 0` (the latter is
+/// rejected upstream, so it does not arise in a solved frame).
+///
+/// **Dimensionless and unit-invariant**: `L²·A/I` has units `m²·m²/m⁴ = 1`, and
+/// a consistent change of length/area/inertia units multiplies numerator and
+/// denominator by the same power, leaving the ratio unchanged. This is what
+/// lets the conditioning floor feed a *relative* tolerance without breaking
+/// unit invariance of the verdict.
+fn max_element_slenderness_sq(model: &BeamModel) -> f64 {
+    let mut lambda_sq: f64 = 0.0;
+    for el in &model.elements {
+        let p_i = model.nodes[el.node_i].point();
+        let p_j = model.nodes[el.node_j].point();
+        let l = el.length(p_i, p_j);
+        let i = el.section.second_moment;
+        if i > 0.0 {
+            lambda_sq = lambda_sq.max(l * l * el.section.area / i);
+        }
+    }
+    lambda_sq
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,7 +1386,10 @@ mod reduced_system_single_source_tests {
 mod equilibrium_tolerance_tests {
     use super::*;
 
-    /// Build a report with the given residuals and raw magnitudes.
+    /// Build a report with the given residuals and raw magnitudes. The
+    /// conditioning floor is left at `0.0`, so the effective tolerance is
+    /// exactly `EQUILIBRIUM_REL_TOL`: these tests exercise the scale/unit
+    /// behaviour, not the conditioning relief (which has its own module below).
     fn report(
         fx_residual: f64,
         fy_residual: f64,
@@ -1339,6 +1413,7 @@ mod equilibrium_tolerance_tests {
             f_mag,
             m_mag,
             l_char,
+            cond_rel_floor: 0.0,
         }
     }
 
@@ -1403,6 +1478,107 @@ mod equilibrium_tolerance_tests {
                 5.0e2
             )
             .is_balanced()
+        );
+    }
+
+    /// Build a report with an explicit conditioning floor, so the anti-masking
+    /// test can exercise `cond_rel_floor > 0` directly.
+    fn report_with_cond(
+        fx_residual: f64,
+        fy_residual: f64,
+        mz_residual: f64,
+        f_mag: f64,
+        m_mag: f64,
+        l_char: f64,
+        cond_rel_floor: f64,
+    ) -> EquilibriumReport {
+        let (f_scale, _) = equilibrium_scales(f_mag, m_mag, l_char);
+        let rel = EQUILIBRIUM_REL_TOL.max(cond_rel_floor);
+        EquilibriumReport {
+            fx_residual,
+            fy_residual,
+            mz_residual,
+            applied_fx: 0.0,
+            applied_fy: 0.0,
+            applied_mz: 0.0,
+            reaction_fx: 0.0,
+            reaction_fy: 0.0,
+            reaction_mz: 0.0,
+            tolerance: rel * f_scale,
+            f_mag,
+            m_mag,
+            l_char,
+            cond_rel_floor,
+        }
+    }
+
+    #[test]
+    fn conditioning_floor_accepts_roundoff_rejects_genuine_imbalance() {
+        // A slender frame: λ² ≈ 2.5e14, so the conditioning floor dominates.
+        // cond_floor = 1e-2 · 2.5e14 · ε ≈ 5.55e-4.
+        let lambda_sq = 2.5e14;
+        let cond_floor = EQUILIBRIUM_COND_FACTOR * lambda_sq * f64::EPSILON;
+        assert!(
+            cond_floor > EQUILIBRIUM_REL_TOL,
+            "this test needs a floor above the base tolerance"
+        );
+
+        let (f_scale, m_scale) = equilibrium_scales(1.0e12, 0.0, 5.0e5);
+
+        // (a) Residual at 10% of the conditioning floor: pure round-off,
+        //     must be accepted.
+        assert!(
+            report_with_cond(
+                0.1 * cond_floor * f_scale,
+                0.1 * cond_floor * f_scale,
+                0.1 * cond_floor * m_scale,
+                1.0e12,
+                0.0,
+                5.0e5,
+                cond_floor
+            )
+            .is_balanced(),
+            "round-off below the conditioning floor must be accepted"
+        );
+
+        // (b) Residual at 10× the conditioning floor: a genuine imbalance,
+        //     must be rejected — the floor must not mask it.
+        assert!(
+            !report_with_cond(
+                10.0 * cond_floor * f_scale,
+                10.0 * cond_floor * f_scale,
+                10.0 * cond_floor * m_scale,
+                1.0e12,
+                0.0,
+                5.0e5,
+                cond_floor
+            )
+            .is_balanced(),
+            "imbalance above the conditioning floor must be rejected"
+        );
+    }
+
+    #[test]
+    fn conditioning_floor_is_dimensionless_and_unit_invariant() {
+        // λ² = L²·A/I is dimensionless: the same physical element expressed in
+        // SI (m, m², m⁴) and kN/mm (mm, mm², mm⁴) gives the same λ².
+        let l_si = 1.0e6_f64;
+        let a_si = 5.0e-3_f64;
+        let i_si = 2.0e-5_f64;
+        let lambda_sq_si = l_si * l_si * a_si / i_si;
+
+        let l_kmm = 1.0e9_f64; // 1e6 m = 1e9 mm
+        let a_kmm = 5.0e3_f64; // 5e-3 m² = 5e3 mm²
+        let i_kmm = 2.0e7_f64; // 2e-5 m⁴ = 2e7 mm⁴
+        let lambda_sq_kmm = l_kmm * l_kmm * a_kmm / i_kmm;
+
+        // The two values differ only by round-off in the multiplications.
+        let avg = 0.5 * (lambda_sq_si + lambda_sq_kmm);
+        assert!(
+            (lambda_sq_si - lambda_sq_kmm).abs() <= 10.0 * f64::EPSILON * avg,
+            "λ² must be unit-invariant (SI={}, kN/mm={})",
+            lambda_sq_si,
+            lambda_sq_kmm
         );
     }
 }
