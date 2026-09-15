@@ -146,18 +146,25 @@ const EQUILIBRIUM_REL_TOL: f64 = 1e-6;
 /// cancellation of large opposing reactions).
 ///
 /// `effective_rel_tol = max(EQUILIBRIUM_REL_TOL, C · λ²_max · ε)` recovers the
-/// correct verdict: `λ²_max = max_elements(L²·A/I)` is **dimensionless** and
-/// **unit-invariant** (a consistent change of the length/area/inertia units
-/// multiplies numerator and denominator by the same power, leaving the ratio
-/// unchanged), so the tolerance itself is dimensionless and unit-invariant.
+/// correct verdict: `λ²_max = max_elements(L²·A/I)` is a **dimensionless** and
+/// **unit-invariant** element-level slenderness/conditioning proxy (a consistent
+/// change of the length/area/inertia units multiplies numerator and denominator
+/// by the same power, leaving the ratio unchanged), so the tolerance itself is
+/// dimensionless and unit-invariant. It is not a strict bound on the full
+/// assembled stiffness matrix condition number — the global conditioning may be
+/// worse — but it captures the dominant per-element driver and biases the
+/// tolerance toward being tight rather than loose.
 ///
-/// `C = 1e-2` is an experience-calibrated safety factor: the *measured*
-/// residual of a symmetric hyperstatic portal at `λ² ≈ 2.5e14` is `~1.7e-3 ·
-/// λ² · ε` (the reaction sum cancels far below the forward-error bound, which
-/// is why the coefficient is ≪ 1), so `1e-2` is a ~6× margin while still
-/// rejecting genuine imbalance above the relax floor. Below
-/// `λ² ≈ 4.5e9` (span ≈ 42 km for the reference section) the term stays below
-/// `EQUILIBRIUM_REL_TOL` and the tolerance is exactly `1e-6`, unchanged.
+/// `C = 1e-2` is an **empirically calibrated** safety factor, not a rigorous
+/// error upper bound. It was calibrated against the measured residual of a
+/// large-scale symmetric hyperstatic portal regression case (`λ² ≈ 2.5e14`,
+/// measured residual `~1.7e-3 · λ² · ε`); the coefficient is ≪ 1 because
+/// reaction cancellation reduces the residual far below the pessimistic
+/// forward-error bound. The calibration is based on this specific topology and
+/// load pattern; other frame configurations may exhibit different cancellation
+/// behaviour. Below `λ² ≈ 4.5e9` (span ≈ 42 km for the reference section) the
+/// term stays below `EQUILIBRIUM_REL_TOL` and the tolerance is exactly `1e-6`,
+/// unchanged.
 const EQUILIBRIUM_COND_FACTOR: f64 = 1e-2;
 
 /// Result of the global equilibrium check, summed **about the global origin
@@ -188,10 +195,14 @@ pub struct EquilibriumReport {
     /// Sum of reaction moments about the origin, including `x·Ry − y·Rx`.
     pub reaction_mz: f64,
     /// Absolute force tolerance applied by [`Self::is_balanced`], equal to
-    /// `EQUILIBRIUM_REL_TOL · force_scale`, where `force_scale` is the total
-    /// force magnitude present (applied loads plus recovered reactions, with the
-    /// moments converted to an equivalent force through `l_char`). Purely
-    /// relative: there is no absolute floor.
+    /// `effective_rel_tol · force_scale`, where `force_scale` is the total force
+    /// magnitude present (applied loads plus recovered reactions, with the
+    /// moments converted to an equivalent force through `l_char`). The effective
+    /// relative tolerance is `max(EQUILIBRIUM_REL_TOL, cond_rel_floor)`: the
+    /// base `1e-6` at normal slenderness, raised by a dimensionless
+    /// element-level conditioning proxy for highly slender frames (see
+    /// [`EQUILIBRIUM_COND_FACTOR`]). Purely relative: there is no absolute
+    /// floor.
     pub tolerance: f64,
     /// Σ of the absolute applied and reaction **force** magnitudes actually
     /// present (per load term, not per resultant — a self-cancelling load pair
@@ -245,12 +256,19 @@ impl EquilibriumReport {
     /// Whether all three residuals are within a tolerance **relative** to the
     /// analysed system's own magnitudes (see [`equilibrium_scales`]).
     ///
-    /// Both tolerances are `EQUILIBRIUM_REL_TOL` times a scale derived from the
-    /// forces and moments actually present, so the verdict is invariant under a
+    /// The force residuals (`fx`, `fy`) are compared against `force_scale` and
+    /// the moment residual (`mz`) against `moment_scale`, both scaled by the
+    /// conditioning-aware effective relative tolerance
+    /// [`Self::effective_rel_tol`]. At normal slenderness this is exactly
+    /// [`EQUILIBRIUM_REL_TOL`] (`1e-6`); for highly slender frames it is raised
+    /// by a dimensionless element-level conditioning proxy (see
+    /// [`EQUILIBRIUM_COND_FACTOR`]) so that pure solver round-off is not
+    /// mistaken for a physical imbalance. The verdict is invariant under a
     /// change of units and the moment check stays sensitive even when a load
     /// system is symmetric about the origin (`applied_mz == 0`). There is no
-    /// absolute floor: if every relevant magnitude is zero the scale is zero and
-    /// the residual must then be **exactly** zero for the frame to be balanced.
+    /// absolute floor: if every relevant magnitude is zero the scale is zero
+    /// and the residual must then be **exactly** zero for the frame to be
+    /// balanced.
     pub fn is_balanced(&self) -> bool {
         let (f_scale, m_scale) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
         let rel = self.effective_rel_tol();
@@ -1062,12 +1080,17 @@ fn characteristic_length(model: &BeamModel) -> f64 {
 
 /// Maximum element slenderness squared `λ² = L²·A/I` over all members.
 ///
-/// This is the dominant conditioning driver of an Euler–Bernoulli element
-/// stiffness matrix: the forward error of a direct solve is `O(λ²·ε)`, and the
-/// recovered reactions inherit that error, so equilibrium residuals of a
-/// physically balanced frame can legitimately reach the same relative
-/// magnitude. `0.0` for an empty model or a member with `I = 0` (the latter is
-/// rejected upstream, so it does not arise in a solved frame).
+/// This is a dimensionless element-level conditioning proxy for an
+/// Euler–Bernoulli stiffness matrix: the forward error of a direct solve is
+/// `O(λ²·ε)`, and the recovered reactions inherit that error, so equilibrium
+/// residuals of a physically balanced frame can legitimately reach the same
+/// relative magnitude. It is not a strict bound on the full assembled frame
+/// stiffness matrix condition number.
+///
+/// Only elements with `I > 0` contribute to the maximum; elements with
+/// non-positive `second_moment` are skipped (defensive guard, since
+/// `BeamSection::new` does not validate `I`). Returns `0.0` for an empty model
+/// or when no element has `I > 0`.
 ///
 /// **Dimensionless and unit-invariant**: `L²·A/I` has units `m²·m²/m⁴ = 1`, and
 /// a consistent change of length/area/inertia units multiplies numerator and
