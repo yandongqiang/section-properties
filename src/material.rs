@@ -289,7 +289,18 @@ pub mod presets {
     };
 
     // Timber (GL24h)
-    /// Glued laminated timber GL24h (EN 14080)
+    /// Glued laminated timber GL24h (EN 14080).
+    ///
+    /// **G is an independently specified engineering constant, NOT computed
+    /// from the isotropic relation** `G = E/(2(1+ν))`. Timber is orthotropic:
+    /// `E` is the mean modulus parallel to grain (`E₀,mean = 11.6 GPa`),
+    /// `G` is the mean shear modulus (`G,mean ≈ 0.725 GPa`), and `ν` is the
+    /// Poisson's ratio. The isotropic formula would give `G ≈ 4.30 GPa`,
+    /// which is ~6× too high and would produce incorrect torsional stiffness.
+    ///
+    /// Source: EN 14080:2013, GL24h strength class. The shear modulus value
+    /// (0.725 GPa) is consistent with the EN 14080 range (0.65–0.72 GPa)
+    /// used in timber engineering practice.
     pub const TIMBER_GL24H: Material = Material {
         youngs_modulus: 11.6e9,
         shear_modulus: 0.725e9,
@@ -364,5 +375,34 @@ mod tests {
             .with_color(255, 0, 0);
         assert_eq!(mat.yield_strength, 400e6);
         assert_eq!(mat.color, Some((255, 0, 0)));
+    }
+
+    /// Regression test: TIMBER_GL24H stores independently specified
+    /// engineering constants (orthotropic timber), NOT isotropic G.
+    ///
+    /// Timber is orthotropic — `G` is the mean shear modulus from EN 14080,
+    /// not `E/(2(1+ν))`. This test protects the intended values against
+    /// accidental "fixes" that would replace G with the isotropic relation.
+    #[test]
+    fn timber_gl24h_orthotropic_constants() {
+        let mat = TIMBER_GL24H;
+
+        // Exact values from EN 14080 GL24h.
+        assert!((mat.youngs_modulus - 11.6e9).abs() < 1e3, "E = 11.6 GPa");
+        assert!((mat.shear_modulus - 0.725e9).abs() < 1e3, "G = 0.725 GPa");
+        assert!((mat.poissons_ratio - 0.35).abs() < 1e-9, "nu = 0.35");
+        assert!((mat.density - 420.0).abs() < 1e-6, "rho = 420 kg/m³");
+
+        // G must NOT equal the isotropic relation E/(2(1+ν)).
+        let g_isotropic = mat.youngs_modulus / (2.0 * (1.0 + mat.poissons_ratio));
+        assert!(
+            (mat.shear_modulus - g_isotropic).abs() > 1e9,
+            "TIMBER_GL24H G ({:.3} GPa) must differ from isotropic G ({:.3} GPa)",
+            mat.shear_modulus / 1e9,
+            g_isotropic / 1e9
+        );
+
+        // Material must pass validation.
+        assert!(mat.is_valid(), "TIMBER_GL24H must be valid");
     }
 }
