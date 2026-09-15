@@ -11,13 +11,20 @@ use crate::stress::{SectionLoads, StressAtPoint};
 
 /// Compute FEM stresses at all mesh nodes.
 ///
+/// `nu` is the Poisson's ratio of the material. It enters the warping/shear
+/// FEM solution (shear load vectors, shear area `δ_s = 2(1+ν)·C`, shear
+/// centre, shear coefficients) and the Tri6 element stress recovery. Passing
+/// the wrong value (e.g. hard-coded 0.3 for a non-steel material) produces
+/// silently incorrect shear stress and shear centre results.
+///
 /// Returns `Err` if FEM mesh generation or solving fails.
 pub fn calculate_stress_fem(
     section: &Section,
     props: &SectionProperties,
     loads: SectionLoads,
+    nu: f64,
 ) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
-    let fem = compute_fem_solution(section, props, 0.3)?;
+    let fem = compute_fem_solution(section, props, nu)?;
     compute_stress_from_fem(&fem, props, loads)
 }
 

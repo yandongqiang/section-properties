@@ -197,11 +197,15 @@ impl StressAnalysis {
         let area = self.props.area;
 
         // Try FEM Tri6 stress analysis first
-        let fem_points =
-            match crate::stress_fem::calculate_stress_fem(&self.section, &self.props, loads) {
-                Ok(points) => Some(points),
-                Err(_) => None,
-            };
+        let fem_points = match crate::stress_fem::calculate_stress_fem(
+            &self.section,
+            &self.props,
+            loads,
+            self.material.poissons_ratio,
+        ) {
+            Ok(points) => Some(points),
+            Err(_) => None,
+        };
 
         if let Some(fem_points) = fem_points {
             let mut max_sigma_z = f64::NEG_INFINITY;
@@ -856,5 +860,159 @@ mod tests {
                 s.y
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Poisson ratio propagation (Phase 18.1)
+    // -------------------------------------------------------------------------
+    //
+    // `calculate_stress_fem` previously hard-coded ν = 0.3, so non-steel
+    // materials (aluminium ν=0.33, concrete ν=0.20, timber ν=0.35) got
+    // silently wrong shear/torsion stress. These tests verify that the
+    // material's ν is now propagated.
+
+    /// Build a rectangular section for stress tests.
+    fn rect_section() -> Section {
+        let poly = Polygon::new(vec![
+            Point::new(-0.05, -0.05),
+            Point::new(0.05, -0.05),
+            Point::new(0.05, 0.05),
+            Point::new(-0.05, 0.05),
+        ]);
+        Section::new(poly, vec![])
+    }
+
+    /// A load case that exercises ν-dependent shear stress terms (vx, vy, mzz).
+    /// Pure axial or pure bending (mxx/myy) do not depend on ν.
+    fn shear_loads() -> SectionLoads {
+        SectionLoads {
+            n: 0.0,
+            vx: 5e3,
+            vy: 10e3,
+            mxx: 0.0,
+            myy: 0.0,
+            m11: 0.0,
+            m22: 0.0,
+            mzz: 1e3,
+        }
+    }
+
+    /// Test A — non-steel ν differential: changing ν must change shear stress.
+    ///
+    /// ν enters the warping/shear FEM via shear load vectors, shear area
+    /// `δ_s = 2(1+ν)·C`, shear centre, and shear coefficients. A load case
+    /// with transverse shear (vx, vy) or torsion (mzz) must therefore produce
+    /// different stress results for different ν.
+    #[test]
+    fn fem_stress_depends_on_poissons_ratio() {
+        let section = rect_section();
+        let loads = shear_loads();
+
+        let mat_030 = Material::new(200e9, 0.30, 7850.0, "nu030");
+        let mat_033 = Material::new(200e9, 0.33, 7850.0, "nu033");
+        let mat_020 = Material::new(200e9, 0.20, 7850.0, "nu020");
+
+        let r_030 = StressAnalysis::new(section.clone(), mat_030).calculate_stress(loads);
+        let r_033 = StressAnalysis::new(section.clone(), mat_033).calculate_stress(loads);
+        let r_020 = StressAnalysis::new(section.clone(), mat_020).calculate_stress(loads);
+
+        // Shear stress (max_tau) must differ — it flows through the ν-dependent
+        // shear area and shear coefficients.
+        assert!(
+            (r_030.max_tau - r_033.max_tau).abs() > 1e-6,
+            "ν=0.30 vs ν=0.33: max_tau should differ ({} vs {})",
+            r_030.max_tau,
+            r_033.max_tau
+        );
+        assert!(
+            (r_030.max_tau - r_020.max_tau).abs() > 1e-6,
+            "ν=0.30 vs ν=0.20: max_tau should differ ({} vs {})",
+            r_030.max_tau,
+            r_020.max_tau
+        );
+
+        // Von Mises also changes because it includes shear stress.
+        assert!(
+            (r_030.max_von_mises - r_033.max_von_mises).abs() > 1e-6,
+            "ν=0.30 vs ν=0.33: max_von_mises should differ ({} vs {})",
+            r_030.max_von_mises,
+            r_033.max_von_mises
+        );
+    }
+
+    /// Test B — steel regression: ν=0.30 through the new API path must give
+    /// the same results as before the fix (when 0.3 was hard-coded).
+    #[test]
+    fn fem_stress_steel_nu_030_unchanged() {
+        let section = rect_section();
+        let loads = shear_loads();
+
+        // Through public API with STEEL_S355 (ν=0.30).
+        let r_api = StressAnalysis::new(section.clone(), STEEL_S355).calculate_stress(loads);
+
+        // Through internal helper with explicit ν=0.30.
+        let props = SectionProperties::from_section(&section);
+        let r_internal =
+            crate::stress_fem::calculate_stress_fem(&section, &props, loads, 0.30).unwrap();
+
+        // Max sigma_z and max_tau must match (same ν, same computation path).
+        let internal_max_sigma_z = r_internal
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, p| a.max(p.sigma_z));
+        let internal_max_tau = r_internal.iter().fold(0.0f64, |a, p| a.max(p.tau_zxy));
+
+        assert!(
+            (r_api.max_sigma_z - internal_max_sigma_z).abs() < 1e-6,
+            "steel regression: max_sigma_z API={} internal={}",
+            r_api.max_sigma_z,
+            internal_max_sigma_z
+        );
+        assert!(
+            (r_api.max_tau - internal_max_tau).abs() < 1e-6,
+            "steel regression: max_tau API={} internal={}",
+            r_api.max_tau,
+            internal_max_tau
+        );
+    }
+
+    /// Test C — public API propagation: `StressAnalysis::new(section, material)`
+    /// must pass `material.poissons_ratio` to the FEM, not a hard-coded value.
+    ///
+    /// We verify this by comparing the public API result against an internal
+    /// call with the material's explicit ν. If the public API were still
+    /// hard-coding 0.3, this test would fail for aluminium (ν=0.33).
+    #[test]
+    fn public_api_propagates_material_poissons_ratio() {
+        let section = rect_section();
+        let loads = shear_loads();
+
+        // Aluminium: ν=0.33, E=70e9.
+        let aluminium = Material::new(70e9, 0.33, 2700.0, "Aluminium");
+        let nu = aluminium.poissons_ratio;
+
+        // Through public API.
+        let r_api = StressAnalysis::new(section.clone(), aluminium).calculate_stress(loads);
+
+        // Through internal helper with the same explicit ν.
+        let props = SectionProperties::from_section(&section);
+        let r_internal =
+            crate::stress_fem::calculate_stress_fem(&section, &props, loads, nu).unwrap();
+
+        let internal_max_tau = r_internal.iter().fold(0.0f64, |a, p| a.max(p.tau_zxy));
+
+        assert!(
+            (r_api.max_tau - internal_max_tau).abs() < 1e-6,
+            "public API must propagate ν: max_tau API={} internal(ν={})={}",
+            r_api.max_tau,
+            nu,
+            internal_max_tau
+        );
+
+        // Sanity: the result must also differ from steel (ν=0.30).
+        let r_steel = StressAnalysis::new(section, STEEL_S355).calculate_stress(loads);
+        assert!(
+            (r_api.max_tau - r_steel.max_tau).abs() > 1e-6,
+            "aluminium (ν=0.33) and steel (ν=0.30) must give different shear stress"
+        );
     }
 }
