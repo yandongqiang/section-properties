@@ -195,29 +195,19 @@ fn solve_with_fallback(
     f: &[f64],
 ) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
     if let Some(s) = solver {
-        if let Ok(w1) = s.solve(f) {
-            if let Ok(w2) = s.solve(c) {
-                let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
-                let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-                if ct_w1.abs() > 1e-15 {
-                    let lambda = ct_w2 / ct_w1;
-                    let u: Vec<f64> = w1
-                        .iter()
-                        .zip(w2.iter())
-                        .map(|(&a, &b)| a - lambda * b)
-                        .collect();
-                    // Relative residual of K u - f + lambda c = 0.
-                    let prod = k_reg.matvec(&u);
-                    let mut worst = 0.0f64;
-                    let mut f_norm = 0.0f64;
-                    for i in 0..prod.len() {
-                        worst = worst.max((prod[i] - f[i] + lambda * c[i]).abs());
-                        f_norm = f_norm.max(f[i].abs());
-                    }
-                    if worst <= 1e-6 * f_norm.max(1e-300) {
-                        return Ok(u);
-                    }
-                }
+        // solve_full returns (u, lambda) for the Lagrange system
+        // [K_reg  C; C^T  0] [u; lambda] = [f; 0].
+        if let Ok((u, lambda)) = s.solve_full(f) {
+            // Verify relative residual: K_reg * u + C * lambda - F ≈ 0.
+            let prod = k_reg.matvec(&u);
+            let mut worst = 0.0f64;
+            let mut f_norm = 0.0f64;
+            for i in 0..prod.len() {
+                worst = worst.max((prod[i] + c[i] * lambda - f[i]).abs());
+                f_norm = f_norm.max(f[i].abs());
+            }
+            if worst <= 1e-6 * f_norm.max(1e-300) {
+                return Ok(u);
             }
         }
     }
@@ -866,8 +856,17 @@ pub fn compute_fem_warping_solution(
         0.0
     };
 
-    // Use exact solution if: exact solution exists, residual is finite, and residual <= threshold
-    let use_exact = omega_exact.is_some() && exact_residual.is_finite() && exact_residual <= 1e-8;
+    // Use exact solution if: exact solution exists, residual is finite, and
+    // residual <= 1e-6.
+    //
+    // The threshold matches the regularized-solver acceptance criterion and
+    // the parity-test requirement.  A SparseLU factorisation of the (n+1)×(n+1)
+    // augmented Lagrange matrix has residual O(n · ε_machine · κ(K)); for
+    // n ≈ 1241 (channel section) this is ~1e-7, which is well within 1e-6 but
+    // would be rejected by a stricter 1e-8 cutoff — forcing the code to fall
+    // back to the regularised solution whose residual is actually *worse*
+    // (~1e-6, dominated by the εI perturbation).
+    let use_exact = omega_exact.is_some() && exact_residual.is_finite() && exact_residual <= 1e-6;
 
     let (omega_final, used_exact) = if use_exact {
         eprintln!("[DIAG] Using exact (non-regularized) K solution");
@@ -877,51 +876,30 @@ pub fn compute_fem_warping_solution(
         (omega.clone(), false)
     };
 
-    // Compute regularized solution residual for comparison
-    // Use original K and full Lagrange residual (including lambda and constraint)
+    // Compute regularized solution residual for comparison.
+    // Use original K and full Lagrange residual (including lambda and constraint).
     let regularized_residual = if !use_exact {
-        // Need to compute lambda for the regularized solution
-        // Reuse the solver to compute w1 = K_reg^{-1} F and w2 = K_reg^{-1} C
         let mut k_global_compressed = k_global.clone();
         k_global_compressed.compress();
 
-        // Solve K_reg * w1 = F and K_reg * w2 = C
-        // Since omega was already solved with the regularized system, we can compute lambda
-        // lambda = (C^T * w2) / (C^T * w1) where w1 = K_reg^{-1} F, w2 = K_reg^{-1} C
-        // But omega = w1 - lambda * w2, so we can recover lambda if needed
-        // For verification, we use the original K and compute full residual
-
-        // First, compute lambda for this omega using the regularized system
-        // We need w1 and w2. Since we have the solver, we can solve for them.
+        // Recover the Lagrange multiplier lambda from the known omega.
+        // omega satisfies the regularized system: K_reg * omega + C * lambda = F.
+        // Rearranging: C * lambda = F - K_reg * omega, and by least-squares:
+        //   lambda = C^T * (F - K_reg * omega) / (C^T * C).
+        // This avoids re-solving with DirectLagrangeSolver (which returns
+        // constrained solutions, not raw K_reg^{-1} * b, making the previous
+        // w1/w2 ratio formula incorrect).
         let mut k_reg_compressed = k_reg.clone();
         k_reg_compressed.compress();
-
-        // Try to create the solver for computing lambda
-        let solver_reg_opt = crate::fea::DirectLagrangeSolver::with_kernel(
-            crate::fea::LagrangeKernel::Skyline,
-            &k_reg_compressed,
-            &c_global,
-            crate::fea::SolverOptions {
-                auto_regularize_singular: false,
-            },
-        )
-        .ok();
-
-        let lambda_reg = if let Some(solver_reg) = solver_reg_opt {
-            let w1 = solver_reg
-                .solve(&f_torsion)
-                .unwrap_or_else(|_| vec![0.0; n]);
-            let w2 = solver_reg.solve(&c_global).unwrap_or_else(|_| vec![0.0; n]);
-            let ct_w1: f64 = c_global.iter().zip(w1.iter()).map(|(&c, &w)| c * w).sum();
-            let ct_w2: f64 = c_global.iter().zip(w2.iter()).map(|(&c, &w)| c * w).sum();
-            if ct_w1.abs() > 1e-15 {
-                ct_w2 / ct_w1
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
+        let k_reg_omega = k_reg_compressed.matvec(&omega);
+        let mut ct_r = 0.0f64;
+        let mut ct_c = 0.0f64;
+        for i in 0..n {
+            let residual_i = f_torsion[i] - k_reg_omega[i];
+            ct_r += c_global[i] * residual_i;
+            ct_c += c_global[i] * c_global[i];
+        }
+        let lambda_reg = if ct_c.abs() > 1e-30 { ct_r / ct_c } else { 0.0 };
 
         // Full Lagrange residual with ORIGINAL K
         let prod = k_global_compressed.matvec(&omega);
