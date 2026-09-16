@@ -401,8 +401,11 @@ fn solve_compare_exact_vs_regularized(
     f_norm = f_norm.max(ct_omega.abs());
     let exact_residual = worst / f_norm.max(1e-300);
 
-    // Check if exact solution passes residual check
-    let failure_kind = if exact_residual > 1e-8 {
+    // Check if exact solution passes residual check.  The threshold must
+    // match the `use_exact` acceptance criterion in compute_fem_warping_solution
+    // (1e-6); a stricter value here would print a misleading
+    // "ResidualCheckFailed" diagnostic even when the exact solution is used.
+    let failure_kind = if exact_residual > 1e-6 {
         Some(ExactSolverFailure::ResidualCheckFailed(exact_residual))
     } else {
         None
@@ -574,8 +577,10 @@ fn iccg_lagrange_solve(
     let w2 = solve_one(c);
     let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
     let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-    let lambda = if ct_w1.abs() > 1e-15 {
-        ct_w2 / ct_w1
+    // u = w1 - lambda*w2 with constraint c^T u = 0 gives
+    // lambda = (c^T w1) / (c^T w2) = ct_w1 / ct_w2.
+    let lambda = if ct_w2.abs() > 1e-15 {
+        ct_w1 / ct_w2
     } else {
         0.0
     };

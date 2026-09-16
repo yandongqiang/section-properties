@@ -2297,7 +2297,9 @@ mod skyline_tests {
         let w2 = cg_solve(&k_reg, &c, 200000, 1e-13).x;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
         let ct_w1: f64 = c.iter().zip(w1.iter()).map(|(&a, &b)| a * b).sum();
-        let lambda = ct_w2 / ct_w1;
+        // u = w1 - lambda*w2 with constraint c^T u = 0 gives
+        // lambda = (c^T w1) / (c^T w2) = ct_w1 / ct_w2.
+        let lambda = ct_w1 / ct_w2;
         let u_ref: Vec<f64> = w1
             .iter()
             .zip(w2.iter())

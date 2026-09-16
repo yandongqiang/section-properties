@@ -1108,8 +1108,10 @@ pub mod pardiso {
             }
             // Scale-invariant tolerance for Lagrange multiplier
             let near_zero_tol = NEAR_ZERO_TOL_BASE * self.scale.max(1.0);
-            let lambda = if ct_w1.abs() > near_zero_tol {
-                ct_w2 / ct_w1
+            // u = w1 - lambda*w2 with constraint c^T u = 0 gives
+            // lambda = (c^T w1) / (c^T w2) = ct_w1 / ct_w2.
+            let lambda = if ct_w2.abs() > near_zero_tol {
+                ct_w1 / ct_w2
             } else {
                 0.0
             };
