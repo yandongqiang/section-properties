@@ -629,6 +629,107 @@ pub struct FemWarpingSolution {
     pub omega_max: f64,
 }
 
+/// Apply one step of iterative refinement to the regularized Lagrange solution.
+///
+/// The regularized solve `(K + εI)·ω + C·λ = F` satisfies the perturbed
+/// system exactly but has residual `~ε·ω` w.r.t. the **original** K.
+/// For large systems (n > `MAX_DENSE_LU_N`) the exact non-regularized
+/// solver is skipped, so this `O(ε·ω)` residual is the best we can achieve
+/// without refinement.  One correction step with the same factored `(K+εI)`
+/// reduces the residual to `O(ε²·ω)`, turning a ~2e-6 residual into ~1e-15.
+///
+/// The correction is cheap (one back-substitution with the existing
+/// factorization) and safe (the update is `O(ε·ω)`, well within the
+/// regularization accuracy).
+fn refine_omega(
+    solver: &Option<crate::fea::DirectLagrangeSolver>,
+    k_global: &SparseMatrix,
+    k_reg: &SparseMatrix,
+    c: &[f64],
+    f: &[f64],
+    omega: Vec<f64>,
+    n: usize,
+) -> Vec<f64> {
+    let s = match solver {
+        Some(s) => s,
+        None => return omega,
+    };
+
+    let mut k_global_c = k_global.clone();
+    k_global_c.compress();
+    let mut k_reg_c = k_reg.clone();
+    k_reg_c.compress();
+
+    // Recover λ via least-squares: λ = Cᵀ·(F − K_reg·ω) / (Cᵀ·C)
+    let k_reg_omega = k_reg_c.matvec(&omega);
+    let (mut ct_r, mut ct_c) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        let ri = f[i] - k_reg_omega[i];
+        ct_r += c[i] * ri;
+        ct_c += c[i] * c[i];
+    }
+    let lambda = if ct_c.abs() > 1e-30 { ct_r / ct_c } else { 0.0 };
+
+    // Residual w.r.t. original K: r = F − K·ω − C·λ
+    let k_omega = k_global_c.matvec(&omega);
+    let mut residual = vec![0.0f64; n];
+    for i in 0..n {
+        residual[i] = f[i] - k_omega[i] - c[i] * lambda;
+    }
+
+    let res_norm = residual.iter().fold(0.0f64, |m, &r| m.max(r.abs()));
+    let f_norm = f.iter().fold(0.0f64, |m, &fi| m.max(fi.abs()));
+    let rel_res = res_norm / f_norm.max(1e-300);
+
+    // If residual is already tiny, no refinement needed
+    if rel_res <= 1e-12 {
+        return omega;
+    }
+
+    // Correction solve: (K_reg, C)·(δ, μ) = (r, 0)
+    let (delta, _mu) = match s.solve_full(&residual) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("[DIAG] Refinement skipped: correction solve failed");
+            return omega;
+        }
+    };
+
+    let mut omega_refined = omega.clone();
+    for i in 0..n {
+        omega_refined[i] += delta[i];
+    }
+
+    // Accept refinement only if it actually reduces the residual.
+    let k_omega_r = k_global_c.matvec(&omega_refined);
+    let mut refined_worst = 0.0f64;
+    for i in 0..n {
+        let r1 = k_omega_r[i] + c[i] * (lambda + _mu) - f[i];
+        refined_worst = refined_worst.max(r1.abs());
+    }
+    let ct_omega_r: f64 = c
+        .iter()
+        .zip(omega_refined.iter())
+        .map(|(&ci, &w)| ci * w)
+        .sum();
+    refined_worst = refined_worst.max(ct_omega_r.abs());
+    let refined_rel = refined_worst / f_norm.max(ct_omega_r.abs()).max(1e-300);
+
+    if refined_rel < rel_res {
+        eprintln!(
+            "[DIAG] Iterative refinement: residual {:.2e} -> {:.2e}",
+            rel_res, refined_rel
+        );
+        omega_refined
+    } else {
+        eprintln!(
+            "[DIAG] Refinement skipped: residual not improved ({:.2e} -> {:.2e})",
+            rel_res, refined_rel
+        );
+        omega
+    }
+}
+
 /// Unified FEM warping analysis: single mesh → assemble → solve pass.
 /// Produces all warping properties, stress results, and shear areas in one pass.
 pub fn compute_fem_warping_solution(
@@ -659,6 +760,30 @@ pub fn compute_fem_warping_solution(
     let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
     let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
     let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
+
+    // Filter out elements whose centroid is outside the section.
+    // The bridged triangulation can produce spurious elements outside
+    // the section boundary for sections with holes.
+    let before_count = clean_elements.len();
+    let clean_elements: Vec<[usize; 3]> = clean_elements
+        .iter()
+        .filter(|tri| {
+            let p0 = &mesh.nodes[tri[0]];
+            let p1 = &mesh.nodes[tri[1]];
+            let p2 = &mesh.nodes[tri[2]];
+            let centroid = Point::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0);
+            section.contains_point(centroid)
+        })
+        .copied()
+        .collect();
+    if clean_elements.len() < before_count {
+        eprintln!(
+            "[DIAG] Filtered {} elements outside section ({} -> {})",
+            before_count - clean_elements.len(),
+            before_count,
+            clean_elements.len()
+        );
+    }
 
     let mut used_nodes = vec![false; mesh.nodes.len()];
     for tri in &clean_elements {
@@ -817,6 +942,11 @@ pub fn compute_fem_warping_solution(
     // Try exact solve first; if it fails residual check, use regularized
     let omega = solve_with_fallback(&solver, &k_reg, &c_global, &f_torsion)?;
 
+    // Iterative refinement: reduce regularized residual from O(eps*omega) to
+    // O(eps^2*omega). Essential for large systems (n > MAX_DENSE_LU_N) where
+    // the exact non-regularized solver is skipped.
+    let omega = refine_omega(&solver, &k_global, &k_reg, &c_global, &f_torsion, omega, n);
+
     // Verify exact solution residual if available - FULL LAGRANGE RESIDUAL
     // Compute exact_residual first so it's available for FemWarpingSolution
     let exact_residual = if let Some(ref oe) = omega_exact {
@@ -934,6 +1064,7 @@ pub fn compute_fem_warping_solution(
         .map(|(&a, &b)| a * b)
         .sum();
     let j_raw = ixx + iyy - omega_dot_f;
+
     let (j_fem, used_analytical_fallback) = if !j_raw.is_finite() || j_raw <= 0.0 {
         let analytical_j = crate::plastic::warping_fem::analytical_j(section, props).unwrap_or(0.0);
         eprintln!(
