@@ -1041,13 +1041,28 @@ fn split_into_loops(verts: &[Point], intersections: &[Intersection]) -> Vec<Vec<
 }
 
 /// Helper function to check if a point is on a line segment.
+///
+/// The tolerance is scale-aware: it is proportional to the segment length
+/// squared, which has the same units as the cross product (area) and the
+/// dot product (length²).  This ensures correct behaviour for geometries
+/// of any scale – the fixed absolute tolerance `1e-10` was only appropriate
+/// for coordinates of order 1.
 fn point_on_segment(p: Point, a: Point, b: Point) -> bool {
-    let cross = (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
-    if cross.abs() > 1e-10 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let seg_len_sq = dx * dx + dy * dy;
+    if seg_len_sq < 1e-30 {
+        let dpx = p.x - a.x;
+        let dpy = p.y - a.y;
+        return dpx * dpx + dpy * dpy < 1e-30;
+    }
+    let tol = 1e-10 * seg_len_sq;
+    let cross = (p.x - a.x) * dy - (p.y - a.y) * dx;
+    if cross.abs() > tol {
         return false;
     }
     let dot = (p.x - a.x) * (p.x - b.x) + (p.y - a.y) * (p.y - b.y);
-    dot <= 1e-10
+    dot <= tol
 }
 
 #[cfg(test)]
