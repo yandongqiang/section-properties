@@ -677,7 +677,13 @@ fn refine_omega(
         residual[i] = f[i] - k_omega[i] - c[i] * lambda;
     }
 
-    let res_norm = residual.iter().fold(0.0f64, |m, &r| m.max(r.abs()));
+    // Constraint residual: Cᵀ·ω (should be 0 for the Lagrange system).
+    let ct_omega: f64 = c.iter().zip(omega.iter()).map(|(&ci, &w)| ci * w).sum();
+
+    let res_norm = residual
+        .iter()
+        .fold(0.0f64, |m, &r| m.max(r.abs()))
+        .max(ct_omega.abs());
     let f_norm = f.iter().fold(0.0f64, |m, &fi| m.max(fi.abs()));
     let rel_res = res_norm / f_norm.max(1e-300);
 
@@ -713,7 +719,7 @@ fn refine_omega(
         .map(|(&ci, &w)| ci * w)
         .sum();
     refined_worst = refined_worst.max(ct_omega_r.abs());
-    let refined_rel = refined_worst / f_norm.max(ct_omega_r.abs()).max(1e-300);
+    let refined_rel = refined_worst / f_norm.max(1e-300);
 
     if refined_rel < rel_res {
         eprintln!(
