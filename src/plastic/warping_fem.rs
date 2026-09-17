@@ -761,18 +761,20 @@ pub fn compute_fem_warping_solution(
     let min_area = (DEGENERATE_AREA_REL_TOL * diag.powi(2)).max(1e-24);
     let clean_elements = filter_degenerate_tris(&mesh.nodes, &mesh.elements, min_area);
 
-    // Filter out elements whose centroid is outside the section.
-    // The bridged triangulation can produce spurious elements outside
-    // the section boundary for sections with holes.
+    // Filter out elements with any vertex outside the section.
+    // The bridged triangulation can produce spurious elements that span
+    // a hole boundary: their centroid may lie inside the section while
+    // some vertices fall inside a hole.  Requiring all vertices to be
+    // inside the section is stricter and eliminates these cross-boundary
+    // elements, which otherwise corrupt the warping integral (J can turn
+    // negative for large or multiple holes).
     let before_count = clean_elements.len();
     let clean_elements: Vec<[usize; 3]> = clean_elements
         .iter()
         .filter(|tri| {
-            let p0 = &mesh.nodes[tri[0]];
-            let p1 = &mesh.nodes[tri[1]];
-            let p2 = &mesh.nodes[tri[2]];
-            let centroid = Point::new((p0.x + p1.x + p2.x) / 3.0, (p0.y + p1.y + p2.y) / 3.0);
-            section.contains_point(centroid)
+            section.contains_point(mesh.nodes[tri[0]])
+                && section.contains_point(mesh.nodes[tri[1]])
+                && section.contains_point(mesh.nodes[tri[2]])
         })
         .copied()
         .collect();
