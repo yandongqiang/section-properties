@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- results -------------------------------------------------------------
     // Typed DOF accessors on the solver (equivalent to the raw-index API):
-    //   solver.displacement_dof(1, Dof::Uy) == solver.displacement(1, 1)
+    //   solver.displacement_dof(1, Dof::Uy) == solver.displacement(1, 1).unwrap()
     let uy = solver.displacement_dof(1, Dof::Uy)?;
     let rz = solver.displacement_dof(1, Dof::Rz)?;
     let ry = solver.reaction_dof(0, Dof::Uy)?;

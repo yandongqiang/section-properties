@@ -2312,18 +2312,12 @@ impl BeamSolver {
     /// Raw-index accessor for the **global** reaction at `3*node_idx + dof`
     /// (`0 = ux` → `Fx`, `1 = uy` → `Fy`, `2 = rz` → `Mz`).
     ///
-    /// # Caveat — legacy DOF aliasing
-    ///
-    /// `dof >= 3` is **not** rejected and addresses a DOF of a *following*
-    /// node (see [`Self::displacement`]). Prefer the typed
-    /// [`Self::reaction_dof`] with [`Dof`], which cannot alias, returns an
-    /// error for an out-of-bounds node, and evaluates the reaction vector once.
-    ///
     /// # Errors
     ///
     /// [`FemError::InvalidInput`] if `dof` is not 0, 1, or 2.  Previously
     /// `dof >= 3` silently aliased into the following node's DOF slot; this
-    /// is now rejected.
+    /// is now rejected.  Prefer the typed [`Self::reaction_dof`] with [`Dof`]
+    /// for compile-time safety.
     ///
     /// Out-of-range node indices return `Ok(0.0)` (no panic). Before a
     /// successful solve this returns the raw `K·0 - f` value, which is not
