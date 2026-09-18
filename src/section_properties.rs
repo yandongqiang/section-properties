@@ -5,7 +5,7 @@ use std::ops::Deref;
 /// Basic geometric properties about the centroidal and global axes.
 #[derive(Debug, Clone, Copy)]
 pub struct GeometricProperties {
-    /// Cross-sectional area [m²] (outer minus holes, signed).
+    /// Cross-sectional area (outer minus holes, signed) \[m²\].
     pub area: f64,
 
     /// Centroid of the section in global coordinates.
@@ -475,7 +475,7 @@ impl SectionProperties {
 
     /// Compute section properties from a `Section` (outer boundary + holes).
     ///
-    /// This is a convenience wrapper that delegates to [`from_compound`]; the
+    /// This is a convenience wrapper that delegates to [`from_compound`](Self::from_compound); the
     /// section is treated as a single-region compound geometry.
     ///
     /// # Panics

@@ -55,9 +55,17 @@ println!("{}", props.format_results());
 For invalid input that must not panic, use the fallible constructors:
 
 ```rust
-use section_properties::{SectionProperties, SectionPropertiesError};
+use section_properties::{Point, Polygon, Section, SectionProperties};
 
-let result: Result<SectionProperties, SectionPropertiesError> =
+let outer = Polygon::new(vec![
+    Point::new(0.0, 0.0),
+    Point::new(10.0, 0.0),
+    Point::new(10.0, 5.0),
+    Point::new(0.0, 5.0),
+]);
+let section = Section::new(outer, Vec::new());
+
+let result: Result<SectionProperties, String> =
     SectionProperties::try_from_section(&section);
 ```
 

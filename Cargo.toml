@@ -2,7 +2,13 @@
 name = "section-properties"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Structural cross-section properties: geometric/principal moments, section moduli, warping/torsion FEM, plastic, cold-formed, and fire analysis."
+license = "MIT"
+repository = "https://github.com/yandongqiang/section-properties"
+readme = "README.md"
+keywords = ["structural", "section", "properties", "fem", "civil-engineering"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
