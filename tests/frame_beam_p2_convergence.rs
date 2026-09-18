@@ -106,9 +106,7 @@ fn p2_2_std_error_source_chain_returns_solver_error() {
         source.is_some(),
         "std::error::Error::source() must return Some for SolverError variant"
     );
-    let downcasted = source
-        .unwrap()
-        .downcast_ref::<SolverError>();
+    let downcasted = source.unwrap().downcast_ref::<SolverError>();
     assert!(
         downcasted.is_some(),
         "source must be downcastable to SolverError"
