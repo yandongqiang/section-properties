@@ -35,6 +35,7 @@
 //! | [`geometry`]            | Polygons, boolean ops, compound geometry             |
 //! | [`section`]             | Section (outer + holes), frame properties            |
 //! | [`section_properties`]  | Area, moments, principal axes, section moduli        |
+//! | [`composite`]           | Multi-material elastic transformed-section analysis  |
 //! | [`beam_fem`]            | 2D Euler-Bernoulli beam FEM                          |
 //! | [`frame`]               | 2D frame façade over beam FEM                        |
 //! | [`fea`]                 | FEM core: elements, solvers, diagnostics             |
