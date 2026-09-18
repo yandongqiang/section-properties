@@ -923,4 +923,160 @@ mod tests {
         let expected_phi = 0.5 * (2.0 * result.ixy).atan2(result.ix - result.iy);
         assert!((result.principal_phi - expected_phi).abs() < 1e-10);
     }
+
+    // ---- Phase 35 boundary tests ----
+
+    #[test]
+    fn translation_invariance() {
+        // Centroidal properties (Ix, Iy, Ixy, I11, I22) must be invariant
+        // under translation.  Centroid must shift by the translation vector.
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+
+        let s1 = rect_section(0.0, 0.0, 0.3, 0.15);
+        let s2 = rect_section(0.05, 0.15, 0.2, 0.01);
+
+        let comp_orig = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+        ])
+        .unwrap();
+        let r_orig = comp_orig.analyze(&mat1).unwrap();
+
+        // Translate all geometry by (dx, dy).
+        let dx = 1.7;
+        let dy = -0.4;
+
+        let s1_t = rect_section(dx, dy, 0.3, 0.15);
+        let s2_t = rect_section(0.05 + dx, 0.15 + dy, 0.2, 0.01);
+
+        let comp_t = ElasticComposite::new(vec![
+            CompositeComponent::new(s1_t, mat1).unwrap(),
+            CompositeComponent::new(s2_t, mat2).unwrap(),
+        ])
+        .unwrap();
+        let r_t = comp_t.analyze(&mat1).unwrap();
+
+        // Centroid shifts by (dx, dy).
+        assert!((r_t.centroid.x - (r_orig.centroid.x + dx)).abs() < 1e-10);
+        assert!((r_t.centroid.y - (r_orig.centroid.y + dy)).abs() < 1e-10);
+
+        // Centroidal properties are translation-invariant.
+        assert!((r_t.ix - r_orig.ix).abs() < 1e-10);
+        assert!((r_t.iy - r_orig.iy).abs() < 1e-10);
+        assert!((r_t.ixy - r_orig.ixy).abs() < 1e-10);
+        assert!((r_t.principal_i11 - r_orig.principal_i11).abs() < 1e-10);
+        assert!((r_t.principal_i22 - r_orig.principal_i22).abs() < 1e-10);
+    }
+
+    #[test]
+    fn multi_component_identical_material_degeneration() {
+        // Multiple components with the same material must produce the same
+        // result as a single SectionProperties of the combined geometry.
+        let mat = Material::new(200e9, 0.3, 7850.0, "steel");
+
+        // Two disjoint rectangles.
+        let s1 = rect_section(0.0, 0.0, 0.2, 0.1);
+        let s2 = rect_section(0.3, 0.0, 0.15, 0.1);
+
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1.clone(), mat).unwrap(),
+            CompositeComponent::new(s2.clone(), mat).unwrap(),
+        ])
+        .unwrap();
+        let r_comp = comp.analyze(&mat).unwrap();
+
+        // Build a CompoundGeometry with both rectangles for SectionProperties.
+        use crate::geometry::{CompoundGeometry, Geometry};
+        let g1 = Geometry::new(s1.outer, s1.holes);
+        let g2 = Geometry::new(s2.outer, s2.holes);
+        let compound = CompoundGeometry::new(vec![g1, g2]);
+        let r_homogeneous = SectionProperties::from_compound(&compound);
+
+        let tol = 1e-10;
+        assert!((r_comp.area - r_homogeneous.area).abs() < tol);
+        assert!((r_comp.centroid.x - r_homogeneous.centroid.x).abs() < tol);
+        assert!((r_comp.centroid.y - r_homogeneous.centroid.y).abs() < tol);
+        assert!((r_comp.ix - r_homogeneous.ix).abs() < tol);
+        assert!((r_comp.iy - r_homogeneous.iy).abs() < tol);
+        assert!((r_comp.ixy - r_homogeneous.ixy).abs() < tol);
+        assert!((r_comp.principal_i11 - r_homogeneous.principal.i11).abs() < tol);
+        assert!((r_comp.principal_i22 - r_homogeneous.principal.i22).abs() < tol);
+    }
+
+    #[test]
+    fn reference_modulus_scaling() {
+        // E_ref → k·E_ref  ⟹  A' → A'/k, I' → I'/k, EA/EI invariant.
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+
+        let s1 = rect_section(0.0, 0.0, 0.3, 0.15);
+        let s2 = rect_section(0.05, 0.15, 0.2, 0.01);
+
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+        ])
+        .unwrap();
+
+        let r1 = comp.analyze(&mat1).unwrap();
+
+        // Scale reference by k.
+        let k = 1e6;
+        let mat_scaled = Material::new(mat1.youngs_modulus * k, 0.2, 2400.0, "scaled");
+        let r2 = comp.analyze(&mat_scaled).unwrap();
+
+        // A' → A'/k
+        assert!((r2.area * k - r1.area).abs() / r1.area < 1e-10);
+        // I' → I'/k
+        assert!((r2.ix * k - r1.ix).abs() / r1.ix < 1e-10);
+        assert!((r2.iy * k - r1.iy).abs() / r1.iy < 1e-10);
+
+        // EA and EI are invariant.
+        let ea1 = mat1.youngs_modulus * r1.area;
+        let ea2 = mat_scaled.youngs_modulus * r2.area;
+        assert!((ea1 - ea2).abs() / ea1 < 1e-10);
+
+        let ei1 = mat1.youngs_modulus * r1.ix;
+        let ei2 = mat_scaled.youngs_modulus * r2.ix;
+        assert!((ei1 - ei2).abs() / ei1 < 1e-10);
+
+        // Centroid is reference-invariant.
+        assert!((r1.centroid.x - r2.centroid.x).abs() < 1e-10);
+        assert!((r1.centroid.y - r2.centroid.y).abs() < 1e-10);
+    }
+
+    #[test]
+    fn near_identical_materials_continuity() {
+        // Two materials with E2 = E1*(1+ε) should produce results close to
+        // the single-material case.  No catastrophic cancellation.
+        let e = 200e9;
+        let mat_base = Material::new(e, 0.3, 7850.0, "base");
+
+        let s1 = rect_section(0.0, 0.0, 0.2, 0.1);
+        let s2 = rect_section(0.0, 0.1, 0.2, 0.1);
+
+        // Single material baseline.
+        let comp_single = ElasticComposite::new(vec![
+            CompositeComponent::new(s1.clone(), mat_base).unwrap(),
+            CompositeComponent::new(s2.clone(), mat_base).unwrap(),
+        ])
+        .unwrap();
+        let r_single = comp_single.analyze(&mat_base).unwrap();
+
+        // Near-identical: E2 = E1 * (1 + 1e-12).
+        let eps = 1e-12;
+        let mat_near = Material::new(e * (1.0 + eps), 0.3, 7850.0, "near");
+        let comp_near = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat_base).unwrap(),
+            CompositeComponent::new(s2, mat_near).unwrap(),
+        ])
+        .unwrap();
+        let r_near = comp_near.analyze(&mat_base).unwrap();
+
+        // Results should be very close (continuity).
+        assert!((r_near.area - r_single.area).abs() / r_single.area < 1e-10);
+        assert!((r_near.ix - r_single.ix).abs() / r_single.ix < 1e-10);
+        assert!((r_near.centroid.y - r_single.centroid.y).abs() < 1e-10);
+    }
 }
