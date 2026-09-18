@@ -195,11 +195,20 @@ pub struct CompositeAnalysisResult {
     pub area: f64,
     /// Centroid of the transformed section in global coordinates.
     pub centroid: Point,
-    /// Second moment of area about the centroidal x-axis \[m⁴\].
+    /// Transformed second moment of area about the centroidal x-axis \[m⁴\].
+    ///
+    /// This is the **reference-material transformed** value `I'_x`, not the
+    /// physical inertia.  The physical bending stiffness is `E_ref · I'_x`.
     pub ix: f64,
-    /// Second moment of area about the centroidal y-axis \[m⁴\].
+    /// Transformed second moment of area about the centroidal y-axis \[m⁴\].
+    ///
+    /// This is the **reference-material transformed** value `I'_y`, not the
+    /// physical inertia.  The physical bending stiffness is `E_ref · I'_y`.
     pub iy: f64,
-    /// Product of inertia about the centroidal axes \[m⁴\].
+    /// Transformed product of inertia about the centroidal axes \[m⁴\].
+    ///
+    /// This is the **reference-material transformed** value `I'_xy`.
+    /// The physical value is `E_ref · I'_xy`.
     pub ixy: f64,
     /// Major principal second moment of area \[m⁴\].
     pub principal_i11: f64,
@@ -218,6 +227,14 @@ pub struct CompositeAnalysisResult {
 /// Components are stored in insertion order.  The original geometry is
 /// never mutated — [`analyze`](Self::analyze) produces an analytical
 /// transformed representation only.
+///
+/// # Component semantics
+///
+/// Each component represents a **distinct physical material region**.
+/// Components are summed algebraically — if two components overlap
+/// geometrically, the overlapping region is **double-counted** in the
+/// transformed section.  No Boolean union is performed.  Callers are
+/// responsible for ensuring components represent disjoint regions.
 #[derive(Debug, Clone)]
 pub struct ElasticComposite {
     components: Vec<CompositeComponent>,
@@ -252,6 +269,11 @@ impl ElasticComposite {
     /// * `reference_material` — the reference material whose Young's modulus
     ///   `E_ref` defines the modular ratio `n_i = E_i / E_ref`.  Must have
     ///   a positive, finite Young's modulus.
+    ///
+    /// The reference material **need not** be one of the component materials.
+    /// Any positive, finite modulus produces a valid transformed section.
+    /// The physical stiffnesses `E_ref · A'`, `E_ref · I'_x`, etc. are
+    /// invariant to the choice of reference material.
     ///
     /// # Algorithm
     ///
@@ -513,8 +535,10 @@ mod tests {
 
     #[test]
     fn reference_material_reversal() {
+        // Use an asymmetric section so Iy and Ixy are non-trivial.
+        // Slab offset left, steel plate offset right → non-zero Ixy.
         let slab = rect_section(0.0, 0.0, 0.3, 0.15);
-        let steel = rect_section(0.05, 0.15, 0.2, 0.01);
+        let steel = rect_section(0.15, 0.15, 0.2, 0.01);
 
         let comp = ElasticComposite::new(vec![
             CompositeComponent::new(slab, CONCRETE_C30_37).unwrap(),
@@ -525,17 +549,26 @@ mod tests {
         let r_conc = comp.analyze(&CONCRETE_C30_37).unwrap();
         let r_steel = comp.analyze(&STEEL_S355).unwrap();
 
-        // Physical bending stiffness EI about x is reference-independent.
-        // EI = E_ref * Ix_transformed
-        let ei_conc = CONCRETE_C30_37.youngs_modulus * r_conc.ix;
-        let ei_steel = STEEL_S355.youngs_modulus * r_steel.ix;
-
-        assert!((ei_conc - ei_steel).abs() / ei_conc < 1e-10);
-
-        // Similarly for EA
+        // Physical stiffnesses are reference-independent.
+        // EA = E_ref * A'
         let ea_conc = CONCRETE_C30_37.youngs_modulus * r_conc.area;
         let ea_steel = STEEL_S355.youngs_modulus * r_steel.area;
         assert!((ea_conc - ea_steel).abs() / ea_conc < 1e-10);
+
+        // EIx = E_ref * Ix'
+        let ei_conc = CONCRETE_C30_37.youngs_modulus * r_conc.ix;
+        let ei_steel = STEEL_S355.youngs_modulus * r_steel.ix;
+        assert!((ei_conc - ei_steel).abs() / ei_conc < 1e-10);
+
+        // EIy = E_ref * Iy'
+        let eiy_conc = CONCRETE_C30_37.youngs_modulus * r_conc.iy;
+        let eiy_steel = STEEL_S355.youngs_modulus * r_steel.iy;
+        assert!((eiy_conc - eiy_steel).abs() / eiy_conc < 1e-10);
+
+        // EIxy = E_ref * Ixy' (use absolute tolerance — Ixy can be near zero)
+        let eixy_conc = CONCRETE_C30_37.youngs_modulus * r_conc.ixy;
+        let eixy_steel = STEEL_S355.youngs_modulus * r_steel.ixy;
+        assert!((eixy_conc - eixy_steel).abs() < 1e-3);
 
         // Centroid must be the same (physical location)
         assert!((r_conc.centroid.x - r_steel.centroid.x).abs() < 1e-10);
@@ -735,5 +768,159 @@ mod tests {
         assert_eq!(stored.section.area(), sec_clone.area());
         assert_eq!(stored.section.centroid().x, sec_clone.centroid().x);
         assert_eq!(stored.section.centroid().y, sec_clone.centroid().y);
+    }
+
+    // ---- Phase 33 additional tests ----
+
+    #[test]
+    fn composite_with_holes() {
+        // Hollow rectangular section as a single component with a hole.
+        let outer = Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(0.4, 0.0),
+            Point::new(0.4, 0.3),
+            Point::new(0.0, 0.3),
+        ]);
+        let hole = Polygon::new(vec![
+            Point::new(0.1, 0.05),
+            Point::new(0.3, 0.05),
+            Point::new(0.3, 0.25),
+            Point::new(0.1, 0.25),
+        ]);
+        let section = Section::new(outer, vec![hole]);
+        let mat = Material::new(200e9, 0.3, 7850.0, "steel");
+
+        let comp =
+            ElasticComposite::new(vec![CompositeComponent::new(section.clone(), mat).unwrap()])
+                .unwrap();
+        let result = comp.analyze(&mat).unwrap();
+        let homogeneous = SectionProperties::from_section(&section);
+
+        // Single material → transformed == homogeneous
+        let tol = 1e-10;
+        assert!((result.area - homogeneous.area).abs() < tol);
+        assert!((result.ix - homogeneous.ix).abs() < tol);
+        assert!((result.iy - homogeneous.iy).abs() < tol);
+        assert!((result.ixy - homogeneous.ixy).abs() < tol);
+
+        // Net area = 0.12 - 0.04 = 0.08
+        assert!((result.area - 0.08).abs() < 1e-10);
+    }
+
+    #[test]
+    fn three_material_components() {
+        // Three stacked rectangles with different materials.
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+        let mat3 = Material::new(70e9, 0.33, 2700.0, "aluminum");
+
+        let s1 = rect_section(0.0, 0.0, 0.3, 0.1);
+        let s2 = rect_section(0.0, 0.1, 0.2, 0.05);
+        let s3 = rect_section(0.0, 0.15, 0.25, 0.08);
+
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+            CompositeComponent::new(s3, mat3).unwrap(),
+        ])
+        .unwrap();
+
+        assert_eq!(comp.n_components(), 3);
+
+        let result = comp.analyze(&mat1).unwrap();
+        assert!(result.area > 0.0);
+        assert!(result.ix > 0.0);
+        assert_eq!(result.components.len(), 3);
+
+        // Modular ratios
+        assert!((result.components[0].modular_ratio - 1.0).abs() < 1e-10);
+        assert!((result.components[1].modular_ratio - 200.0 / 30.0).abs() < 1e-10);
+        assert!((result.components[2].modular_ratio - 70.0 / 30.0).abs() < 1e-10);
+
+        // Transformed area = Σ n_i * A_i
+        let expected_area =
+            1.0 * (0.3 * 0.1) + (200.0 / 30.0) * (0.2 * 0.05) + (70.0 / 30.0) * (0.25 * 0.08);
+        assert!((result.area - expected_area).abs() / expected_area < 1e-10);
+
+        // Physical stiffness is reference-invariant
+        let r2 = comp.analyze(&mat2).unwrap();
+        let ea1 = mat1.youngs_modulus * result.area;
+        let ea2 = mat2.youngs_modulus * r2.area;
+        assert!((ea1 - ea2).abs() / ea1 < 1e-10);
+    }
+
+    #[test]
+    fn reference_not_present_in_components() {
+        // Reference material not among component materials — mathematically valid.
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+        let mat_ref = Material::new(100e9, 0.25, 5000.0, "reference");
+
+        let s1 = rect_section(0.0, 0.0, 0.2, 0.1);
+        let s2 = rect_section(0.0, 0.1, 0.2, 0.1);
+
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+        ])
+        .unwrap();
+
+        let result = comp.analyze(&mat_ref).unwrap();
+
+        // n1 = 30/100 = 0.3, n2 = 200/100 = 2.0
+        assert!((result.components[0].modular_ratio - 0.3).abs() < 1e-10);
+        assert!((result.components[1].modular_ratio - 2.0).abs() < 1e-10);
+
+        // Physical EA must still be reference-invariant
+        let r_conc = comp.analyze(&mat1).unwrap();
+        let ea_ref = mat_ref.youngs_modulus * result.area;
+        let ea_conc = mat1.youngs_modulus * r_conc.area;
+        assert!((ea_ref - ea_conc).abs() / ea_conc < 1e-10);
+    }
+
+    #[test]
+    fn asymmetric_principal_axes() {
+        // L-shaped asymmetric section with two materials.
+        // Vertical leg: 0.02 × 0.2, E = 200 GPa
+        // Horizontal leg: 0.1 × 0.02, E = 30 GPa
+        let vert = rect_section(0.0, 0.0, 0.02, 0.2);
+        let horiz = rect_section(0.0, 0.0, 0.1, 0.02);
+
+        let mat_steel = Material::new(200e9, 0.3, 7850.0, "steel");
+        let mat_conc = Material::new(30e9, 0.2, 2400.0, "concrete");
+
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(vert, mat_steel).unwrap(),
+            CompositeComponent::new(horiz, mat_conc).unwrap(),
+        ])
+        .unwrap();
+
+        let result = comp.analyze(&mat_steel).unwrap();
+
+        // For an asymmetric section, Ixy should be non-zero.
+        assert!(
+            result.ixy.abs() > 1e-8,
+            "Ixy should be non-zero for asymmetric section"
+        );
+
+        // Principal moments must satisfy I11 >= I22
+        assert!(result.principal_i11 >= result.principal_i22);
+
+        // Principal moments must satisfy the invariant:
+        // I11 + I22 = Ix + Iy
+        let sum_principal = result.principal_i11 + result.principal_i22;
+        let sum_centroidal = result.ix + result.iy;
+        assert!((sum_principal - sum_centroidal).abs() < 1e-10);
+
+        // Principal angle must be non-zero for asymmetric section
+        assert!(
+            result.principal_phi.abs() > 1e-6,
+            "principal angle should be non-zero"
+        );
+
+        // Verify principal angle convention matches SectionProperties:
+        // phi = 0.5 * atan2(2*Ixy, Ix - Iy)
+        let expected_phi = 0.5 * (2.0 * result.ixy).atan2(result.ix - result.iy);
+        assert!((result.principal_phi - expected_phi).abs() < 1e-10);
     }
 }
