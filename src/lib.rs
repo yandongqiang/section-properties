@@ -55,6 +55,7 @@
 
 pub mod beam_fem;
 pub mod cold_formed_analysis;
+pub mod composite;
 pub mod database;
 pub mod fea;
 pub mod fire;
@@ -80,7 +81,7 @@ pub use crate::database::{
 };
 pub use crate::fire::{
     FireAnalysis, FireExposure, FireProtection, FireResistanceResult, MaterialPropertiesAtTemp,
-    ProtectionType, SectionFactor, TemperatureProfile, composite,
+    ProtectionType, SectionFactor, TemperatureProfile, composite as fire_composite,
 };
 pub use crate::geometry::{
     Axis, BoundaryExtrema, CompoundError, CompoundGeometry, Geometry, JoinStyle, Point, Polygon,
@@ -95,6 +96,10 @@ pub use crate::io::{
 
 pub use crate::beam_fem::{
     BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError,
+};
+pub use crate::composite::{
+    ComponentAnalysis, CompositeAnalysisResult, CompositeComponent, CompositeError,
+    ElasticComposite,
 };
 pub use crate::fea::{
     LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
