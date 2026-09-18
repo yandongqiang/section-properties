@@ -97,6 +97,38 @@ fn p2_2_solver_error_preserves_source() {
 }
 
 #[test]
+fn p2_2_std_error_source_chain_returns_solver_error() {
+    let se = SolverError::SingularMatrix("chain test".to_string());
+    let fe: FemError = se.clone().into();
+
+    let source = std::error::Error::source(&fe);
+    assert!(
+        source.is_some(),
+        "std::error::Error::source() must return Some for SolverError variant"
+    );
+    let downcasted = source
+        .unwrap()
+        .downcast_ref::<SolverError>();
+    assert!(
+        downcasted.is_some(),
+        "source must be downcastable to SolverError"
+    );
+    assert!(
+        matches!(downcasted.unwrap(), SolverError::SingularMatrix(s) if s == "chain test"),
+        "source chain must preserve the original SolverError payload"
+    );
+}
+
+#[test]
+fn p2_2_std_error_source_returns_none_for_non_solver_error() {
+    let fe = FemError::InvalidInput("not solver".to_string());
+    assert!(
+        std::error::Error::source(&fe).is_none(),
+        "source() must return None for non-SolverError variants"
+    );
+}
+
+#[test]
 fn p2_2_solver_error_message_matches_display() {
     let se = SolverError::DimensionMismatch {
         expected: 6,
