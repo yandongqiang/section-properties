@@ -5,8 +5,10 @@ use std::ops::Deref;
 /// Basic geometric properties about the centroidal and global axes.
 #[derive(Debug, Clone, Copy)]
 pub struct GeometricProperties {
+    /// Cross-sectional area [m²] (outer minus holes, signed).
     pub area: f64,
 
+    /// Centroid of the section in global coordinates.
     pub centroid: Point,
 
     /// Second moment of area about the centroidal x-axis.
@@ -455,6 +457,11 @@ impl SectionProperties {
 
     /// Compute section properties from a single `Geometry` (one region with
     /// optional holes and transforms).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the net section area is zero or near-zero.  Use
+    /// [`try_from_geometry`](Self::try_from_geometry) for a fallible version.
     pub fn from_geometry(geometry: &Geometry) -> Self {
         Self::from_compound(&CompoundGeometry::new(vec![geometry.clone()]))
     }
@@ -470,6 +477,27 @@ impl SectionProperties {
     ///
     /// This is a convenience wrapper that delegates to [`from_compound`]; the
     /// section is treated as a single-region compound geometry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the net section area is zero or near-zero.  Use
+    /// [`try_from_section`](Self::try_from_section) for a fallible version.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use section_properties::{Point, Polygon, Section, SectionProperties};
+    ///
+    /// let outer = Polygon::new(vec![
+    ///     Point::new(0.0, 0.0),
+    ///     Point::new(10.0, 0.0),
+    ///     Point::new(10.0, 5.0),
+    ///     Point::new(0.0, 5.0),
+    /// ]);
+    /// let section = Section::new(outer, Vec::new());
+    /// let props = SectionProperties::from_section(&section);
+    /// assert!((props.area - 50.0).abs() < 1e-10);
+    /// ```
     pub fn from_section(section: &Section) -> Self {
         Self::from_compound(&CompoundGeometry::from(section.clone()))
     }

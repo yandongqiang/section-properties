@@ -1,3 +1,58 @@
+//! # section-properties
+//!
+//! Rust crate for structural cross-section analysis: geometric properties,
+//! plastic classification, warping/torsion constants, stress analysis, and
+//! 2D frame/beam finite element analysis.
+//!
+//! # Quick start — section properties
+//!
+//! ```rust
+//! use section_properties::{Point, Polygon, Section, SectionProperties};
+//!
+//! // Build a rectangle 10 × 5
+//! let outer = Polygon::new(vec![
+//!     Point::new(0.0, 0.0),
+//!     Point::new(10.0, 0.0),
+//!     Point::new(10.0, 5.0),
+//!     Point::new(0.0, 5.0),
+//! ]);
+//! let section = Section::new(outer, Vec::new());
+//! let props = SectionProperties::from_section(&section);
+//!
+//! assert!((props.area - 50.0).abs() < 1e-10);
+//! assert!((props.centroid.x - 5.0).abs() < 1e-10);
+//! assert!((props.centroid.y - 2.5).abs() < 1e-10);
+//! ```
+//!
+//! # Quick start — frame analysis
+//!
+//! See the [`frame`] module for a complete 2D frame example.
+//!
+//! # Module overview
+//!
+//! | Module                  | Purpose                                              |
+//! |-------------------------|------------------------------------------------------|
+//! | [`geometry`]            | Polygons, boolean ops, compound geometry             |
+//! | [`section`]             | Section (outer + holes), frame properties            |
+//! | [`section_properties`]  | Area, moments, principal axes, section moduli        |
+//! | [`beam_fem`]            | 2D Euler-Bernoulli beam FEM                          |
+//! | [`frame`]               | 2D frame façade over beam FEM                        |
+//! | [`fea`]                 | FEM core: elements, solvers, diagnostics             |
+//! | [`plastic`]             | Plastic section analysis, warping, classification    |
+//! | [`material`]            | Isotropic linear-elastic material                    |
+//! | [`stress`]              | Cross-section stress analysis                        |
+//! | [`section_library`]     | Standard section shapes (I, channel, tube, …)        |
+//!
+//! # Error handling conventions
+//!
+//! * **Fallible constructors** use `try_new` / `new_validated` returning
+//!   `Result<Self, E>`.
+//! * **Fallible computations** use `try_*` returning `Result<T, E>` or
+//!   `Option<T>`.
+//! * **Panicking APIs** delegate to the `try_*` variant and `expect()` —
+//!   they document the panic condition in a `# Panics` section.
+//! * **Frame API** is fully fallible: all methods return `Result<T, FemError>`.
+
 pub mod beam_fem;
 pub mod cold_formed_analysis;
 pub mod database;
