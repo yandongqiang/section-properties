@@ -24,7 +24,7 @@ pub struct DsmParams {
 impl DsmParams {
     /// Compute DSM parameters from section properties with a given span.
     ///
-    /// `span` is the unbraced length [m] for lateral-torsional buckling.
+    /// `span` is the unbraced length `m` for lateral-torsional buckling.
     pub fn from_section_with_span(section: &Section, material: &Material, span: f64) -> Self {
         let props = SectionProperties::from_section(section);
         let warping = WarpingProperties::from_section(section, material.poissons_ratio);

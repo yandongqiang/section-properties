@@ -1156,7 +1156,7 @@ impl CircularHollowSectionLib {
     }
 
     pub fn from_designation(designation: &str) -> Option<Self> {
-        // Format: "CHS60X3" (outer diameter [mm] x wall thickness [mm])
+        // Format: "CHS60X3" (outer diameter `mm` x wall thickness `mm`)
         let upper = designation.to_uppercase();
         let rest = upper.strip_prefix("CHS")?.trim_start_matches('Ø');
         let parts: Vec<&str> = rest.split('X').collect();
@@ -2233,7 +2233,7 @@ mod tests {
 /// NASTRAN BAR section (solid rod)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranBar {
-    pub diameter: f64, // Diameter [mm]
+    pub diameter: f64, // Diameter `mm`
 }
 
 impl NastranBar {
@@ -2257,9 +2257,9 @@ impl ParametricSection for NastranBar {
 /// NASTRAN BOX section (rectangular tube)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranBox {
-    pub width: f64,     // Width [mm]
-    pub height: f64,    // Height [mm]
-    pub thickness: f64, // Wall thickness [mm]
+    pub width: f64,     // Width `mm`
+    pub height: f64,    // Height `mm`
+    pub thickness: f64, // Wall thickness `mm`
 }
 
 impl NastranBox {
@@ -2296,10 +2296,10 @@ impl ParametricSection for NastranBox {
 /// NASTRAN CHAN section (channel)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranChan {
-    pub height: f64,       // Height [mm]
-    pub width: f64,        // Flange width [mm]
-    pub web_thick: f64,    // Web thickness [mm]
-    pub flange_thick: f64, // Flange thickness [mm]
+    pub height: f64,       // Height `mm`
+    pub width: f64,        // Flange width `mm`
+    pub web_thick: f64,    // Web thickness `mm`
+    pub flange_thick: f64, // Flange thickness `mm`
 }
 
 impl NastranChan {
@@ -2350,9 +2350,9 @@ impl ParametricSection for NastranChan {
 /// NASTRAN CROSS section (cruciform)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranCross {
-    pub height: f64,    // Overall height [mm]
-    pub width: f64,     // Overall width [mm]
-    pub thickness: f64, // Arm thickness [mm]
+    pub height: f64,    // Overall height `mm`
+    pub width: f64,     // Overall width `mm`
+    pub thickness: f64, // Arm thickness `mm`
 }
 
 impl NastranCross {
@@ -2412,10 +2412,10 @@ impl ParametricSection for NastranCross {
 /// NASTRAN I section (I-beam)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranI {
-    pub height: f64,       // Overall depth [mm]
-    pub width: f64,        // Flange width [mm]
-    pub web_thick: f64,    // Web thickness [mm]
-    pub flange_thick: f64, // Flange thickness [mm]
+    pub height: f64,       // Overall depth `mm`
+    pub width: f64,        // Flange width `mm`
+    pub web_thick: f64,    // Web thickness `mm`
+    pub flange_thick: f64, // Flange thickness `mm`
 }
 
 impl NastranI {
@@ -2456,10 +2456,10 @@ impl ParametricSection for NastranI {
 /// NASTRAN TEE section (T-beam)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranTee {
-    pub height: f64,       // Overall height [mm]
-    pub width: f64,        // Flange width [mm]
-    pub web_thick: f64,    // Web thickness [mm]
-    pub flange_thick: f64, // Flange thickness [mm]
+    pub height: f64,       // Overall height `mm`
+    pub width: f64,        // Flange width `mm`
+    pub web_thick: f64,    // Web thickness `mm`
+    pub flange_thick: f64, // Flange thickness `mm`
 }
 
 impl NastranTee {
@@ -2498,8 +2498,8 @@ impl ParametricSection for NastranTee {
 /// NASTRAN TUBE section (circular hollow)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranTube {
-    pub outer_diameter: f64, // Outer diameter [mm]
-    pub wall_thickness: f64, // Wall thickness [mm]
+    pub outer_diameter: f64, // Outer diameter `mm`
+    pub wall_thickness: f64, // Wall thickness `mm`
 }
 
 impl NastranTube {
@@ -2533,10 +2533,10 @@ impl ParametricSection for NastranTube {
 /// NASTRAN ZED section (Z-purlin)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NastranZed {
-    pub height: f64,       // Overall depth [mm]
-    pub width: f64,        // Flange width [mm]
-    pub web_thick: f64,    // Web thickness [mm]
-    pub flange_thick: f64, // Flange thickness [mm]
+    pub height: f64,       // Overall depth `mm`
+    pub width: f64,        // Flange width `mm`
+    pub web_thick: f64,    // Web thickness `mm`
+    pub flange_thick: f64, // Flange thickness `mm`
 }
 
 impl NastranZed {
@@ -2696,15 +2696,15 @@ impl NastranZed {
 pub struct SuperTGirder {
     /// Girder type: 1000, 1200, 1400, 1600, 1800, 2000 (depth in mm)
     pub girder_type: SuperTType,
-    /// Top flange width [mm]
+    /// Top flange width `mm`
     pub top_flange_width: f64,
-    /// Top flange thickness [mm]
+    /// Top flange thickness `mm`
     pub top_flange_thick: f64,
-    /// Bottom flange width [mm]
+    /// Bottom flange width `mm`
     pub bot_flange_width: f64,
-    /// Bottom flange thickness [mm]
+    /// Bottom flange thickness `mm`
     pub bot_flange_thick: f64,
-    /// Web thickness [mm]
+    /// Web thickness `mm`
     pub web_thick: f64,
 }
 
@@ -2928,11 +2928,11 @@ impl ParametricSection for IGirder {
 /// U-Girder (for box girders)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UGirder {
-    pub depth: f64,        // Overall depth [mm]
-    pub bottom_width: f64, // Bottom flange width [mm]
-    pub top_width: f64,    // Top flange width [mm]
-    pub web_thick: f64,    // Web thickness [mm]
-    pub flange_thick: f64, // Flange thickness [mm]
+    pub depth: f64,        // Overall depth `mm`
+    pub bottom_width: f64, // Bottom flange width `mm`
+    pub top_width: f64,    // Top flange width `mm`
+    pub web_thick: f64,    // Web thickness `mm`
+    pub flange_thick: f64, // Flange thickness `mm`
 }
 
 impl UGirder {

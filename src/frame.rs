@@ -201,7 +201,7 @@ pub struct EquilibriumReport {
     /// relative tolerance is `max(EQUILIBRIUM_REL_TOL, cond_rel_floor)`: the
     /// base `1e-6` at normal slenderness, raised by a dimensionless
     /// element-level conditioning proxy for highly slender frames (see
-    /// [`EQUILIBRIUM_COND_FACTOR`]). Purely relative: there is no absolute
+    /// `EQUILIBRIUM_COND_FACTOR`. Purely relative: there is no absolute
     /// floor.
     pub tolerance: f64,
     /// Σ of the absolute applied and reaction **force** magnitudes actually
@@ -254,15 +254,15 @@ fn equilibrium_scales(f_mag: f64, m_mag: f64, l_char: f64) -> (f64, f64) {
 
 impl EquilibriumReport {
     /// Whether all three residuals are within a tolerance **relative** to the
-    /// analysed system's own magnitudes (see [`equilibrium_scales`]).
+    /// analysed system's own magnitudes (see `equilibrium_scales`).
     ///
     /// The force residuals (`fx`, `fy`) are compared against `force_scale` and
     /// the moment residual (`mz`) against `moment_scale`, both scaled by the
     /// conditioning-aware effective relative tolerance
-    /// [`Self::effective_rel_tol`]. At normal slenderness this is exactly
-    /// [`EQUILIBRIUM_REL_TOL`] (`1e-6`); for highly slender frames it is raised
+    /// `Self::effective_rel_tol`. At normal slenderness this is exactly
+    /// `EQUILIBRIUM_REL_TOL` (`1e-6`); for highly slender frames it is raised
     /// by a dimensionless element-level conditioning proxy (see
-    /// [`EQUILIBRIUM_COND_FACTOR`]) so that pure solver round-off is not
+    /// `EQUILIBRIUM_COND_FACTOR`) so that pure solver round-off is not
     /// mistaken for a physical imbalance. The verdict is invariant under a
     /// change of units and the moment check stays sensitive even when a load
     /// system is symmetric about the origin (`applied_mz == 0`). There is no

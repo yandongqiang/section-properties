@@ -147,11 +147,11 @@ impl Section {
     ///
     /// Returns tuple: `(area, ixx, iyy, ixy, j, phi)`
     ///
-    /// - `area`: cross-sectional area [m²]
-    /// - `ixx`: second moment of area about x-axis [m⁴]
-    /// - `iyy`: second moment of area about y-axis [m⁴]
-    /// - `ixy`: product of inertia [m⁴]
-    /// - `j`: St. Venant torsion constant [m⁴]
+    /// - `area`: cross-sectional area `m²`
+    /// - `ixx`: second moment of area about x-axis `m⁴`
+    /// - `iyy`: second moment of area about y-axis `m⁴`
+    /// - `ixy`: product of inertia `m⁴`
+    /// - `j`: St. Venant torsion constant `m⁴`
     /// - `phi`: angle from centroidal x-axis to major principal axis (11),
     ///   CCW positive, radians.  `phi = ½ atan2(2·Ixy, Ixx − Iyy)`.
     pub fn frame_properties(&self, nu: f64) -> (f64, f64, f64, f64, f64, f64) {

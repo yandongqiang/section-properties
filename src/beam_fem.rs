@@ -19,9 +19,9 @@ use crate::material::Material;
 /// Beam cross-section properties for 2D Euler-Bernoulli beam
 #[derive(Debug, Clone, Copy)]
 pub struct BeamSection {
-    /// Cross-sectional area [m²]
+    /// Cross-sectional area `m²`
     pub area: f64,
-    /// Second moment of area about local z-axis (bending in local x-y plane) [m⁴]
+    /// Second moment of area about local z-axis (bending in local x-y plane) `m⁴`
     pub second_moment: f64,
 }
 
@@ -92,11 +92,11 @@ impl BeamSection {
 /// [`BeamSolver::element_section_forces`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SectionForces {
-    /// Axial internal force (tension positive) [N]
+    /// Axial internal force (tension positive) `N`
     pub axial: f64,
-    /// Transverse shear internal force [N]; satisfies `d(moment)/dx = shear`
+    /// Transverse shear internal force `N`; satisfies `d(moment)/dx = shear`
     pub shear: f64,
-    /// Bending moment (sagging positive) [Nm]
+    /// Bending moment (sagging positive) `Nm`
     pub moment: f64,
 }
 
@@ -457,7 +457,7 @@ impl BeamElement {
     ///
     /// Local DOF ordering: [u_i, v_i, θ_i, u_j, v_j, θ_j]
     ///
-    /// Returns a 6x6 matrix in row-major order (Vec<Vec<f64>>)
+    /// Returns a 6x6 matrix in row-major order (`Vec<Vec<f64>>`)
     pub fn local_stiffness(&self, node_i: Point, node_j: Point) -> [[f64; 6]; 6] {
         let L = self.length(node_i, node_j);
         if L <= 0.0 {
@@ -834,11 +834,11 @@ pub struct PointLoad {
     pub element_idx: usize,
     /// Position along element from node_i (0.0 = node_i, 1.0 = node_j)
     pub position: f64,
-    /// Axial force [N] in local x direction
+    /// Axial force `N` in local x direction
     pub fx: f64,
-    /// Transverse force [N] in local y direction
+    /// Transverse force `N` in local y direction
     pub fy: f64,
-    /// Moment [Nm] about local z axis (positive = CCW)
+    /// Moment `Nm` about local z axis (positive = CCW)
     pub mz: f64,
 }
 
@@ -899,7 +899,7 @@ impl PointLoad {
 pub struct AppliedMoment {
     /// Node index (index in nodes Vec)
     pub node_idx: usize,
-    /// Moment value [Nm] in global coordinates (positive = CCW)
+    /// Moment value `Nm` in global coordinates (positive = CCW)
     pub value: f64,
 }
 
@@ -2405,7 +2405,7 @@ impl BeamSolver {
     /// # Errors
     ///
     /// Propagates any error from the equivalent point-load recovery
-    /// (see [`Self::element_equivalent_nodal_forces`]); a failed recovery is
+    /// (see `Self::element_equivalent_nodal_forces`); a failed recovery is
     /// never silently replaced by a zero load.
     pub fn element_end_forces(&self) -> Result<Vec<[f64; 6]>, FemError> {
         let mut results = Vec::with_capacity(self.model.elements.len());

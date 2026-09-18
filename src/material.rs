@@ -5,9 +5,9 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
-    /// Young's modulus [Pa]
+    /// Young's modulus `Pa`
     pub youngs_modulus: f64,
-    /// Shear modulus [Pa]
+    /// Shear modulus `Pa`
     pub shear_modulus: f64,
     /// Poisson's ratio [-]
     pub poissons_ratio: f64,
@@ -15,9 +15,9 @@ pub struct Material {
     pub density: f64,
     /// Coefficient of thermal expansion [1/K]
     pub thermal_expansion: f64,
-    /// Yield strength [Pa] (for plastic analysis)
+    /// Yield strength `Pa` (for plastic analysis)
     pub yield_strength: f64,
-    /// Ultimate tensile strength [Pa]
+    /// Ultimate tensile strength `Pa`
     pub ultimate_strength: f64,
     /// Optional: identifier/name for display
     pub name: &'static str,

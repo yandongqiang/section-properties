@@ -15,31 +15,31 @@ pub struct WarpingProperties {
     pub j: f64,
     /// Warping constant [m^6]
     pub iw: f64,
-    /// Shear center coordinates relative to centroid [m]
+    /// Shear center coordinates relative to centroid `m`
     pub shear_center: Point,
-    /// Torsional radius of gyration [m]
+    /// Torsional radius of gyration `m`
     pub r_t: f64,
-    /// Warping radius of gyration [m]
+    /// Warping radius of gyration `m`
     pub r_w: f64,
     /// Section area [m^2]
     pub area: f64,
     /// Polar moment of inertia about centroid [m^4]
     pub ip: f64,
-    /// Monosymmetry constant about x-axis [m]
+    /// Monosymmetry constant about x-axis `m`
     pub beta_x: f64,
-    /// Monosymmetry constant about y-axis [m]
+    /// Monosymmetry constant about y-axis `m`
     pub beta_y: f64,
     /// Shear area in y-direction (for Vx shear) [m^2]
     pub ay: f64,
     /// Shear area in z-direction (for Vy shear) [m^2]
     pub az: f64,
-    /// Shear center 11-coordinate (principal axis) [m]
+    /// Shear center 11-coordinate (principal axis) `m`
     pub shear_center_11: f64,
-    /// Shear center 22-coordinate (principal axis) [m]
+    /// Shear center 22-coordinate (principal axis) `m`
     pub shear_center_22: f64,
-    /// Monosymmetry constant about 11 (major principal) axis [m]
+    /// Monosymmetry constant about 11 (major principal) axis `m`
     pub beta_11: f64,
-    /// Monosymmetry constant about 22 (minor principal) axis [m]
+    /// Monosymmetry constant about 22 (minor principal) axis `m`
     pub beta_22: f64,
     /// Shear area about 11 (major principal) axis [m^2]
     pub a_s11: f64,
@@ -52,9 +52,9 @@ pub struct WarpingProperties {
     pub a_sxy: f64,
     /// Shear deformation parameter delta_s = 2*(1+nu)*(Ix*Iy - Ixy^2)
     pub delta_s: f64,
-    /// Principal axis angle [rad]
+    /// Principal axis angle `rad`
     pub principal_angle: f64,
-    /// Trefftz shear center coordinates relative to centroid [m]
+    /// Trefftz shear center coordinates relative to centroid `m`
     ///
     /// For open thin-walled sections, the Trefftz approach yields the same shear
     /// center as the elasticity approach. For closed/solid sections the Trefftz
@@ -62,21 +62,21 @@ pub struct WarpingProperties {
     /// in that case we fall back to the elasticity-based shear center as an
     /// approximation.
     pub shear_center_trefftz: Point,
-    /// Monosymmetry constant for positive bending about x-axis [m]
+    /// Monosymmetry constant for positive bending about x-axis `m`
     pub beta_x_plus: f64,
-    /// Monosymmetry constant for negative bending about x-axis [m]
+    /// Monosymmetry constant for negative bending about x-axis `m`
     pub beta_x_minus: f64,
-    /// Monosymmetry constant for positive bending about y-axis [m]
+    /// Monosymmetry constant for positive bending about y-axis `m`
     pub beta_y_plus: f64,
-    /// Monosymmetry constant for negative bending about y-axis [m]
+    /// Monosymmetry constant for negative bending about y-axis `m`
     pub beta_y_minus: f64,
-    /// Monosymmetry constant for positive bending about 11-axis [m]
+    /// Monosymmetry constant for positive bending about 11-axis `m`
     pub beta_11_plus: f64,
-    /// Monosymmetry constant for negative bending about 11-axis [m]
+    /// Monosymmetry constant for negative bending about 11-axis `m`
     pub beta_11_minus: f64,
-    /// Monosymmetry constant for positive bending about 22-axis [m]
+    /// Monosymmetry constant for positive bending about 22-axis `m`
     pub beta_22_plus: f64,
-    /// Monosymmetry constant for negative bending about 22-axis [m]
+    /// Monosymmetry constant for negative bending about 22-axis `m`
     pub beta_22_minus: f64,
     /// Maximum warping coordinate |ω| from FEM solution
     pub omega_max: f64,

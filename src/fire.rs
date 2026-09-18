@@ -54,7 +54,7 @@ impl FireExposure {
 pub struct SectionFactor {
     pub am_v: f64,            // [1/m] - section factor
     pub am: f64,              // [m²/m] - heated perimeter per unit length
-    pub v: f64,               // [m²] - cross-sectional area
+    pub v: f64,               // `m²` - cross-sectional area
     pub shadow_factor: f64,   // Shadow effect factor (k_sh)
     pub box_protection: bool, // Box protection (k_sh = 1.0)
 }
@@ -499,9 +499,9 @@ pub struct FireResistanceResult {
     pub time: f64,            // Time [min]
     pub section_temp: f64,    // Average section temperature [°C]
     pub gas_temp: f64,        // Gas temperature [°C]
-    pub fy_reduced: f64,      // Reduced yield strength [Pa]
-    pub e_reduced: f64,       // Reduced Young's modulus [Pa]
-    pub moment_capacity: f64, // Moment capacity at temperature [Nm]
+    pub fy_reduced: f64,      // Reduced yield strength `Pa`
+    pub e_reduced: f64,       // Reduced Young's modulus `Pa`
+    pub moment_capacity: f64, // Moment capacity at temperature `Nm`
     pub axial_capacity: f64,  // Axial capacity at temperature [N]
     pub utilization: f64,     // Utilization ratio
     pub passed: bool,         // Passed fire resistance?

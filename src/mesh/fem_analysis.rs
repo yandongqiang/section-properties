@@ -170,29 +170,29 @@ impl FemSectionAnalysis {
 /// Geometric properties computed from FEM.
 #[derive(Debug, Clone, Copy)]
 pub struct FemGeometricProperties {
-    /// Cross-sectional area [m²]
+    /// Cross-sectional area `m²`
     pub area: f64,
-    /// Centroid coordinates [m]
+    /// Centroid coordinates `m`
     pub centroid: Point,
-    /// Second moment about x-axis [m⁴]
+    /// Second moment about x-axis `m⁴`
     pub ix: f64,
-    /// Second moment about y-axis [m⁴]
+    /// Second moment about y-axis `m⁴`
     pub iy: f64,
-    /// Product of inertia [m⁴]
+    /// Product of inertia `m⁴`
     pub ixy: f64,
-    /// Elastic section modulus about x [m³]
+    /// Elastic section modulus about x `m³`
     pub zx: f64,
-    /// Elastic section modulus about y [m³]
+    /// Elastic section modulus about y `m³`
     pub zy: f64,
-    /// Radius of gyration about x [m]
+    /// Radius of gyration about x `m`
     pub rx: f64,
-    /// Radius of gyration about y [m]
+    /// Radius of gyration about y `m`
     pub ry: f64,
-    /// Polar radius of gyration [m]
+    /// Polar radius of gyration `m`
     pub rp: f64,
-    /// Principal moment 1 (major) [m⁴]
+    /// Principal moment 1 (major) `m⁴`
     pub i1: f64,
-    /// Principal moment 2 (minor) [m⁴]
+    /// Principal moment 2 (minor) `m⁴`
     pub i2: f64,
     /// Principal angle (radians, CCW from x-axis)
     pub principal_angle: f64,
@@ -201,23 +201,23 @@ pub struct FemGeometricProperties {
 /// Warping/torsion properties computed from FEM.
 #[derive(Debug, Clone, Copy)]
 pub struct FemWarpingProperties {
-    /// St. Venant torsion constant J [m⁴]
+    /// St. Venant torsion constant J `m⁴`
     pub j: f64,
-    /// Warping constant Iw [m⁶]
+    /// Warping constant Iw `m⁶`
     pub iw: f64,
-    /// Shear center coordinates relative to centroid [m]
+    /// Shear center coordinates relative to centroid `m`
     pub shear_center: Point,
-    /// Shear area in x direction [m²]
+    /// Shear area in x direction `m²`
     pub ax: f64,
-    /// Shear area in y direction [m²]
+    /// Shear area in y direction `m²`
     pub ay: f64,
-    /// Monosymmetry constant βx [m]
+    /// Monosymmetry constant βx `m`
     pub beta_x: f64,
-    /// Monosymmetry constant βy [m]
+    /// Monosymmetry constant βy `m`
     pub beta_y: f64,
-    /// Torsional radius of gyration [m]
+    /// Torsional radius of gyration `m`
     pub r_t: f64,
-    /// Warping radius of gyration [m]
+    /// Warping radius of gyration `m`
     pub r_w: f64,
 }
 

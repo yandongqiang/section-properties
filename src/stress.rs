@@ -12,11 +12,11 @@ use crate::section_properties::SectionProperties;
 /// Design actions applied to a cross-section.
 #[derive(Debug, Clone, Copy)]
 pub struct SectionLoads {
-    /// Axial force [N] (positive = tension)
+    /// Axial force `N` (positive = tension)
     pub n: f64,
-    /// Shear force in x-direction [N]
+    /// Shear force in x-direction `N`
     pub vx: f64,
-    /// Shear force in y-direction [N]
+    /// Shear force in y-direction `N`
     pub vy: f64,
     /// Bending moment about centroidal x-axis [N·m]
     pub mxx: f64,
@@ -89,59 +89,59 @@ impl Default for SectionLoads {
 /// Stress state at a point in the cross-section, with breakdown by load component.
 #[derive(Debug, Clone, Copy)]
 pub struct StressAtPoint {
-    /// x-coordinate [m]
+    /// x-coordinate `m`
     pub x: f64,
-    /// y-coordinate [m]
+    /// y-coordinate `m`
     pub y: f64,
-    /// Normal stress σ_z from axial force N [Pa]
+    /// Normal stress σ_z from axial force N `Pa`
     pub sig_zz_n: f64,
-    /// Normal stress σ_z from Mxx [Pa]
+    /// Normal stress σ_z from Mxx `Pa`
     pub sig_zz_mxx: f64,
-    /// Normal stress σ_z from Myy [Pa]
+    /// Normal stress σ_z from Myy `Pa`
     pub sig_zz_myy: f64,
-    /// Normal stress σ_z from M11 [Pa]
+    /// Normal stress σ_z from M11 `Pa`
     pub sig_zz_m11: f64,
-    /// Normal stress σ_z from M22 [Pa]
+    /// Normal stress σ_z from M22 `Pa`
     pub sig_zz_m22: f64,
-    /// Shear stress τ_xz from Vx [Pa]
+    /// Shear stress τ_xz from Vx `Pa`
     pub sig_zx_vx: f64,
-    /// Shear stress τ_yz from Vx [Pa]
+    /// Shear stress τ_yz from Vx `Pa`
     pub sig_zy_vx: f64,
-    /// Shear stress τ_xz from Vy [Pa]
+    /// Shear stress τ_xz from Vy `Pa`
     pub sig_zx_vy: f64,
-    /// Shear stress τ_yz from Vy [Pa]
+    /// Shear stress τ_yz from Vy `Pa`
     pub sig_zy_vy: f64,
-    /// Shear stress τ_xz from Mzz (torsion) [Pa]
+    /// Shear stress τ_xz from Mzz (torsion) `Pa`
     pub sig_zx_mzz: f64,
-    /// Shear stress τ_yz from Mzz (torsion) [Pa]
+    /// Shear stress τ_yz from Mzz (torsion) `Pa`
     pub sig_zy_mzz: f64,
-    /// Combined normal stress from all bending moments [Pa]
+    /// Combined normal stress from all bending moments `Pa`
     pub sig_zz_m: f64,
-    /// Resultant shear stress from torsion Mzz [Pa]
+    /// Resultant shear stress from torsion Mzz `Pa`
     pub sig_zxy_mzz: f64,
-    /// Resultant shear stress from Vx [Pa]
+    /// Resultant shear stress from Vx `Pa`
     pub sig_zxy_vx: f64,
-    /// Resultant shear stress from Vy [Pa]
+    /// Resultant shear stress from Vy `Pa`
     pub sig_zxy_vy: f64,
-    /// Combined shear stress τ_xz from all shear forces [Pa]
+    /// Combined shear stress τ_xz from all shear forces `Pa`
     pub sig_zx_v: f64,
-    /// Combined shear stress τ_yz from all shear forces [Pa]
+    /// Combined shear stress τ_yz from all shear forces `Pa`
     pub sig_zy_v: f64,
-    /// Resultant shear stress from all shear forces [Pa]
+    /// Resultant shear stress from all shear forces `Pa`
     pub sig_zxy_v: f64,
-    /// Combined normal stress σ_z [Pa]
+    /// Combined normal stress σ_z `Pa`
     pub sigma_z: f64,
-    /// Combined shear stress τ_xz [Pa]
+    /// Combined shear stress τ_xz `Pa`
     pub tau_xz: f64,
-    /// Combined shear stress τ_yz [Pa]
+    /// Combined shear stress τ_yz `Pa`
     pub tau_yz: f64,
-    /// Resultant shear stress τ_zxy [Pa]
+    /// Resultant shear stress τ_zxy `Pa`
     pub tau_zxy: f64,
-    /// von Mises stress [Pa]
+    /// von Mises stress `Pa`
     pub von_mises: f64,
-    /// Major principal stress [Pa]
+    /// Major principal stress `Pa`
     pub sigma_1: f64,
-    /// Minor principal stress [Pa]
+    /// Minor principal stress `Pa`
     pub sigma_2: f64,
 }
 
@@ -150,19 +150,19 @@ pub struct StressAtPoint {
 pub struct StressAnalysisResult {
     /// Stress at each evaluated point (section boundary vertices).
     pub point_stresses: Vec<StressAtPoint>,
-    /// Maximum normal stress σ_z [Pa]
+    /// Maximum normal stress σ_z `Pa`
     pub max_sigma_z: f64,
-    /// Minimum normal stress σ_z [Pa]
+    /// Minimum normal stress σ_z `Pa`
     pub min_sigma_z: f64,
-    /// Maximum von Mises stress [Pa]
+    /// Maximum von Mises stress `Pa`
     pub max_von_mises: f64,
-    /// Maximum shear stress [Pa]
+    /// Maximum shear stress `Pa`
     pub max_tau: f64,
     /// Location of max von Mises (x, y)
     pub max_vm_location: Point,
     /// Applied loads
     pub loads: SectionLoads,
-    /// Section area [m²]
+    /// Section area `m²`
     pub area: f64,
 }
 
@@ -450,9 +450,9 @@ impl StressAnalysis {
 /// Result of a yield check.
 #[derive(Debug, Clone, Copy)]
 pub struct YieldCheckResult {
-    /// Maximum stress (von Mises) [Pa]
+    /// Maximum stress (von Mises) `Pa`
     pub max_stress: f64,
-    /// Yield strength [Pa]
+    /// Yield strength `Pa`
     pub yield_strength: f64,
     /// Utilization ratio (max_stress / yield_strength)
     pub utilization: f64,

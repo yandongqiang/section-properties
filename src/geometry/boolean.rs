@@ -1131,7 +1131,7 @@ fn section_difference_impl(
 ///
 /// Mirrors shapely `geometry & other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region, or
+/// Returns one [`Section`](crate::section::Section) per disjoint result region, or
 /// [`BooleanError`] if the underlying polygon booleans fail validation.
 pub fn section_intersection(
     a: &crate::section::Section,
@@ -1144,7 +1144,7 @@ pub fn section_intersection(
 ///
 /// Mirrors shapely `geometry - other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region, or
+/// Returns one [`Section`](crate::section::Section) per disjoint result region, or
 /// [`BooleanError`] if the underlying polygon booleans fail validation.
 pub fn section_difference(
     a: &crate::section::Section,
@@ -1157,7 +1157,7 @@ pub fn section_difference(
 ///
 /// Mirrors shapely `geometry | other` as used by Python `sectionproperties`.
 ///
-/// Returns one [`Section`] per disjoint result region, or
+/// Returns one [`Section`](crate::section::Section) per disjoint result region, or
 /// [`BooleanError`] if the underlying polygon booleans fail validation.
 pub fn section_union(
     a: &crate::section::Section,

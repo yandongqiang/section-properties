@@ -53,7 +53,7 @@ pub struct Geometry {
     pub outer: Polygon,
     /// Hole boundaries (each normalised to CW).
     pub holes: Vec<Polygon>,
-    /// Geometric transforms applied in order via [`Geometry::geometries`].
+    /// Geometric transforms applied in order (see [`Geometry`]).
     pub transforms: Vec<Transform>,
 }
 

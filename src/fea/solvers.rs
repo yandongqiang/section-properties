@@ -264,7 +264,7 @@ pub struct SparseLu {
 }
 
 impl SparseLu {
-    /// Get the permutation vector (perm[i] = original row index at position i).
+    /// Get the permutation vector (perm\[i\] = original row index at position i).
     pub fn perm(&self) -> &[usize] {
         &self.perm
     }

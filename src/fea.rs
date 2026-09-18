@@ -90,8 +90,8 @@ pub fn gauss_points(n: usize) -> Vec<(f64, f64, f64, f64)> {
 pub struct ShapeFunctionResult {
     /// Shape function values N(i), i=0..6
     pub n: [f64; 6],
-    /// Shape function derivatives B(i,j): [2][6]
-    /// B[0] = dN/dx, B[1] = dN/dy
+    /// Shape function derivatives B(i,j): `2`×`6`
+    /// B\[0\] = dN/dx, B\[1\] = dN/dy
     pub b: [[f64; 6]; 2],
     /// Jacobian determinant
     pub j: f64,
@@ -103,7 +103,7 @@ pub struct ShapeFunctionResult {
 
 /// Evaluate Tri6 shape functions, derivatives, Jacobian, and global coords.
 ///
-/// `coords` is a 2×6 array: coords[0] = x-coords, coords[1] = y-coords.
+/// `coords` is a 2×6 array: coords\[0\] = x-coords, coords\[1\] = y-coords.
 /// Node ordering: [v0, v1, v2, mid01, mid12, mid20].
 pub fn shape_function(coords: &[[f64; 6]; 2], gp: (f64, f64, f64)) -> ShapeFunctionResult {
     let (eta, xi, zeta) = gp;
@@ -339,7 +339,7 @@ pub fn shear_parameter(nx: f64, ny: f64, ixx: f64, iyy: f64, ixy: f64) -> [f64; 
 pub struct Tri6 {
     /// Element id
     pub el_id: usize,
-    /// Coordinates: coords[0] = x[0..6], coords[1] = y[0..6]
+    /// Coordinates: coords\[0\] = x\[0..6\], coords\[1\] = y\[0..6\]
     pub coords: [[f64; 6]; 2],
     /// Global node ids
     pub node_ids: [usize; 6],
@@ -1332,8 +1332,8 @@ impl CgResult {
 
 /// Solve the Lagrangian system using sparse CG + Schur complement.
 ///
-/// [K  c] [u]   [f]
-/// [c^T 0] [λ] = [0]
+/// \[K  c\] \[u\]   \[f\]
+/// \[c^T 0\] \[λ\] = \[0\]
 ///
 /// u = K^{-1}*(f - c*λ),  λ = (c^T*K^{-1}*c)^{-1} * c^T*K^{-1}*f
 pub fn solve_lagrange_sparse(
@@ -1643,7 +1643,7 @@ impl CscMatrix {
 /// Mirrors Python `solve_direct_lagrange`: the augmented matrix is
 /// [[K, c], [c^T, 0]] assembled by `assemble_torsion_lagrange`, solved with
 /// RHS [f, 0]; the multiplier magnitude must satisfy
-/// |u[N]| / max|u| <= 1e-7.
+/// |u`N`| / max|u| <= 1e-7.
 pub struct DirectLagrangeSolver {
     /// Size of the leading K block.
     pub n: usize,
