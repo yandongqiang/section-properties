@@ -602,7 +602,7 @@ fn validation_insufficient_restraint_is_a_solver_error() -> Result<(), FemError>
     f.nodal_load(b, 0.0, -1.0e3)?;
     let err = f.solve().expect_err("an unsupported frame must not solve");
     assert!(
-        matches!(err, FemError::SolverError(_)),
+        matches!(err, FemError::SolverError { .. }),
         "expected SolverError, got {err:?}"
     );
     println!("  validation: insufficient restraint -> {err:?} (documented)");
@@ -1023,7 +1023,7 @@ fn lifecycle_incomplete_model_errors_and_recovers() -> Result<(), FemError> {
     // panic and not a silently wrong answer.
     f.add_member(a, b, steel(), sec())?;
     let err = f.solve().expect_err("an unrestrained frame must not solve");
-    assert!(matches!(err, FemError::SolverError(_)), "got {err:?}");
+    assert!(matches!(err, FemError::SolverError { .. }), "got {err:?}");
 
     // (d) the failed solves left no state behind and no result exists, so once
     // the model is valid a fresh solve works and is analytically correct.

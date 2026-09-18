@@ -776,7 +776,7 @@ fn robustness_unrestrained_and_empty_models_error() -> Result<(), FemError> {
     let b = f.add_node(2.0, 0.0)?;
     f.add_member(a, b, steel(), sec())?;
     let err = f.solve().expect_err("an unsupported frame must not solve");
-    assert!(matches!(err, FemError::SolverError(_)), "got {err:?}");
+    assert!(matches!(err, FemError::SolverError { .. }), "got {err:?}");
 
     // Nodes but no members.
     let mut g = FrameModel::new();
@@ -984,7 +984,7 @@ fn scale_coordinate_sweep() -> Result<(), FemError> {
             // zero/default (the standing error-handling rule).
             Err(e) => {
                 assert!(
-                    matches!(e, FemError::SolverError(_)),
+                    matches!(e, FemError::SolverError { .. }),
                     "coordinate scale {s:e}: expected a clean SolverError, got {e:?}"
                 );
             }

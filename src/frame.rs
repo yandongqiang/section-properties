@@ -194,15 +194,11 @@ pub struct EquilibriumReport {
     pub reaction_fy: f64,
     /// Sum of reaction moments about the origin, including `x·Ry − y·Rx`.
     pub reaction_mz: f64,
-    /// Absolute force tolerance applied by [`Self::is_balanced`], equal to
-    /// `effective_rel_tol · force_scale`, where `force_scale` is the total force
-    /// magnitude present (applied loads plus recovered reactions, with the
-    /// moments converted to an equivalent force through `l_char`). The effective
-    /// relative tolerance is `max(EQUILIBRIUM_REL_TOL, cond_rel_floor)`: the
-    /// base `1e-6` at normal slenderness, raised by a dimensionless
-    /// element-level conditioning proxy for highly slender frames (see
-    /// `EQUILIBRIUM_COND_FACTOR`. Purely relative: there is no absolute
-    /// floor.
+    /// Absolute **force** tolerance applied by [`Self::is_balanced`], equal to
+    /// `effective_rel_tol · force_scale` (see [`Self::force_tolerance`]). The
+    /// moment tolerance is **not** stored in this field; use
+    /// [`Self::moment_tolerance`] to obtain it. Using `tolerance` to
+    /// threshold `mz_residual` gives a wrong verdict when `l_char != 1`.
     pub tolerance: f64,
     /// Σ of the absolute applied and reaction **force** magnitudes actually
     /// present (per load term, not per resultant — a self-cancelling load pair
@@ -282,6 +278,31 @@ impl EquilibriumReport {
     /// is not mistaken for a physical imbalance.
     fn effective_rel_tol(&self) -> f64 {
         EQUILIBRIUM_REL_TOL.max(self.cond_rel_floor)
+    }
+
+    /// Force tolerance used by [`Self::is_balanced`]: `effective_rel_tol *
+    /// force_scale`, where `force_scale = Σ|F| + Σ|M| / l_char` (see
+    /// [`equilibrium_scales`]). The force residuals `fx_residual` and
+    /// `fy_residual` are compared against this value.
+    ///
+    /// This is identical to the [`Self::tolerance`] field, exposed as a
+    /// method for clarity and symmetry with [`Self::moment_tolerance`].
+    pub fn force_tolerance(&self) -> f64 {
+        let (f_scale, _) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
+        self.effective_rel_tol() * f_scale
+    }
+
+    /// Moment tolerance used by [`Self::is_balanced`]: `effective_rel_tol *
+    /// moment_scale`, where `moment_scale = Σ|M| + Σ|F| * l_char` (see
+    /// [`equilibrium_scales`]). The moment residual `mz_residual` is
+    /// compared against this value.
+    ///
+    /// This is generally **not** equal to [`Self::tolerance`] (which is the
+    /// force tolerance); using `tolerance` to threshold `mz_residual` would
+    /// give a wrong verdict for structures with `l_char != 1`.
+    pub fn moment_tolerance(&self) -> f64 {
+        let (_, m_scale) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
+        self.effective_rel_tol() * m_scale
     }
 }
 
@@ -793,8 +814,13 @@ impl<'a> FrameSolver<'a> {
 /// error untouched.
 fn with_structural_diagnosis(err: FemError, diagnosis: Option<StructuralDiagnostic>) -> FemError {
     match (err, diagnosis) {
-        (FemError::SolverError(msg), Some(d)) if !matches!(d, StructuralDiagnostic::Stable) => {
-            FemError::SolverError(format!("{msg}; structural diagnosis: {d}"))
+        (FemError::SolverError { source, message }, Some(d))
+            if !matches!(d, StructuralDiagnostic::Stable) =>
+        {
+            FemError::SolverError {
+                source,
+                message: format!("{message}; structural diagnosis: {d}"),
+            }
         }
         (other, _) => other,
     }
@@ -1266,9 +1292,9 @@ mod reduced_system_single_source_tests {
         // (a) the frame solve fails as a `SolverError` that carries the verdict.
         let err = f.solve().expect_err("a free beam must not solve");
         match &err {
-            FemError::SolverError(msg) => assert!(
-                msg.contains("structural diagnosis") && msg.contains(&expected.to_string()),
-                "expected the retained-system diagnosis in the error, got {msg:?}"
+            FemError::SolverError { message, .. } => assert!(
+                message.contains("structural diagnosis") && message.contains(&expected.to_string()),
+                "expected the retained-system diagnosis in the error, got {message:?}"
             ),
             other => panic!("expected SolverError, got {other:?}"),
         }
@@ -1298,7 +1324,8 @@ mod reduced_system_single_source_tests {
     /// missing diagnosis (`None`) is a no-op.
     #[test]
     fn diagnosis_only_annotates_mechanism_errors() {
-        let err = || FemError::SolverError("singular matrix".to_string());
+        use crate::fea::solver::SolverError;
+        let err = || FemError::from(SolverError::SingularMatrix("singular matrix".to_string()));
         let untouched = err().to_string();
         assert_eq!(
             with_structural_diagnosis(err(), None).to_string(),
@@ -1311,7 +1338,7 @@ mod reduced_system_single_source_tests {
         let mechanism = StructuralDiagnostic::Mechanism { n_free: 4, rank: 3 };
         let annotated = with_structural_diagnosis(err(), Some(mechanism));
         assert!(
-            matches!(annotated, FemError::SolverError(_)),
+            matches!(annotated, FemError::SolverError { .. }),
             "the error variant must be preserved"
         );
         assert_eq!(

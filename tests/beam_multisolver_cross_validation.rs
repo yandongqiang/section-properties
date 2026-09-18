@@ -607,7 +607,7 @@ fn test_singular_beam_propagates_solver_error() {
         .solve_configured()
         .expect_err("singular beam must not report success");
     assert!(
-        matches!(err, FemError::SolverError(_)),
+        matches!(err, FemError::SolverError { .. }),
         "expected FemError::SolverError, got {:?}",
         err
     );

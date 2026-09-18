@@ -139,10 +139,10 @@ fn test_mesh_convergence_tip_load() {
         println!(
             "               {:2}   {:.9e}   {:.9e}   {:.2e}   {:.2e}",
             n,
-            s.displacement(n, 1),
-            s.displacement(n, 2),
+            s.displacement(n, 1).unwrap(),
+            s.displacement(n, 2).unwrap(),
             worst,
-            reldiff(s.displacement(n, 2), an_rz)
+            reldiff(s.displacement(n, 2).unwrap(), an_rz)
         );
     }
 }
@@ -197,10 +197,10 @@ fn test_mesh_convergence_udl() {
         println!(
             "               {:2}   {:.9e}   {:.9e}   {:.2e}   {:.2e}",
             n,
-            s.displacement(n, 1),
-            s.displacement(n, 2),
+            s.displacement(n, 1).unwrap(),
+            s.displacement(n, 2).unwrap(),
             worst,
-            reldiff(s.displacement(n, 2), an_rz)
+            reldiff(s.displacement(n, 2).unwrap(), an_rz)
         );
     }
 }
@@ -531,7 +531,7 @@ fn test_combined_axial_bending() {
         let axial_only = {
             let mut m = unit(2);
             m.add_nodal_force(2, 0, f);
-            solve_named(&m, name).displacement(2, 0)
+            solve_named(&m, name).displacement(2, 0).unwrap()
         };
         assert_mixed(
             r.displacement(2).unwrap().ux,
@@ -575,17 +575,23 @@ fn test_combined_axial_udl_moment() {
             (
                 "ux",
                 dc.ux,
-                a.displacement(2, 0) + u.displacement(2, 0) + mm.displacement(2, 0),
+                a.displacement(2, 0).unwrap()
+                    + u.displacement(2, 0).unwrap()
+                    + mm.displacement(2, 0).unwrap(),
             ),
             (
                 "uy",
                 dc.uy,
-                a.displacement(2, 1) + u.displacement(2, 1) + mm.displacement(2, 1),
+                a.displacement(2, 1).unwrap()
+                    + u.displacement(2, 1).unwrap()
+                    + mm.displacement(2, 1).unwrap(),
             ),
             (
                 "rz",
                 dc.rz,
-                a.displacement(2, 2) + u.displacement(2, 2) + mm.displacement(2, 2),
+                a.displacement(2, 2).unwrap()
+                    + u.displacement(2, 2).unwrap()
+                    + mm.displacement(2, 2).unwrap(),
             ),
         ] {
             assert_mixed(
@@ -858,14 +864,14 @@ fn test_scale_invariance() {
         for &name in &DIRECT {
             let sb = solve_named(&bend, name);
             assert_mixed(
-                sb.displacement(1, 1),
+                sb.displacement(1, 1).unwrap(),
                 -p / (3.0 * e),
                 1e-12,
                 1e-9,
                 &format!("E={:e} {} δ ∝ 1/EI", e, name),
             );
             assert_mixed(
-                sb.displacement(1, 2),
+                sb.displacement(1, 2).unwrap(),
                 -p / (2.0 * e),
                 1e-12,
                 1e-9,
@@ -888,7 +894,7 @@ fn test_scale_invariance() {
 
             let sa = solve_named(&ax, name);
             assert_mixed(
-                sa.displacement(1, 0),
+                sa.displacement(1, 0).unwrap(),
                 f / e,
                 1e-12,
                 1e-9,
@@ -904,7 +910,7 @@ fn test_scale_invariance() {
 
             let sm = solve_named(&mo, name);
             assert_mixed(
-                sm.displacement(1, 2),
+                sm.displacement(1, 2).unwrap(),
                 m / e,
                 1e-12,
                 1e-9,
@@ -921,14 +927,14 @@ fn test_scale_invariance() {
         bend.add_nodal_force(1, 1, -p);
         for &name in &DIRECT {
             assert_mixed(
-                solve_named(&ax, name).displacement(1, 0),
+                solve_named(&ax, name).displacement(1, 0).unwrap(),
                 f / sc,
                 1e-12,
                 1e-9,
                 &format!("A={} u ∝ 1/A", sc),
             );
             assert_mixed(
-                solve_named(&bend, name).displacement(1, 1),
+                solve_named(&bend, name).displacement(1, 1).unwrap(),
                 -p / (3.0 * sc),
                 1e-12,
                 1e-9,

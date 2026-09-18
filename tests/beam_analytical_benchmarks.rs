@@ -366,11 +366,11 @@ fn test_benchmark_e_superposition() {
 
     // Superposition of all DOFs.
     for dof in 0..3 {
-        let sum = s_ax.displacement(1, dof)
-            + s_tr.displacement(1, dof)
-            + s_mo.displacement(1, dof)
-            + s_ud.displacement(1, dof);
-        let got = s_c.displacement(1, dof);
+        let sum = s_ax.displacement(1, dof).unwrap()
+            + s_tr.displacement(1, dof).unwrap()
+            + s_mo.displacement(1, dof).unwrap()
+            + s_ud.displacement(1, dof).unwrap();
+        let got = s_c.displacement(1, dof).unwrap();
         assert_close(got, sum, 1e-9, &format!("superposed disp dof{}", dof));
     }
 
@@ -422,7 +422,7 @@ fn test_benchmark_f_mesh_convergence() {
         let mut mt = beam_chain(n, l, e, A0, i);
         mt.add_nodal_force(n, 1, -p);
         let st = solve(&mt);
-        let uy = st.displacement(n, 1);
+        let uy = st.displacement(n, 1).unwrap();
         let e_uy = rel_err(uy, -cantilever_tip_disp(p, l, ei));
         let ry = st.reactions()[1];
         let e_ry = rel_err(ry, p);
@@ -437,7 +437,7 @@ fn test_benchmark_f_mesh_convergence() {
             mu.add_distributed_load(k, 0.0, -q).unwrap();
         }
         let su = solve(&mu);
-        let uy_u = su.displacement(n, 1);
+        let uy_u = su.displacement(n, 1).unwrap();
         let e_uy_u = rel_err(uy_u, -cantilever_udl_tip_disp(q, l, ei));
         let ry_u = su.reactions()[1];
         let e_ry_u = rel_err(ry_u, q * l);
@@ -613,14 +613,14 @@ fn test_benchmark_i_scaling_laws() {
         let sb = solve(&b);
 
         assert_close(
-            sb.displacement(1, 1) * alpha,
-            sa.displacement(1, 1),
+            sb.displacement(1, 1).unwrap() * alpha,
+            sa.displacement(1, 1).unwrap(),
             1e-9,
             "uy ∝ 1/E",
         );
         assert_close(
-            sb.displacement(1, 2) * alpha,
-            sa.displacement(1, 2),
+            sb.displacement(1, 2).unwrap() * alpha,
+            sa.displacement(1, 2).unwrap(),
             1e-9,
             "rz ∝ 1/E",
         );
@@ -658,14 +658,14 @@ fn test_benchmark_i_scaling_laws() {
         let s1 = solve(&make(1.0));
         let s2 = solve(&make(alpha));
         assert_close(
-            s2.displacement(1, 1),
-            alpha * s1.displacement(1, 1),
+            s2.displacement(1, 1).unwrap(),
+            alpha * s1.displacement(1, 1).unwrap(),
             1e-9,
             &format!("{} uy ∝ α", label),
         );
         assert_close(
-            s2.displacement(1, 2),
-            alpha * s1.displacement(1, 2),
+            s2.displacement(1, 2).unwrap(),
+            alpha * s1.displacement(1, 2).unwrap(),
             1e-9,
             &format!("{} rz ∝ α", label),
         );
@@ -694,7 +694,7 @@ fn test_benchmark_i_scaling_laws() {
         let sb = solve(&b);
         let ratio = (l2 / l1).powi(3);
         assert_close(
-            sb.displacement(1, 1) / sa.displacement(1, 1),
+            sb.displacement(1, 1).unwrap() / sa.displacement(1, 1).unwrap(),
             ratio,
             1e-9,
             "tip-force uy ∝ L³",
@@ -708,7 +708,7 @@ fn test_benchmark_i_scaling_laws() {
         let sb = solve(&b);
         let ratio4 = (l2 / l1).powi(4);
         assert_close(
-            sb.displacement(1, 1) / sa.displacement(1, 1),
+            sb.displacement(1, 1).unwrap() / sa.displacement(1, 1).unwrap(),
             ratio4,
             1e-9,
             "udl uy ∝ L⁴",
@@ -737,8 +737,8 @@ fn test_benchmark_j_section_property_scaling() {
     bend_2i.add_nodal_force(1, 1, -p);
     let s_bend_2i = solve(&bend_2i);
     assert_close(
-        s_bend_2i.displacement(1, 1),
-        s_bend_ref.displacement(1, 1) / 2.0,
+        s_bend_2i.displacement(1, 1).unwrap(),
+        s_bend_ref.displacement(1, 1).unwrap() / 2.0,
         1e-9,
         "bending u ∝ 1/I",
     );
@@ -751,21 +751,21 @@ fn test_benchmark_j_section_property_scaling() {
     ax_4a.add_nodal_force(1, 0, f);
     let s_ax_4a = solve(&ax_4a);
     assert_close(
-        s_ax_4a.displacement(1, 0),
-        s_ax_ref.displacement(1, 0) / 4.0,
+        s_ax_4a.displacement(1, 0).unwrap(),
+        s_ax_ref.displacement(1, 0).unwrap() / 4.0,
         1e-9,
         "axial u ∝ 1/A",
     );
 
     // Stiffness products EA and EI set the response.
     assert_close(
-        s_ax_ref.displacement(1, 0),
+        s_ax_ref.displacement(1, 0).unwrap(),
         f * l / (e * a_ref),
         1e-12,
         "EA scaling",
     );
     assert_close(
-        s_bend_ref.displacement(1, 1),
+        s_bend_ref.displacement(1, 1).unwrap(),
         -p * l.powi(3) / (3.0 * e * i_ref),
         1e-10,
         "EI scaling",
@@ -880,7 +880,7 @@ fn test_benchmark_m_energy_consistency() {
     let mut model = beam_chain(1, l, e, A0, i);
     model.add_nodal_force(1, 1, -p);
     let solver = solve(&model);
-    let u_tip = solver.displacement(1, 1);
+    let u_tip = solver.displacement(1, 1).unwrap();
 
     // Bending strain energy U = ∫ M²/(2EI) dx, using the public section recovery.
     let n = 200; // even
@@ -916,7 +916,7 @@ fn test_benchmark_m_energy_consistency() {
         n2_vals.push(nn * nn);
     }
     let u_ax: f64 = simpson(&n2_vals, dx) / (2.0 * e * A0);
-    let w_ax = 0.5 * f * sa.displacement(1, 0);
+    let w_ax = 0.5 * f * sa.displacement(1, 0).unwrap();
     assert_close(u_ax, w_ax, 1e-9, "axial U == W");
 
     println!(
@@ -946,7 +946,7 @@ fn test_benchmark_n_result_api_consistency() {
     for node in 0..4 {
         assert_close(
             r.displacement(node).unwrap().uy,
-            solver.displacement(node, 1),
+            solver.displacement(node, 1).unwrap(),
             1e-15,
             "result displacement == solver",
         );
@@ -1032,15 +1032,19 @@ fn test_benchmark_o_result_displacements_layout() {
     // Documented layout: [ux0, uy0, rz0, ux1, uy1, rz1, ...].
     for node in 0..r.n_nodes() {
         // Numerical equality with the solver's per-DOF accessor.
-        assert_eq!(u[node * 3], solver.displacement(node, 0), "DOF order ux");
+        assert_eq!(
+            u[node * 3],
+            solver.displacement(node, 0).unwrap(),
+            "DOF order ux"
+        );
         assert_eq!(
             u[node * 3 + 1],
-            solver.displacement(node, 1),
+            solver.displacement(node, 1).unwrap(),
             "DOF order uy"
         );
         assert_eq!(
             u[node * 3 + 2],
-            solver.displacement(node, 2),
+            solver.displacement(node, 2).unwrap(),
             "DOF order rz"
         );
 

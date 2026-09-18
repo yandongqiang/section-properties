@@ -241,8 +241,8 @@ fn test_beam_solver_cantilever() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Check displacements
-    let v_tip = solver.displacement(1, 1);
-    let theta_tip = solver.displacement(1, 2);
+    let v_tip = solver.displacement(1, 1).unwrap();
+    let theta_tip = solver.displacement(1, 2).unwrap();
 
     // Analytical: v = PL³/3EI, θ = PL²/2EI (P positive upward, our force is downward)
     let force = -1000.0; // Downward force
@@ -311,7 +311,7 @@ fn test_beam_solver_vertical() {
     // Deflection: v = P*L³/(3EI) where P is force in local v direction
     // For vertical beam, global -x force = local +v force (since T: local v = -global u)
     // So P_local = +1000, expected v_tip = 1000*L³/(3EI) in local v = global x
-    let u_tip = solver.displacement(1, 0); // Global x displacement at tip
+    let u_tip = solver.displacement(1, 0).unwrap(); // Global x displacement at tip
     // For vertical beam: local v = -global u. Force -P in global x = +P in local v.
     // Deflection in local v: v = P*L³/(3EI). Global u = -v = -P*L³/(3EI)
     let expected_u = -P * L.powi(3) / (3.0 * E * I);
@@ -353,7 +353,7 @@ fn test_beam_solver_45_degree() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Check that we get a reasonable displacement
-    let v_tip = solver.displacement(1, 1);
+    let v_tip = solver.displacement(1, 1).unwrap();
     assert!(v_tip < 0.0); // Downward displacement
 }
 
@@ -383,7 +383,7 @@ fn test_beam_solver_axial() {
 
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
-    let u_tip = solver.displacement(1, 0);
+    let u_tip = solver.displacement(1, 0).unwrap();
     // Compressive force -P gives negative displacement
     let expected_u = -P * L / (E * A);
     let error = (u_tip - expected_u).abs() / expected_u.abs();
@@ -424,9 +424,9 @@ fn test_beam_solver_solver_equivalence() {
             .expect(&format!("Solve failed for {}", name));
 
         displacements.push((
-            solver.displacement(1, 0),
-            solver.displacement(1, 1),
-            solver.displacement(1, 2),
+            solver.displacement(1, 0).unwrap(),
+            solver.displacement(1, 1).unwrap(),
+            solver.displacement(1, 2).unwrap(),
         ));
     }
 
@@ -482,7 +482,7 @@ fn test_cantilever_scale_invariance() {
         // Use Dense solver for small matrix (n=6) - handles scale better
         let mut linear_solver = registry.create("dense").unwrap();
         solver.solve(&mut *linear_solver).unwrap();
-        let v = solver.displacement(1, 1);
+        let v = solver.displacement(1, 1).unwrap();
 
         // Expected: v = P*L³/(3EI) = (α*P0)*L³/(3*(α*E0)*(α*I0)) = v0 / α
         let v_expected = (-1000.0 * alpha) * L.powi(3) / (3.0 * (E * alpha) * (I * alpha));
@@ -568,7 +568,7 @@ fn test_mesh_convergence() {
         let mut linear_solver = registry.create("dense").unwrap();
         solver.solve(&mut *linear_solver).unwrap();
 
-        let v_tip = solver.displacement(n_elem, 1);
+        let v_tip = solver.displacement(n_elem, 1).unwrap();
         let error = (v_tip - expected_v).abs() / expected_v.abs();
 
         println!("n_elem={}, v_tip={}, error={:.2e}", n_elem, v_tip, error);
@@ -628,7 +628,7 @@ fn test_nonzero_prescribed_displacement() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Check that prescribed displacement is enforced exactly
-    let v_at_fixed = solver.displacement(0, 1);
+    let v_at_fixed = solver.displacement(0, 1).unwrap();
     assert!(
         (v_at_fixed - prescribed_v).abs() < 1e-12,
         "Prescribed displacement not enforced: expected {}, got {}",
@@ -682,7 +682,7 @@ fn test_reactions_with_nonzero_bc() {
 
     // The prescribed displacement at node 0, v = 0.001
     // should be exactly enforced
-    let v_fixed = solver.displacement(0, 1);
+    let v_fixed = solver.displacement(0, 1).unwrap();
     assert!((v_fixed - prescribed_d).abs() < 1e-12);
 
     // Reactions should be computable without error
@@ -727,7 +727,7 @@ fn test_reaction_with_nonzero_prescribed_displacement_analytical() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Verify prescribed displacement is enforced
-    let v_fixed = solver.displacement(0, 1);
+    let v_fixed = solver.displacement(0, 1).unwrap();
     assert!((v_fixed - prescribed_v).abs() < 1e-12);
 
     // With only prescribed displacement and no external forces,
@@ -780,7 +780,7 @@ fn test_reaction_with_nonzero_prescribed_displacement_analytical() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Verify prescribed displacement is enforced
-    let v_fixed = solver.displacement(0, 1);
+    let v_fixed = solver.displacement(0, 1).unwrap();
     assert!((v_fixed - prescribed_v).abs() < 1e-12);
 
     // Reaction at fixed support with prescribed settlement AND external force
@@ -1158,9 +1158,9 @@ fn test_solver_equivalence_reactions() {
 
         let reactions = solver.reactions();
         let disp = (
-            solver.displacement(1, 0),
-            solver.displacement(1, 1),
-            solver.displacement(1, 2),
+            solver.displacement(1, 0).unwrap(),
+            solver.displacement(1, 1).unwrap(),
+            solver.displacement(1, 2).unwrap(),
         );
 
         all_reactions.push(reactions);
@@ -1377,8 +1377,8 @@ fn test_cantilever_uniform_distributed_load_analytical() {
     solver.solve(&mut *linear_solver).expect("Solve failed");
 
     // Check displacements at tip (node 1)
-    let v_tip = solver.displacement(1, 1);
-    let theta_tip = solver.displacement(1, 2);
+    let v_tip = solver.displacement(1, 1).unwrap();
+    let theta_tip = solver.displacement(1, 2).unwrap();
 
     // Analytical: v = q * L^4 / (8 * E * I), θ = q * L^3 / (6 * E * I)
     // Note: q is negative (downward), so v_tip and theta_tip should be negative
@@ -1474,7 +1474,7 @@ fn test_cantilever_distributed_load_mesh_convergence() {
         let mut linear_solver = registry.create("dense").unwrap();
         solver.solve(&mut *linear_solver).unwrap();
 
-        let v_tip = solver.displacement(n_elem, 1);
+        let v_tip = solver.displacement(n_elem, 1).unwrap();
         let v_error = (v_tip - expected_v).abs() / expected_v.abs();
 
         println!("n_elem={}, v_tip={}, error={:.2e}", n_elem, v_tip, v_error);
@@ -1530,7 +1530,7 @@ fn test_rotated_beam_distributed_load() {
     let mut linear_solver = registry.create("dense").unwrap();
     solver_h.solve(&mut *linear_solver).unwrap();
 
-    let v_tip_h = solver_h.displacement(1, 1); // Global y displacement
+    let v_tip_h = solver_h.displacement(1, 1).unwrap(); // Global y displacement
     let reactions_h = solver_h.reactions();
     let ry_h = reactions_h[1];
 
@@ -1559,7 +1559,7 @@ fn test_rotated_beam_distributed_load() {
     solver_45.solve(&mut *linear_solver).unwrap();
 
     // Displacement in global y at tip
-    let v_tip_45 = solver_45.displacement(1, 1);
+    let v_tip_45 = solver_45.displacement(1, 1).unwrap();
     let reactions_45 = solver_45.reactions();
     let ry_45 = reactions_45[1];
 
@@ -1628,7 +1628,7 @@ fn test_rotated_beam_distributed_load() {
 
     // Global x displacement at tip should match horizontal beam global y displacement in magnitude
     // (sign may differ due to coordinate transformation)
-    let u_tip_v = solver_v_trans.displacement(1, 0);
+    let u_tip_v = solver_v_trans.displacement(1, 0).unwrap();
     let reactions_v_trans = solver_v_trans.reactions();
     let rx_v = reactions_v_trans[0];
 
@@ -1733,8 +1733,8 @@ fn test_cantilever_interior_point_load() {
     solver.solve(&mut *linear_solver).unwrap();
 
     // Check displacements at tip
-    let v_tip = solver.displacement(1, 1);
-    let theta_tip = solver.displacement(1, 2);
+    let v_tip = solver.displacement(1, 1).unwrap();
+    let theta_tip = solver.displacement(1, 2).unwrap();
 
     // Single element FEM with equivalent nodal loads for point load at midspan:
     // v_tip = -5/48 * P*L³/EI (not -1/6 which is exact continuum)
@@ -1916,8 +1916,8 @@ fn test_cantilever_applied_moment() {
     let mut linear_solver = registry.create("dense").unwrap();
     solver.solve(&mut *linear_solver).unwrap();
 
-    let v_tip = solver.displacement(1, 1);
-    let theta_tip = solver.displacement(1, 2);
+    let v_tip = solver.displacement(1, 1).unwrap();
+    let theta_tip = solver.displacement(1, 2).unwrap();
 
     let expected_v = M * L.powi(2) / (2.0 * E * I);
     let expected_theta = M * L / (E * I);
@@ -2115,7 +2115,7 @@ fn test_point_load_mesh_convergence() {
         let mut linear_solver = registry.create("dense").unwrap();
         solver.solve(&mut *linear_solver).unwrap();
 
-        let v_tip = solver.displacement(n_elem, 1);
+        let v_tip = solver.displacement(n_elem, 1).unwrap();
         let v_error = (v_tip - expected_v).abs() / expected_v.abs();
 
         println!("n_elem={}, v_tip={}, error={:.2e}", n_elem, v_tip, v_error);
@@ -2160,7 +2160,7 @@ fn test_rotated_beam_point_load() {
     let mut linear_solver = registry.create("dense").unwrap();
     solver_h.solve(&mut *linear_solver).unwrap();
 
-    let v_tip_h = solver_h.displacement(1, 1);
+    let v_tip_h = solver_h.displacement(1, 1).unwrap();
     let reactions_h = solver_h.reactions();
     let ry_h = reactions_h[1];
 
@@ -2183,7 +2183,7 @@ fn test_rotated_beam_point_load() {
     let mut linear_solver = registry.create("dense").unwrap();
     solver_45.solve(&mut *linear_solver).unwrap();
 
-    let v_tip_45 = solver_45.displacement(1, 1);
+    let v_tip_45 = solver_45.displacement(1, 1).unwrap();
     let reactions_45 = solver_45.reactions();
     let ry_45 = reactions_45[1];
 
@@ -2310,7 +2310,7 @@ fn test_point_load_scale_invariance() {
         let mut linear_solver = registry.create("dense").unwrap();
         solver.solve(&mut *linear_solver).unwrap();
 
-        let v_tip = solver.displacement(1, 1);
+        let v_tip = solver.displacement(1, 1).unwrap();
 
         // Expected: v = P*L^3/(3EI) = (alpha*P)/(alpha*E*alpha*I) = v0 / alpha
         let expected_v = (-P * alpha) * L.powi(3) / (3.0 * (200e9 * alpha) * (I * alpha));

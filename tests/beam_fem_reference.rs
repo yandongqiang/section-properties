@@ -572,7 +572,7 @@ fn test_mesh_refinement_convergence() {
         let uy_an = -p * L.powi(3) / (3.0 * EI);
         let e_tip = max_err_all_backends(&mt, |s| {
             vec![
-                (s.displacement(n, 1), uy_an),
+                (s.displacement(n, 1).unwrap(), uy_an),
                 (s.reactions()[1], p),
                 (s.reactions()[2], p * L),
             ]
@@ -586,7 +586,7 @@ fn test_mesh_refinement_convergence() {
         let uy_an_u = -q * L.powi(4) / (8.0 * EI);
         let e_udl = max_err_all_backends(&mu, |s| {
             vec![
-                (s.displacement(n, 1), uy_an_u),
+                (s.displacement(n, 1).unwrap(), uy_an_u),
                 (s.reactions()[1], q * L),
                 (s.reactions()[2], q * L * L / 2.0),
             ]

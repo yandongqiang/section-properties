@@ -133,7 +133,7 @@ fn free_structure_is_a_rigid_body_mechanism() -> Result<(), FemError> {
 
     // Not a valid solution, and no panic / silent zero solve.
     let err = f.solve().expect_err("a free structure must not solve");
-    assert!(matches!(err, FemError::SolverError(_)), "got {err:?}");
+    assert!(matches!(err, FemError::SolverError { .. }), "got {err:?}");
     // The solver error is no longer opaque: it carries the diagnosis.
     assert!(
         err.to_string().contains("rigid-body"),
@@ -576,7 +576,7 @@ fn ill_conditioning_is_never_reported_as_a_mechanism() -> Result<(), FemError> {
                 let uy = r.displacement(tip, Dof::Uy)?;
                 assert!(uy.is_finite(), "L = {len:e}: non-finite displacement {uy}");
             }
-            Err(e) => assert!(matches!(e, FemError::SolverError(_)), "got {e:?}"),
+            Err(e) => assert!(matches!(e, FemError::SolverError { .. }), "got {e:?}"),
         }
     }
 

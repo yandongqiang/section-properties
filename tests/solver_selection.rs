@@ -433,8 +433,8 @@ fn test_beam_cg_selection() {
         Ok(()) => {
             assert_eq!(cg.solver_name(), Some("cg"));
             assert_rel(
-                cg.displacement(1, 1),
-                dense.displacement(1, 1),
+                cg.displacement(1, 1).unwrap(),
+                dense.displacement(1, 1).unwrap(),
                 1e-8,
                 "cg vs sparse_lu uy",
             );
@@ -444,13 +444,16 @@ fn test_beam_cg_selection() {
                 1e-8,
                 "cg vs sparse_lu Ry",
             );
-            println!("[beam cg] uy={:.6e}", cg.displacement(1, 1));
+            println!("[beam cg] uy={:.6e}", cg.displacement(1, 1).unwrap());
         }
         Err(e) => {
             // CG may legitimately decline; the error must be an explicit solver
             // error (never a silently wrong answer).
             assert!(
-                matches!(e, section_properties::beam_fem::FemError::SolverError(_)),
+                matches!(
+                    e,
+                    section_properties::beam_fem::FemError::SolverError { .. }
+                ),
                 "cg failed with a non-solver error: {:?}",
                 e
             );

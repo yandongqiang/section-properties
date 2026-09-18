@@ -318,7 +318,13 @@ fn test_backend_axial_bar() {
     };
     run_direct_case("axial", build, |s, _| {
         let ea = e * a;
-        assert_pair(s.displacement(1, 0), p * l / ea, 1e-15, 1e-10, "u_tip");
+        assert_pair(
+            s.displacement(1, 0).unwrap(),
+            p * l / ea,
+            1e-15,
+            1e-10,
+            "u_tip",
+        );
         assert_pair(s.reactions()[0], -p, 1e-9, 1e-10, "Rx");
         assert_pair(
             s.element_section_forces(0, 0.5).unwrap().axial,
@@ -345,14 +351,14 @@ fn test_backend_cantilever_tip_force() {
     };
     run_direct_case("tip force", build, |s, _| {
         assert_pair(
-            s.displacement(1, 1),
+            s.displacement(1, 1).unwrap(),
             -an_tip_disp(p, l, ei),
             1e-15,
             1e-9,
             "uy",
         );
         assert_pair(
-            s.displacement(1, 2),
+            s.displacement(1, 2).unwrap(),
             -an_tip_rot(p, l, ei),
             1e-15,
             1e-9,
@@ -382,9 +388,15 @@ fn test_backend_cantilever_tip_moment() {
         m
     };
     run_direct_case("tip moment", build, |s, _| {
-        assert_pair(s.displacement(1, 2), m0 * l / ei, 1e-15, 1e-9, "rz");
         assert_pair(
-            s.displacement(1, 1),
+            s.displacement(1, 2).unwrap(),
+            m0 * l / ei,
+            1e-15,
+            1e-9,
+            "rz",
+        );
+        assert_pair(
+            s.displacement(1, 1).unwrap(),
             m0 * l * l / (2.0 * ei),
             1e-15,
             1e-9,
@@ -420,14 +432,14 @@ fn test_backend_cantilever_udl() {
         assert_pair(s.reactions()[1], q * l, 1e-9, 1e-10, "Ry");
         assert_pair(s.reactions()[2], q * l * l / 2.0, 1e-9, 1e-10, "Rz");
         assert_pair(
-            s.displacement(1, 1),
+            s.displacement(1, 1).unwrap(),
             -an_udl_disp(q, l, ei),
             1e-15,
             1e-9,
             "uy",
         );
         assert_pair(
-            s.displacement(1, 2),
+            s.displacement(1, 2).unwrap(),
             -an_udl_rot(q, l, ei),
             1e-15,
             1e-9,
@@ -498,13 +510,13 @@ fn test_backend_scaling_audit() {
     for &backend in &DIRECT {
         // Reference E0, load 1.
         let s_ref = solve_backend(&build(E0, 1.0), backend);
-        let uy_ref = s_ref.displacement(1, 1);
+        let uy_ref = s_ref.displacement(1, 1).unwrap();
         let ry_ref = s_ref.reactions()[1];
 
         for &ef in &[0.1, 1.0, 10.0] {
             for &lf in &[0.1, 1.0, 10.0] {
                 let s = solve_backend(&build(E0 * ef, lf), backend);
-                let uy = s.displacement(1, 1);
+                let uy = s.displacement(1, 1).unwrap();
                 let ry = s.reactions()[1];
                 // u ∝ load / E ; reactions ∝ load, independent of E.
                 let expected_u = uy_ref * (lf / ef);
@@ -562,7 +574,8 @@ fn test_backend_rotation_invariance() {
             let solver = solve_backend(&m, backend);
 
             // Local tip deflection uy_l = -s·ux_g + c·uy_g.
-            let uy_l = -s * solver.displacement(1, 0) + c * solver.displacement(1, 1);
+            let uy_l =
+                -s * solver.displacement(1, 0).unwrap() + c * solver.displacement(1, 1).unwrap();
             assert_pair(
                 uy_l,
                 -an_tip_disp(p, l, ei),
@@ -625,7 +638,7 @@ fn test_backend_unequal_element_lengths() {
         assert_pair(s.reactions()[1], p, 1e-9, 1e-10, "Ry");
         assert_pair(s.reactions()[2], p * l_total, 1e-9, 1e-10, "Rz");
         assert_pair(
-            s.displacement(3, 1),
+            s.displacement(3, 1).unwrap(),
             -an_tip_disp(p, l_total, ei),
             1e-15,
             1e-9,
@@ -665,7 +678,7 @@ fn test_backend_result_api_consistency() {
         for node in 0..r.n_nodes() {
             assert_eq!(
                 r.displacement(node).unwrap().uy,
-                solver.displacement(node, 1)
+                solver.displacement(node, 1).unwrap()
             );
         }
         let raw = solver.reactions();
@@ -754,8 +767,8 @@ fn test_backend_iterative_cg_applicable() {
     let cg = solve_backend(model, "cg");
     let dense = solve_backend(model, "dense");
     assert_pair(
-        cg.displacement(1, 1),
-        dense.displacement(1, 1),
+        cg.displacement(1, 1).unwrap(),
+        dense.displacement(1, 1).unwrap(),
         1e-12,
         1e-8,
         "cg vs dense uy",
@@ -805,8 +818,8 @@ fn test_backend_iccg_optional() {
                 ok_count += 1;
                 // A successful result is held to the same correctness bar.
                 assert_pair(
-                    solver.displacement(1, 1),
-                    reference.displacement(1, 1),
+                    solver.displacement(1, 1).unwrap(),
+                    reference.displacement(1, 1).unwrap(),
                     1e-8,
                     1e-6,
                     "iccg vs dense uy",
@@ -830,7 +843,7 @@ fn test_backend_iccg_optional() {
                     a.energy_rel
                 );
             }
-            Err(FemError::SolverError(_)) => err_count += 1,
+            Err(FemError::SolverError { .. }) => err_count += 1,
             Err(other) => panic!("iccg returned an unexpected non-solver error: {:?}", other),
         }
     }

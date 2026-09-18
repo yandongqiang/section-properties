@@ -91,7 +91,13 @@ fn test_axial_tip_force_analytical() {
     for &name in &DIRECT {
         let s = solve_named(&m, name);
         // u(L) = P L / EA
-        assert_num(s.displacement(2, 0), P * L / EA, 1e-14, 1e-9, "u(L)");
+        assert_num(
+            s.displacement(2, 0).unwrap(),
+            P * L / EA,
+            1e-14,
+            1e-9,
+            "u(L)",
+        );
         // Support reaction + P = 0.
         assert_equilibrium(&s, P, 0.0, 0.0, "axial tip");
         // Axial force is constant +P in both elements.
@@ -116,7 +122,7 @@ fn test_axial_udl_analytical() {
         let s = solve_named(&m, name);
         // u(L) = qx L^2 / (2 EA)
         assert_num(
-            s.displacement(2, 0),
+            s.displacement(2, 0).unwrap(),
             qx * L * L / (2.0 * EA),
             1e-14,
             1e-9,
@@ -157,7 +163,7 @@ fn test_axial_scaling() {
         mp.add_nodal_force(1, 0, alpha * P);
         let sp = solve_named(&mp, "dense");
         assert_num(
-            sp.displacement(1, 0),
+            sp.displacement(1, 0).unwrap(),
             alpha * P * L / EA,
             1e-14,
             1e-9,
@@ -171,7 +177,7 @@ fn test_axial_scaling() {
         ml.fix_node(0);
         ml.add_nodal_force(1, 0, P);
         assert_num(
-            solve_named(&ml, "dense").displacement(1, 0),
+            solve_named(&ml, "dense").displacement(1, 0).unwrap(),
             P * alpha * L / EA,
             1e-14,
             1e-9,
@@ -182,7 +188,7 @@ fn test_axial_scaling() {
         me.add_nodal_force(1, 0, P);
         me.elements[0].material = Material::new(alpha * E, 0.3, 7850.0, "S");
         assert_num(
-            solve_named(&me, "dense").displacement(1, 0),
+            solve_named(&me, "dense").displacement(1, 0).unwrap(),
             P * L / (alpha * EA),
             1e-14,
             1e-9,
@@ -192,7 +198,7 @@ fn test_axial_scaling() {
         ma.add_nodal_force(1, 0, P);
         ma.elements[0].section = BeamSection::new(alpha * A, I);
         assert_num(
-            solve_named(&ma, "dense").displacement(1, 0),
+            solve_named(&ma, "dense").displacement(1, 0).unwrap(),
             P * L / (alpha * EA),
             1e-14,
             1e-9,
@@ -213,14 +219,14 @@ fn test_bending_tip_force_analytical() {
     for &name in &DIRECT {
         let s = solve_named(&m, name);
         assert_num(
-            s.displacement(2, 1),
+            s.displacement(2, 1).unwrap(),
             -P * L.powi(3) / (3.0 * EI),
             1e-14,
             1e-9,
             "v(L)",
         );
         assert_num(
-            s.displacement(2, 2),
+            s.displacement(2, 2).unwrap(),
             -P * L.powi(2) / (2.0 * EI),
             1e-14,
             1e-9,
@@ -256,14 +262,14 @@ fn test_bending_udl_analytical() {
     for &name in &DIRECT {
         let s = solve_named(&m, name);
         assert_num(
-            s.displacement(4, 1),
+            s.displacement(4, 1).unwrap(),
             -Q * L.powi(4) / (8.0 * EI),
             1e-14,
             1e-9,
             "v(L)",
         );
         assert_num(
-            s.displacement(4, 2),
+            s.displacement(4, 2).unwrap(),
             -Q * L.powi(3) / (6.0 * EI),
             1e-14,
             1e-9,
@@ -296,9 +302,15 @@ fn test_bending_tip_moment_analytical() {
     for &name in &DIRECT {
         let s = solve_named(&m, name);
         // theta(L) = M L / EI ; v(L) = M L^2 / (2 EI)
-        assert_num(s.displacement(2, 2), M0 * L / EI, 1e-14, 1e-9, "theta(L)");
         assert_num(
-            s.displacement(2, 1),
+            s.displacement(2, 2).unwrap(),
+            M0 * L / EI,
+            1e-14,
+            1e-9,
+            "theta(L)",
+        );
+        assert_num(
+            s.displacement(2, 1).unwrap(),
             M0 * L * L / (2.0 * EI),
             1e-14,
             1e-9,
@@ -345,13 +357,13 @@ fn test_interior_point_load_piecewise_analytical() {
         // node 1 at x = 1.0 (< a)
         let v1 = -P * 1.0f64.powi(2) * (3.0 * a - 1.0) / (6.0 * EI);
         let t1 = -P * 1.0 * (2.0 * a - 1.0) / (2.0 * EI);
-        assert_num(s.displacement(1, 1), v1, 1e-14, 1e-9, "v(x<a)");
-        assert_num(s.displacement(1, 2), t1, 1e-14, 1e-9, "theta(x<a)");
+        assert_num(s.displacement(1, 1).unwrap(), v1, 1e-14, 1e-9, "v(x<a)");
+        assert_num(s.displacement(1, 2).unwrap(), t1, 1e-14, 1e-9, "theta(x<a)");
         // tip at x = L = 2.0 (> a)
         let v2 = -P * a * a * (3.0 * L - a) / (6.0 * EI);
         let t2 = -P * a * a / (2.0 * EI);
-        assert_num(s.displacement(2, 1), v2, 1e-14, 1e-9, "v(x>a)");
-        assert_num(s.displacement(2, 2), t2, 1e-14, 1e-9, "theta(x>a)");
+        assert_num(s.displacement(2, 1).unwrap(), v2, 1e-14, 1e-9, "v(x>a)");
+        assert_num(s.displacement(2, 2).unwrap(), t2, 1e-14, 1e-9, "theta(x>a)");
         // Equilibrium: reaction + applied load (moment arm a).
         assert_equilibrium(&s, 0.0, -P, -P * a, "interior point load");
     }
@@ -591,14 +603,14 @@ fn test_rotated_transformation_identities() {
             // Global displacement = R(theta) * (0, -P L^3 / 3EI)
             let v_loc = -P * L.powi(3) / (3.0 * EI);
             assert_num(
-                sol.displacement(1, 0),
+                sol.displacement(1, 0).unwrap(),
                 -s * v_loc,
                 1e-14,
                 1e-9,
                 &format!("{:.0}° ux", deg),
             );
             assert_num(
-                sol.displacement(1, 1),
+                sol.displacement(1, 1).unwrap(),
                 c * v_loc,
                 1e-14,
                 1e-9,
@@ -691,7 +703,7 @@ fn test_mesh_refinement_classification() {
         let mut mt = cantilever(n);
         mt.add_nodal_force(n, 1, -P);
         let st = solve_named(&mt, "dense");
-        let e_tip = (st.displacement(n, 1) - (-P * L.powi(3) / (3.0 * EI))).abs()
+        let e_tip = (st.displacement(n, 1).unwrap() - (-P * L.powi(3) / (3.0 * EI))).abs()
             / (P * L.powi(3) / (3.0 * EI));
         assert!(
             e_tip < 1e-9,
@@ -706,7 +718,7 @@ fn test_mesh_refinement_classification() {
             mu.add_distributed_load(e, 0.0, -Q).unwrap();
         }
         let su = solve_named(&mu, "dense");
-        let e_udl = (su.displacement(n, 1) - (-Q * L.powi(4) / (8.0 * EI))).abs()
+        let e_udl = (su.displacement(n, 1).unwrap() - (-Q * L.powi(4) / (8.0 * EI))).abs()
             / (Q * L.powi(4) / (8.0 * EI));
         assert!(
             e_udl < 1e-9,
@@ -843,7 +855,7 @@ fn test_scaling_and_dimensional_sanity() {
         }
         let s4 = solve_named(&m4, "dense");
         assert_num(
-            s4.displacement(2, 1),
+            s4.displacement(2, 1).unwrap(),
             -P * L.powi(3) / (3.0 * EI * alpha),
             1e-14,
             1e-9,
@@ -859,14 +871,14 @@ fn test_scaling_and_dimensional_sanity() {
             mg.add_nodal_force(1, 1, -P);
             let sg = solve_named(&mg, "dense");
             assert_num(
-                sg.displacement(1, 1),
+                sg.displacement(1, 1).unwrap(),
                 -P * lg.powi(3) / (3.0 * EI),
                 1e-14,
                 1e-9,
                 "v ∝ L^3",
             );
             assert_num(
-                sg.displacement(1, 2),
+                sg.displacement(1, 2).unwrap(),
                 -P * lg.powi(2) / (2.0 * EI),
                 1e-14,
                 1e-9,

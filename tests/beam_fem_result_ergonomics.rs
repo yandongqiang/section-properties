@@ -55,19 +55,19 @@ fn test_typed_displacement_matches_raw() {
     for node in 0..3 {
         assert_eq!(
             s.displacement_dof(node, Dof::Ux).unwrap(),
-            s.displacement(node, 0),
+            s.displacement(node, 0).unwrap(),
             "node {} Ux",
             node
         );
         assert_eq!(
             s.displacement_dof(node, Dof::Uy).unwrap(),
-            s.displacement(node, 1),
+            s.displacement(node, 1).unwrap(),
             "node {} Uy",
             node
         );
         assert_eq!(
             s.displacement_dof(node, Dof::Rz).unwrap(),
-            s.displacement(node, 2),
+            s.displacement(node, 2).unwrap(),
             "node {} Rz",
             node
         );
@@ -86,19 +86,19 @@ fn test_typed_reaction_matches_raw() {
     for node in 0..3 {
         assert_eq!(
             s.reaction_dof(node, Dof::Ux).unwrap(),
-            s.reaction(node, 0),
+            s.reaction(node, 0).unwrap(),
             "node {} Ux",
             node
         );
         assert_eq!(
             s.reaction_dof(node, Dof::Uy).unwrap(),
-            s.reaction(node, 1),
+            s.reaction(node, 1).unwrap(),
             "node {} Uy",
             node
         );
         assert_eq!(
             s.reaction_dof(node, Dof::Rz).unwrap(),
-            s.reaction(node, 2),
+            s.reaction(node, 2).unwrap(),
             "node {} Rz",
             node
         );
@@ -130,14 +130,14 @@ fn test_dof_all_ordering_and_iteration() {
         for (k, dof) in Dof::ALL.iter().enumerate() {
             assert_eq!(
                 s.displacement_dof(node, *dof).unwrap(),
-                s.displacement(node, k),
+                s.displacement(node, k).unwrap(),
                 "node {} dof {}",
                 node,
                 dof.name()
             );
             assert_eq!(
                 s.reaction_dof(node, *dof).unwrap(),
-                s.reaction(node, k),
+                s.reaction(node, k).unwrap(),
                 "node {} reaction {}",
                 node,
                 dof.name()
@@ -259,56 +259,40 @@ fn test_invalid_node_returns_error() {
 // ===========================================================================
 
 #[test]
-fn test_legacy_raw_dof_aliasing_is_pinned() {
-    // Axial loading so that node 1's ux is non-zero and clearly distinct from
-    // node 0's (constrained) rz.
+fn test_raw_dof_accessor_rejects_invalid_dof() {
     let mut m = model();
     m.add_nodal_force(2, 0, 100.0);
     let mut s = BeamSolver::from_model(&m).unwrap();
     s.solve_configured().unwrap();
 
-    let node1_ux = s.displacement(1, 0);
-    assert!(node1_ux.abs() > 1e-9, "node 1 must move axially");
-    assert_eq!(
-        s.displacement(0, 2),
-        0.0,
-        "node 0 rz is constrained and must be exactly zero"
-    );
+    // Valid DOFs 0, 1, 2 return Ok with the physical value.
+    assert!(s.displacement(0, 0).unwrap().is_finite());
+    assert!(s.displacement(0, 1).unwrap().is_finite());
+    assert!(s.displacement(0, 2).unwrap().is_finite());
+    assert!(s.reaction(0, 0).unwrap().is_finite());
+    assert!(s.reaction(0, 1).unwrap().is_finite());
+    assert!(s.reaction(0, 2).unwrap().is_finite());
 
-    // Pinned legacy behaviour: dof >= 3 aliases into the following node,
-    // because dof_index = 3*node + dof.
-    assert_eq!(
-        s.displacement(0, 3),
-        node1_ux,
-        "legacy displacement(0, 3) aliases to node 1 ux"
-    );
-    assert_eq!(
-        s.displacement(0, 4),
-        s.displacement(1, 1),
-        "legacy displacement(0, 4) aliases to node 1 uy"
-    );
-    assert_eq!(
-        s.reaction(0, 3),
-        s.reaction(1, 0),
-        "legacy reaction(0, 3) aliases to node 1 Fx"
-    );
+    // Invalid DOFs >= 3 return Err(InvalidInput), not a silent alias.
+    assert!(s.displacement(0, 3).is_err(), "dof=3 must error");
+    assert!(s.displacement(0, 4).is_err(), "dof=4 must error");
+    assert!(s.displacement(0, 100).is_err(), "dof=100 must error");
+    assert!(s.reaction(0, 3).is_err(), "reaction dof=3 must error");
+    assert!(s.reaction(0, 99).is_err(), "reaction dof=99 must error");
 
-    // The typed accessors never alias: Dof::Rz at node 0 is node 0's rz slot.
+    // The typed accessors agree with the raw accessors for valid DOFs.
+    assert_eq!(
+        s.displacement_dof(0, Dof::Ux).unwrap(),
+        s.displacement(0, 0).unwrap()
+    );
+    assert_eq!(
+        s.displacement_dof(0, Dof::Uy).unwrap(),
+        s.displacement(0, 1).unwrap()
+    );
     assert_eq!(
         s.displacement_dof(0, Dof::Rz).unwrap(),
-        s.displacement(0, 2)
+        s.displacement(0, 2).unwrap()
     );
-    assert_eq!(s.displacement_dof(0, Dof::Rz).unwrap(), 0.0);
-    assert_ne!(
-        s.displacement_dof(0, Dof::Rz).unwrap(),
-        s.displacement(0, 3),
-        "typed accessor must not reproduce the legacy alias"
-    );
-    // And a typed access can never express an out-of-range DOF.
-    for dof in Dof::ALL {
-        assert!(s.displacement_dof(0, dof).unwrap().is_finite());
-        assert!(s.reaction_dof(0, dof).unwrap().is_finite());
-    }
 }
 
 // ===========================================================================

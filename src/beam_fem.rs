@@ -65,6 +65,41 @@ impl BeamSection {
             second_moment,
         }
     }
+
+    /// Create from [`SectionProperties`] for a beam aligned with the **global
+    /// x-axis**.
+    ///
+    /// The second moment of area is `props.ix = ∫y² dA`, which resists
+    /// bending in the global x-y plane about the z-axis — the correct
+    /// inertia for a horizontal member whose local x coincides with global x.
+    ///
+    /// For a vertical member (local x = global y), use
+    /// [`Self::from_section_properties_y`] instead. A blind
+    /// `From<SectionProperties>` implementation is intentionally **not**
+    /// provided because choosing the wrong axis produces silently incorrect
+    /// results.
+    pub fn from_section_properties_x(props: &crate::section_properties::SectionProperties) -> Self {
+        Self {
+            area: props.area,
+            second_moment: props.ix,
+        }
+    }
+
+    /// Create from [`SectionProperties`] for a beam aligned with the **global
+    /// y-axis**.
+    ///
+    /// The second moment of area is `props.iy = ∫x² dA`, which resists
+    /// bending in the global x-y plane about the z-axis — the correct
+    /// inertia for a vertical member whose local x coincides with global y.
+    ///
+    /// For a horizontal member (local x = global x), use
+    /// [`Self::from_section_properties_x`] instead.
+    pub fn from_section_properties_y(props: &crate::section_properties::SectionProperties) -> Self {
+        Self {
+            area: props.area,
+            second_moment: props.iy,
+        }
+    }
 }
 
 /// Internal section forces `N`, `V`, `M` at a point along a beam element.
@@ -327,9 +362,9 @@ impl<'a> BeamAnalysisResult<'a> {
             )));
         }
         Ok(BeamNodalDisplacement {
-            ux: self.solver.displacement(node_index, 0),
-            uy: self.solver.displacement(node_index, 1),
-            rz: self.solver.displacement(node_index, 2),
+            ux: self.solver.displacement(node_index, 0)?,
+            uy: self.solver.displacement(node_index, 1)?,
+            rz: self.solver.displacement(node_index, 2)?,
         })
     }
 
@@ -2036,13 +2071,9 @@ impl BeamSolver {
         }
 
         k_ff.compress();
-        solver
-            .factor(&k_ff)
-            .map_err(|e| FemError::SolverError(e.to_string()))?;
+        solver.factor(&k_ff).map_err(FemError::from)?;
 
-        let u_free = solver
-            .solve(&f_reduced)
-            .map_err(|e| FemError::SolverError(e.to_string()))?;
+        let u_free = solver.solve(&f_reduced).map_err(FemError::from)?;
 
         // Expand solution back to full DOF space
         self.u_global = vec![0.0; self.n_dof];
@@ -2118,7 +2149,7 @@ impl BeamSolver {
         let registry = SolverRegistry::default();
         let mut solver = registry
             .create_selected(&k_ff, &self.solver_selection)
-            .map_err(|e| FemError::SolverError(e.to_string()))?;
+            .map_err(FemError::from)?;
         let name = solver.name().to_string();
 
         self.factor_and_expand(
@@ -2139,21 +2170,28 @@ impl BeamSolver {
     /// `2 = rz`; the assembled slot is `3*node_idx + dof`
     /// ([`BeamModel::dof_index`]).
     ///
-    /// # Caveat — legacy DOF aliasing
+    /// # Errors
     ///
-    /// `dof >= 3` is **not** rejected: `3*node_idx + dof` then addresses a DOF
-    /// of a *following* node. This behaviour is preserved for compatibility;
-    /// prefer the typed [`Self::displacement_dof`] with [`Dof`], which cannot
-    /// alias and returns an error for an out-of-bounds node instead of `0.0`.
+    /// [`FemError::InvalidInput`] if `dof` is not 0, 1, or 2.  Previously
+    /// `dof >= 3` silently aliased into the following node's DOF slot; this
+    /// is now rejected.  Prefer the typed [`Self::displacement_dof`] with
+    /// [`Dof`] for compile-time safety.
     ///
-    /// Out-of-range indices return `0.0` (no panic). Before a successful solve
-    /// the whole displacement vector is zero, so this also returns `0.0`.
-    pub fn displacement(&self, node_idx: usize, dof: usize) -> f64 {
+    /// Out-of-range node indices return `Ok(0.0)` (no panic). Before a
+    /// successful solve the whole displacement vector is zero, so this also
+    /// returns `Ok(0.0)`.
+    pub fn displacement(&self, node_idx: usize, dof: usize) -> Result<f64, FemError> {
+        if dof >= 3 {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid DOF index: {} (must be 0=Ux, 1=Uy, 2=Rz)",
+                dof
+            )));
+        }
         let idx = self.model.dof_index(node_idx, dof);
         if idx < self.u_global.len() {
-            self.u_global[idx]
+            Ok(self.u_global[idx])
         } else {
-            0.0
+            Ok(0.0)
         }
     }
 
@@ -2196,7 +2234,7 @@ impl BeamSolver {
     /// let uy = solver.displacement_dof(1, Dof::Uy)?;
     /// assert!((uy + 100.0 / 3.0).abs() < 1e-9);
     /// // identical to the raw-index accessor
-    /// assert_eq!(uy, solver.displacement(1, 1));
+    /// assert_eq!(uy, solver.displacement(1, 1)?);
     /// assert!(matches!(solver.displacement_dof(9, Dof::Uy), Err(_)));
     /// # Ok(())
     /// # }
@@ -2281,15 +2319,27 @@ impl BeamSolver {
     /// [`Self::reaction_dof`] with [`Dof`], which cannot alias, returns an
     /// error for an out-of-bounds node, and evaluates the reaction vector once.
     ///
-    /// Out-of-range indices return `0.0` (no panic). Before a successful solve
-    /// this returns the raw `K·0 - f` value, which is not a physical support
-    /// reaction (see [`Self::reactions`]).
-    pub fn reaction(&self, node_idx: usize, dof: usize) -> f64 {
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `dof` is not 0, 1, or 2.  Previously
+    /// `dof >= 3` silently aliased into the following node's DOF slot; this
+    /// is now rejected.
+    ///
+    /// Out-of-range node indices return `Ok(0.0)` (no panic). Before a
+    /// successful solve this returns the raw `K·0 - f` value, which is not
+    /// a physical support reaction (see [`Self::reactions`]).
+    pub fn reaction(&self, node_idx: usize, dof: usize) -> Result<f64, FemError> {
+        if dof >= 3 {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid DOF index: {} (must be 0=Ux, 1=Uy, 2=Rz)",
+                dof
+            )));
+        }
         let idx = self.model.dof_index(node_idx, dof);
         if idx < self.reactions().len() {
-            self.reactions()[idx]
+            Ok(self.reactions()[idx])
         } else {
-            0.0
+            Ok(0.0)
         }
     }
 
@@ -2336,7 +2386,7 @@ impl BeamSolver {
     /// let rz = solver.reaction_dof(0, Dof::Rz)?;
     /// assert!((ry - 100.0).abs() < 1e-9);
     /// assert!((rz - 100.0).abs() < 1e-9);
-    /// assert_eq!(ry, solver.reaction(0, 1));
+    /// assert_eq!(ry, solver.reaction(0, 1)?);
     /// # Ok(())
     /// # }
     /// ```
@@ -2537,23 +2587,10 @@ impl BeamSolver {
         // Distributed loads on this element.
         for dl in &model.distributed_loads {
             if dl.element_idx == elem_idx {
-                let L = element.length(node_i, node_j);
-                // Consistent nodal load for uniform distributed load:
-                // f_u_i = qx*L/2, f_u_j = qx*L/2
-                // f_v_i = qy*L/2, f_theta_i = qy*L^2/12
-                // f_v_j = qy*L/2, f_theta_j = -qy*L^2/12
-                let qx = dl.qx;
-                let qy = dl.qy;
-                let qx_L2 = qx * L / 2.0;
-                let qy_L2 = qy * L / 2.0;
-                let qy_L2_12 = qy * L * L / 12.0;
-
-                f_equiv[0] += qx_L2; // N_i
-                f_equiv[1] += qy_L2; // V_i
-                f_equiv[2] += qy_L2_12; // M_i (CCW positive)
-                f_equiv[3] += qx_L2; // N_j
-                f_equiv[4] += qy_L2; // V_j
-                f_equiv[5] -= qy_L2_12; // M_j (CW negative for qy > 0 upward)
+                let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
+                for i in 0..6 {
+                    f_equiv[i] += f_local[i];
+                }
             }
         }
 
@@ -2959,8 +2996,13 @@ impl BeamSolver {
 pub enum FemError {
     #[error("Invalid model: {0}")]
     InvalidModel(String),
-    #[error("Solver error: {0}")]
-    SolverError(String),
+    #[error("Solver error: {message}")]
+    SolverError {
+        /// The structured solver error that caused the failure.
+        source: SolverError,
+        /// Human-readable message, potentially including structural diagnosis.
+        message: String,
+    },
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Singular matrix: {0}")]
@@ -2980,9 +3022,22 @@ pub enum FemError {
     DisconnectedStructure(String),
 }
 
+impl FemError {
+    /// Return the structured [`SolverError`] if this is a `SolverError` variant.
+    pub fn solver_error(&self) -> Option<&SolverError> {
+        match self {
+            FemError::SolverError { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 impl From<SolverError> for FemError {
     fn from(e: SolverError) -> Self {
-        FemError::SolverError(e.to_string())
+        FemError::SolverError {
+            message: e.to_string(),
+            source: e,
+        }
     }
 }
 

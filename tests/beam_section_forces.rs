@@ -431,8 +431,18 @@ fn test_section_forces_rotated_beam() {
     let v_l = fy * l.powi(3) / (3.0 * E * second_moment());
     let u_g = c * u_l - s * v_l;
     let v_g = s * u_l + c * v_l;
-    assert_close(solver.displacement(1, 0), u_g, 1e-9, "global U tip");
-    assert_close(solver.displacement(1, 1), v_g, 1e-9, "global V tip");
+    assert_close(
+        solver.displacement(1, 0).unwrap(),
+        u_g,
+        1e-9,
+        "global U tip",
+    );
+    assert_close(
+        solver.displacement(1, 1).unwrap(),
+        v_g,
+        1e-9,
+        "global V tip",
+    );
 }
 
 // ===========================================================================

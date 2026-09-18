@@ -171,7 +171,7 @@ fn test_underconstrained_models_fail_explicitly() {
             Err(e) => e,
         };
         assert!(
-            matches!(err, FemError::SolverError(_)),
+            matches!(err, FemError::SolverError { .. }),
             "{}: expected SolverError, got {:?}",
             label,
             err
@@ -362,7 +362,7 @@ fn test_solver_error_propagation() {
     let mut s = BeamSolver::from_model(&m).unwrap();
     s.set_solver(SolverSelection::named("dense"));
     let err = s.solve_configured().expect_err("singular solve must fail");
-    assert!(matches!(err, FemError::SolverError(_)), "got {:?}", err);
+    assert!(matches!(err, FemError::SolverError { .. }), "got {:?}", err);
     assert_eq!(s.solver_name(), None);
 
     // Same via the legacy explicit-solver path.
@@ -370,7 +370,11 @@ fn test_solver_error_propagation() {
     let mut lin = registry.create("sparse_lu").unwrap();
     let mut s2 = BeamSolver::from_model(&m).unwrap();
     let err2 = s2.solve(&mut *lin).expect_err("singular solve must fail");
-    assert!(matches!(err2, FemError::SolverError(_)), "got {:?}", err2);
+    assert!(
+        matches!(err2, FemError::SolverError { .. }),
+        "got {:?}",
+        err2
+    );
 
     println!("[solver propagation] FemError::SolverError surfaced (no panic/swallow)");
 }
@@ -537,27 +541,33 @@ fn test_geometry_scaling() {
             };
             // Axial u ∝ α ; transverse δ ∝ α³ ; rotation ∝ α² ; tip-moment θ ∝ α.
             assert_mixed(
-                sa.displacement(1, 0),
+                sa.displacement(1, 0).unwrap(),
                 f * alpha / base,
                 1e-9,
                 1e-9,
                 "axial ∝ α",
             );
             assert_mixed(
-                sb.displacement(1, 1),
+                sb.displacement(1, 1).unwrap(),
                 -p * alpha.powi(3) / 3.0,
                 1e-9,
                 1e-9,
                 "δ ∝ α³",
             );
             assert_mixed(
-                sb.displacement(1, 2),
+                sb.displacement(1, 2).unwrap(),
                 -p * alpha.powi(2) / 2.0,
                 1e-9,
                 1e-9,
                 "θ ∝ α²",
             );
-            assert_mixed(sm.displacement(1, 2), m0 * alpha, 1e-9, 1e-9, "θ_M ∝ α");
+            assert_mixed(
+                sm.displacement(1, 2).unwrap(),
+                m0 * alpha,
+                1e-9,
+                1e-9,
+                "θ_M ∝ α",
+            );
         }
     }
     println!("[geometry scaling] u∝α, δ∝α³, θ∝α², θ_M∝α for α ∈ {{0.1,1,10}} (3 backends)");
@@ -623,15 +633,21 @@ fn test_material_scaling() {
                 s
             };
             assert_mixed(
-                run(&bend).displacement(1, 1),
+                run(&bend).displacement(1, 1).unwrap(),
                 -p / (3.0 * sc),
                 1e-12,
                 1e-9,
                 "δ ∝ 1/E",
             );
-            assert_mixed(run(&ax).displacement(1, 0), f / sc, 1e-12, 1e-9, "u ∝ 1/A");
             assert_mixed(
-                run(&ib).displacement(1, 1),
+                run(&ax).displacement(1, 0).unwrap(),
+                f / sc,
+                1e-12,
+                1e-9,
+                "u ∝ 1/A",
+            );
+            assert_mixed(
+                run(&ib).displacement(1, 1).unwrap(),
                 -p / (3.0 * sc),
                 1e-12,
                 1e-9,
