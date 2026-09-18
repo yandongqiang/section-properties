@@ -206,6 +206,7 @@ fn run_parity_test(
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_rectangle() {
     let rect = RectangularSection::new(100.0, 50.0);
     let section = rect.build();
@@ -214,6 +215,7 @@ fn parity_rectangle() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_solid_circle() {
     // High vertex count for accuracy
     let circ = CircularSection::with_vertices(50.0, 256);
@@ -223,6 +225,7 @@ fn parity_solid_circle() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_angle_equal_leg() {
     let angle = AngleSection::equal_leg(100.0, 10.0);
     let section = angle.build();
@@ -231,6 +234,7 @@ fn parity_angle_equal_leg() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_channel() {
     let channel = ChannelSection::new(200.0, 75.0, 8.0, 10.0, 12.0, 0.0);
     let section = channel.build();
@@ -239,6 +243,7 @@ fn parity_channel() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_i_section() {
     let i_section = ISection::new(300.0, 150.0, 8.0, 12.0, 15.0);
     let section = i_section.build();
@@ -247,6 +252,7 @@ fn parity_i_section() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_chs() {
     let chs = CircularHollowSection::from_dimensions(219.1, 8.2);
     let section = chs.build();
@@ -255,6 +261,7 @@ fn parity_chs() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_rectangular_hollow() {
     let rhs = RectangularHollowSection::new(200.0, 100.0, 8.0, 0.0, 0.0);
     let section = rhs.build();
@@ -263,6 +270,7 @@ fn parity_rectangular_hollow() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_tee_section() {
     let tee = TeeSection::new(200.0, 100.0, 8.0, 12.0, 0.0);
     let section = tee.build();
@@ -271,6 +279,7 @@ fn parity_tee_section() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_asymmetric_composite() {
     // Asymmetric section: T + rectangle offset - use simple Section
     let t_section = TeeSection::new(150.0, 80.0, 6.0, 10.0, 0.0);
@@ -280,6 +289,7 @@ fn parity_asymmetric_composite() {
 }
 
 #[test]
+#[ignore = "reference: Fine-mesh Python warping parity; covered by cross_validation::warping_cross_validation; run with --ignored"]
 fn parity_section_with_hole() {
     // Rectangle with circular hole
     let outer = RectangularSection::new(200.0, 100.0);

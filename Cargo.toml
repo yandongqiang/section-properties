@@ -9,6 +9,14 @@ repository = "https://github.com/yandongqiang/section-properties"
 readme = "README.md"
 keywords = ["structural", "section", "properties", "fem", "civil-engineering"]
 categories = ["science", "mathematics"]
+exclude = [
+    "*.py",
+    "python_*.json",
+    "global_matrix_exports/",
+    "docs/",
+    "examples_tmp/",
+    ".codegraph/",
+]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

@@ -87,6 +87,7 @@ fn benchmark_section(name: &str, section: Section, nu: f64) {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_channel_200x75() {
     let channel = ChannelSection::new(200.0, 75.0, 8.0, 10.0, 12.0, 0.0);
     let section = channel.build();
@@ -94,6 +95,7 @@ fn benchmark_channel_200x75() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_channel_300x100_thin() {
     let channel = ChannelSection::new(300.0, 100.0, 3.0, 6.0, 8.0, 0.0);
     let section = channel.build();
@@ -101,6 +103,7 @@ fn benchmark_channel_300x100_thin() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_angle_100x100() {
     let angle = AngleSection::equal_leg(100.0, 8.0);
     let section = angle.build();
@@ -108,6 +111,7 @@ fn benchmark_angle_100x100() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_angle_150x75() {
     let angle = AngleSection::new(150.0, 75.0, 10.0, 12.0, 15.0);
     let section = angle.build();
@@ -115,6 +119,7 @@ fn benchmark_angle_150x75() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_i_section_300x150() {
     let i_section = ISection::new(300.0, 150.0, 8.0, 12.0, 15.0);
     let section = i_section.build();
@@ -122,6 +127,7 @@ fn benchmark_i_section_300x150() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_large_channel() {
     // Large channel to approach 1182x1182
     let channel = ChannelSection::new(400.0, 150.0, 10.0, 15.0, 20.0, 0.0);
@@ -130,6 +136,7 @@ fn benchmark_large_channel() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_large_angle() {
     let angle = AngleSection::new(200.0, 200.0, 16.0, 18.0, 24.0);
     let section = angle.build();
@@ -137,6 +144,7 @@ fn benchmark_large_angle() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_large_i_section() {
     let i_section = ISection::new(600.0, 300.0, 16.0, 20.0, 25.0);
     let section = i_section.build();
@@ -144,6 +152,7 @@ fn benchmark_large_i_section() {
 }
 
 #[test]
+#[ignore = "benchmark: FEM Lagrange matrix benchmark; run with --ignored"]
 fn benchmark_mesh_convergence_study() {
     // Test mesh convergence for a channel section
     println!("\n{}", "=".repeat(80));

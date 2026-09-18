@@ -23,6 +23,7 @@ fn rel_err(a: f64, b: f64) -> f64 {
 }
 
 #[test]
+#[ignore = "benchmark: warping regularization sensitivity; run with --ignored"]
 fn warping_regularization_sensitivity() {
     // Use a standard I-section (IPE300) with known warping properties
     let ipe = ISection::from_designation("IPE300").unwrap();
@@ -88,6 +89,7 @@ fn warping_regularization_sensitivity() {
 }
 
 #[test]
+#[ignore = "benchmark: warping regularization sensitivity; run with --ignored"]
 fn channel_regularization_sensitivity() {
     // Channel section - more sensitive to regularization due to open section
     let d = 0.200_f64;
@@ -156,6 +158,7 @@ fn channel_regularization_sensitivity() {
 }
 
 #[test]
+#[ignore = "benchmark: warping regularization sensitivity; run with --ignored"]
 fn tee_regularization_sensitivity() {
     // Tee section - asymmetric, more sensitive
     let bf = 0.15_f64;
