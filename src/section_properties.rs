@@ -227,7 +227,21 @@ impl SectionProperties {
     /// each polygon contributes its signed area, first moments, and second
     /// moments about the global axes; the global centroid is then found and
     /// centroidal properties are obtained via the parallel-axis theorem.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the net section area is zero or near-zero.  Use
+    /// [`try_from_compound`](Self::try_from_compound) for a fallible version
+    /// that returns `Err` instead of panicking.
     pub fn from_compound(compound: &CompoundGeometry) -> Self {
+        Self::try_from_compound(compound).expect("Section area is too small to compute properties")
+    }
+
+    /// Fallible version of [`from_compound`](Self::from_compound).
+    ///
+    /// Returns `Err` if the net section area is zero or near-zero
+    /// (degenerate geometry where outer area equals total hole area).
+    pub fn try_from_compound(compound: &CompoundGeometry) -> Result<Self, String> {
         let mut area = 0.0;
         let mut first_x = 0.0;
         let mut first_y = 0.0;
@@ -256,10 +270,9 @@ impl SectionProperties {
             ixy += poly.product_of_inertia_xy();
         }
 
-        assert!(
-            area.abs() > f64::EPSILON,
-            "Section area is too small to compute properties"
-        );
+        if area.abs() <= f64::EPSILON {
+            return Err("Section area is too small to compute properties".into());
+        }
 
         // Global centroid
         let centroid = Point::new(first_x / area, first_y / area);
@@ -401,7 +414,7 @@ impl SectionProperties {
         let r11 = (i11 / area).sqrt();
         let r22 = (i22 / area).sqrt();
 
-        Self {
+        Ok(Self {
             geometric: GeometricProperties {
                 area,
                 centroid,
@@ -437,7 +450,7 @@ impl SectionProperties {
                 r22,
                 polar: ((ix_c + iy_c) / area).sqrt(),
             },
-        }
+        })
     }
 
     /// Compute section properties from a single `Geometry` (one region with
@@ -446,12 +459,27 @@ impl SectionProperties {
         Self::from_compound(&CompoundGeometry::new(vec![geometry.clone()]))
     }
 
+    /// Fallible version of [`from_geometry`](Self::from_geometry).
+    ///
+    /// Returns `Err` if the net section area is zero or near-zero.
+    pub fn try_from_geometry(geometry: &Geometry) -> Result<Self, String> {
+        Self::try_from_compound(&CompoundGeometry::new(vec![geometry.clone()]))
+    }
+
     /// Compute section properties from a `Section` (outer boundary + holes).
     ///
     /// This is a convenience wrapper that delegates to [`from_compound`]; the
     /// section is treated as a single-region compound geometry.
     pub fn from_section(section: &Section) -> Self {
         Self::from_compound(&CompoundGeometry::from(section.clone()))
+    }
+
+    /// Fallible version of [`from_section`](Self::from_section).
+    ///
+    /// Returns `Err` if the net section area is zero or near-zero
+    /// (degenerate section where outer area equals total hole area).
+    pub fn try_from_section(section: &Section) -> Result<Self, String> {
+        Self::try_from_compound(&CompoundGeometry::from(section.clone()))
     }
 
     /// Returns `(i11, i22, phi)`.

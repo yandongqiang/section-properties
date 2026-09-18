@@ -42,7 +42,20 @@ impl Section {
     }
 
     /// Centroid of the section using the composite area formula.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the net section area (outer minus holes) is zero or
+    /// near-zero.  Use [`try_centroid`](Self::try_centroid) for a fallible
+    /// version that returns `None` instead of panicking.
     pub fn centroid(&self) -> Point {
+        self.try_centroid()
+            .expect("Section area is too small to compute centroid")
+    }
+
+    /// Fallible centroid: returns `None` if the net section area is zero or
+    /// near-zero (degenerate section where outer area equals total hole area).
+    pub fn try_centroid(&self) -> Option<Point> {
         let mut sum_x = 0.0;
         let mut sum_y = 0.0;
         let mut total_area = 0.0;
@@ -63,12 +76,11 @@ impl Section {
             total_area -= a;
         }
 
-        assert!(
-            total_area.abs() > f64::EPSILON,
-            "Section area is too small to compute centroid"
-        );
+        if total_area.abs() <= f64::EPSILON {
+            return None;
+        }
 
-        Point::new(sum_x / total_area, sum_y / total_area)
+        Some(Point::new(sum_x / total_area, sum_y / total_area))
     }
 
     /// Bounding box of the section: (min_x, max_x, min_y, max_y)

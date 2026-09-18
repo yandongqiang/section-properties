@@ -1,5 +1,5 @@
 use section_properties::{
-    Point, Polygon, Section, SectionProperties,
+    CompoundGeometry, Geometry, Point, Polygon, Section, SectionProperties,
     plastic::warping::WarpingProperties,
     section_library::ParametricSection,
     section_library::steel::ISection,
@@ -390,4 +390,195 @@ fn u_girder() {
     assert!(props.area > 0.0);
     assert!(props.ix > 0.0);
     assert!((sec.height() - 2.0).abs() < 0.05);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 26 — Degenerate input / fallible API tests
+// ---------------------------------------------------------------------------
+
+/// A section where the hole exactly cancels the outer area should cause
+/// `try_centroid` to return `None` rather than panicking.
+#[test]
+fn try_centroid_degenerate_zero_net_area() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    // Hole with the same area (10×10) → net area = 0
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let sec = Section::new(outer, vec![hole]);
+    assert!(sec.try_centroid().is_none());
+}
+
+/// `centroid()` should panic on the same degenerate section.
+#[test]
+#[should_panic(expected = "Section area is too small")]
+fn centroid_panics_on_degenerate() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let sec = Section::new(outer, vec![hole]);
+    let _ = sec.centroid();
+}
+
+/// `try_from_section` should return `Err` for a zero-net-area section.
+#[test]
+fn try_from_section_degenerate_zero_net_area() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let sec = Section::new(outer, vec![hole]);
+    let result = SectionProperties::try_from_section(&sec);
+    assert!(result.is_err());
+}
+
+/// `from_section` should panic on the same degenerate section.
+#[test]
+#[should_panic(expected = "Section area is too small")]
+fn from_section_panics_on_degenerate() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let sec = Section::new(outer, vec![hole]);
+    let _ = SectionProperties::from_section(&sec);
+}
+
+/// `try_from_compound` should return `Err` for a compound geometry with
+/// zero net area.
+#[test]
+fn try_from_compound_degenerate_zero_net_area() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let geom = Geometry::new(outer, vec![hole]);
+    let compound = CompoundGeometry::new(vec![geom]);
+    let result = SectionProperties::try_from_compound(&compound);
+    assert!(result.is_err());
+}
+
+/// `try_from_geometry` should return `Err` for a geometry with zero net area.
+#[test]
+fn try_from_geometry_degenerate_zero_net_area() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 10.0),
+        Point::new(0.0, 10.0),
+    ]);
+    let hole = Polygon::new(vec![
+        Point::new(20.0, 0.0),
+        Point::new(30.0, 0.0),
+        Point::new(30.0, 10.0),
+        Point::new(20.0, 10.0),
+    ]);
+    let geom = Geometry::new(outer, vec![hole]);
+    let result = SectionProperties::try_from_geometry(&geom);
+    assert!(result.is_err());
+}
+
+/// `Polygon::try_new` should return `Err` for collinear (zero-area) vertices.
+#[test]
+fn polygon_try_new_collinear_vertices() {
+    let result = Polygon::try_new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        Point::new(2.0, 0.0),
+    ]);
+    assert!(result.is_err());
+}
+
+/// `Polygon::try_new` should return `Err` for too few vertices.
+#[test]
+fn polygon_try_new_too_few_vertices() {
+    let result = Polygon::try_new(vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)]);
+    assert!(result.is_err());
+}
+
+/// Normal (non-degenerate) inputs should produce identical results via
+/// both the panicking and fallible APIs.
+#[test]
+fn try_apis_match_panicking_apis_for_valid_input() {
+    let outer = Polygon::new(vec![
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        Point::new(10.0, 5.0),
+        Point::new(0.0, 5.0),
+    ]);
+    let sec = Section::new(outer, Vec::new());
+
+    // centroid vs try_centroid
+    let c = sec.centroid();
+    let c_try = sec.try_centroid().unwrap();
+    assert!((c.x - c_try.x).abs() < 1e-12);
+    assert!((c.y - c_try.y).abs() < 1e-12);
+
+    // from_section vs try_from_section
+    let props = SectionProperties::from_section(&sec);
+    let props_try = SectionProperties::try_from_section(&sec).unwrap();
+    assert!((props.area - props_try.area).abs() < 1e-12);
+    assert!((props.ix - props_try.ix).abs() < 1e-12);
+    assert!((props.iy - props_try.iy).abs() < 1e-12);
+
+    // from_geometry vs try_from_geometry
+    let geom = Geometry::new(
+        Polygon::new(vec![
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 5.0),
+            Point::new(0.0, 5.0),
+        ]),
+        Vec::new(),
+    );
+    let props_g = SectionProperties::from_geometry(&geom);
+    let props_g_try = SectionProperties::try_from_geometry(&geom).unwrap();
+    assert!((props_g.area - props_g_try.area).abs() < 1e-12);
+
+    // from_compound vs try_from_compound
+    let compound = CompoundGeometry::new(vec![geom]);
+    let props_c = SectionProperties::from_compound(&compound);
+    let props_c_try = SectionProperties::try_from_compound(&compound).unwrap();
+    assert!((props_c.area - props_c_try.area).abs() < 1e-12);
 }
