@@ -842,7 +842,8 @@ pub mod pardiso {
     use super::super::{CscMatrix, NEAR_ZERO_TOL_BASE, SkylineLdlt, SparseMatrix};
     use std::os::raw::c_void;
 
-    #[link(name = "mkl_rt.2", kind = "raw-dylib")]
+    #[cfg_attr(target_os = "windows", link(name = "mkl_rt.2", kind = "raw-dylib"))]
+    #[cfg_attr(not(target_os = "windows"), link(name = "mkl_rt.2"))]
     unsafe extern "C" {
         fn pardisoinit(
             pt: *mut c_void,
