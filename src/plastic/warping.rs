@@ -894,12 +894,15 @@ mod tests {
         assert!(props.ay > 0.0);
         assert!(props.az > 0.0);
 
-        // For the IPE300-like section, FEM shear areas are approximately:
-        // ay (flange shear) ~ 0.0026, az (web shear) ~ 0.0035
-        // These differ from the simple web/flange area formulas (web ~ 0.00196)
-        // because FEM uses the full shear coefficient formulation.
-        assert!((props.ay - 0.00261).abs() / 0.00261 < 0.15);
-        assert!((props.az - 0.00351).abs() / 0.00351 < 0.15);
+        // FEM shear areas validated against Python sectionproperties v3.10.2
+        // (same geometry: h=300, b=150, tw=7, tf=10, r=12 mm, mesh=10 mm).
+        // Python: a_sx = 0.002735 m^2, a_sy = 0.002038 m^2.
+        // Rust FEM agrees to within ~5% (mesh/element differences).
+        // Previous expected values (ay~0.00261, az~0.00351) were calibrated
+        // against a buggy lambda formula (ct_w2/ct_w1 instead of ct_w1/ct_w2)
+        // in solve_with_fallback, fixed in commit c4fabac.
+        assert!((props.ay - 0.00274).abs() / 0.00274 < 0.10);
+        assert!((props.az - 0.00204).abs() / 0.00204 < 0.10);
     }
 
     #[test]
