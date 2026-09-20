@@ -1101,8 +1101,9 @@ impl BeamModel {
 
     /// Add nodal force.
     ///
-    /// Panics if `node_idx` is out of bounds or `dof` is not 0/1/2 (programmer
-    /// error). Use [`Self::try_add_nodal_force`] for a fallible version.
+    /// Panics if `node_idx` is out of bounds, `dof` is not 0/1/2, or `value`
+    /// is not finite (programmer error). Use [`Self::try_add_nodal_force`] for
+    /// a fallible version.
     pub fn add_nodal_force(&mut self, node_idx: usize, dof: usize, value: f64) {
         self.try_add_nodal_force(node_idx, dof, value)
             .unwrap_or_else(|e| panic!("{}", e));
@@ -1142,8 +1143,9 @@ impl BeamModel {
 
     /// Fix a single DOF to a prescribed value.
     ///
-    /// Panics if `node_idx` is out of bounds or `dof` is not 0/1/2 (programmer
-    /// error). Use [`Self::try_fix_dof`] for a fallible version.
+    /// Panics if `node_idx` is out of bounds, `dof` is not 0/1/2, or `value`
+    /// is not finite (programmer error). Use [`Self::try_fix_dof`] for a
+    /// fallible version.
     pub fn fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) {
         self.try_fix_dof(node_idx, dof, value)
             .unwrap_or_else(|e| panic!("{}", e));
