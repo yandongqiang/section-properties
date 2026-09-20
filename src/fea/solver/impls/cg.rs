@@ -52,24 +52,11 @@ impl LinearSolver for CgSolver {
             return Err(SolverError::not_symmetric());
         }
 
-        // Check positive definiteness (diagonal dominance heuristic)
-        for i in 0..n {
-            let mut diag = 0.0;
-            let mut off_diag_sum = 0.0;
-            for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
-                let j = matrix.csr_cols[k];
-                let val = matrix.csr_vals[k];
-                if i == j {
-                    diag = val;
-                } else {
-                    off_diag_sum += val.abs();
-                }
-            }
-            if diag <= off_diag_sum {
-                // Not strictly diagonally dominant - might not be SPD
-                // But CG can still work, just warn via capabilities
-            }
-        }
+        // Symmetry is verified above. Positive definiteness is NOT checked
+        // here: diagonal dominance is only a sufficient condition, and
+        // rejecting non-diagonally-dominant matrices would wrongly refuse
+        // many valid SPD systems. Instead, non-SPD is detected at solve time
+        // via the p^T A p <= 0 test, which returns SolverError::SingularMatrix.
 
         self.n = n;
         self.matrix = Some(matrix.clone());

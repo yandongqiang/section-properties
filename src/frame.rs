@@ -531,8 +531,9 @@ impl FrameModel {
     /// Equivalent to `self.solve_with(SolverSelection::Auto)`. The registry
     /// inspects the condensed stiffness matrix and picks a backend (dense for
     /// small systems, skyline LDLᵀ for symmetric positive-definite, sparse LU
-    /// otherwise). Auto may fall back to a different solver if the first
-    /// choice fails.
+    /// otherwise). The selected solver is used exactly once; if it fails the
+    /// error is returned directly — there is no automatic retry with a
+    /// different backend.
     pub fn solve(&self) -> Result<FrameAnalysisResult, FemError> {
         self.solve_with(SolverSelection::Auto)
     }
@@ -544,9 +545,10 @@ impl FrameModel {
     /// than as a matrix singularity.
     ///
     /// **Solver semantics**:
-    /// - [`SolverSelection::Auto`] — internal selection/fallback policy; the
-    ///   registry may substitute a different backend if the initial choice
-    ///   fails.
+    /// - [`SolverSelection::Auto`] — the registry inspects the matrix and
+    ///   selects a backend. The chosen solver is used exactly once; if it
+    ///   fails, the error is returned directly (no automatic retry with a
+    ///   different backend).
     /// - [`SolverSelection::Named`] — the requested solver is used **only**;
     ///   no silent fallback. If the solver is unavailable or fails, the error
     ///   is returned directly. Use the convenience constructors
