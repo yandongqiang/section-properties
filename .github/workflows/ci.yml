@@ -30,20 +30,43 @@ jobs:
       - run: cargo check --all-features
 
   test:
-    name: Test
+    name: Test (debug, fast subset)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Doctests
         run: cargo test --doc
-      - name: Tests (skip known-failing mesh test)
-        run: cargo test --all -- --skip warping_domain_regression
+      - name: Fast integration tests
+        run: >
+          cargo test
+          --test analytical_benchmark
+          --test api_misuse
+          --test beam_fem
+          --test beam_fem_robustness
+          --test beam_fem_convergence
+          --test beam_fem_numerical_audit
+          --test beam_fem_reference
+          --test beam_multisolver_cross_validation
+          --test beam_solver_backends
+          --test boolean_regression
+          --test cross_validation
+          --test frame_api
+          --test frame_correctness
+          --test frame_beam_integration
+          --test frame_beam_p2_convergence
+          --test frame_transformation_contract
+          --test mechanism_diagnostics
+          --test numerical_validation
+          --test solver_selection
+          --test solver_robustness
+          --test solver_architecture_correctness
+          --test sparse_lu
 
   release:
-    name: Release build + tests
+    name: Release build + full test suite
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -51,7 +74,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      - name: Release tests (skip known-failing mesh test)
+      - name: Full release tests (skip known-failing mesh test)
         run: cargo test --release --all -- --skip warping_domain_regression
 
   clippy:
