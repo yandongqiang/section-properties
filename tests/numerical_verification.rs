@@ -218,9 +218,18 @@ fn verify_i_section_properties() {
     let iw_analytic = tf * bf.powi(3) / 24.0 * hw.powi(2);
     assert_rel(fp.iw, iw_analytic, 0.1, "IPE300 Iw (FEM approx)");
 
-    // Torsion constant (approximate for open section): J ≈ Σ bt³/3
-    let j_approx = 2.0 * bf * tf.powi(3) / 3.0 + hw * tw.powi(3) / 3.0;
-    assert_rel(fp.j, j_approx, 0.25, "IPE300 J (Σbt³/3, FEM approx)");
+    // Torsion constant reference for the filleted IPE300 geometry:
+    // Python section-properties 3.10.2, IPE300 with r=15 mm fillets.
+    // The thin-wall approximation Σbt³/3 (1.557423e-7) excludes fillets, which
+    // add significant torsional stiffness for a filleted section, so it is not
+    // a valid reference for this geometry.
+    let j_reference = 1.988627e-7;
+    assert_rel(
+        fp.j,
+        j_reference,
+        0.10,
+        "IPE300 J (Python section-properties 3.10.2 reference, r=15 mm)",
+    );
 }
 
 #[test]
