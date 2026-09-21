@@ -96,36 +96,9 @@ impl LinearSolver for IccgSolver {
             }
         }
 
-        // IC(0) factorization
+        // IC(0) factorization (Cholesky form: L L^T ≈ A, L_ii = sqrt(d_i))
         for i in 0..n {
-            let _diag_pos = l_row_ptr[i + 1] - 1; // Diagonal is last in row
-
-            // Compute diagonal
-            let mut sum = 0.0;
-            for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
-                let j = matrix.csr_cols[k];
-                let val = matrix.csr_vals[k];
-                if j == i {
-                    sum = val;
-                } else if j < i {
-                    // Find L_ij in our structure
-                    for idx in l_row_ptr[j]..l_row_ptr[j + 1] {
-                        if l_col_idx[idx] == i {
-                            sum -= l_lower[idx] * l_lower[idx] * l_diag[j];
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if sum <= 0.0 {
-                // Modified IC: add small positive value
-                l_diag[i] = 1e-12;
-            } else {
-                l_diag[i] = sum.sqrt();
-            }
-
-            // Compute off-diagonals
+            // Compute off-diagonals FIRST (diagonal depends on them).
             for idx in l_row_ptr[i]..l_row_ptr[i + 1] - 1 {
                 let j = l_col_idx[idx];
 
@@ -139,14 +112,14 @@ impl LinearSolver for IccgSolver {
                 }
                 let mut sum = a_ij;
 
-                // Subtract contributions
+                // Subtract contributions: sum -= Σ_{k<j} L_ik * L_jk
                 for idx2 in l_row_ptr[j]..l_row_ptr[j + 1] {
                     let k = l_col_idx[idx2];
                     if k < j {
                         // Find L_ik
                         for idx3 in l_row_ptr[i]..l_row_ptr[i + 1] {
                             if l_col_idx[idx3] == k {
-                                sum -= l_lower[idx3] * l_lower[idx2] * l_diag[k];
+                                sum -= l_lower[idx3] * l_lower[idx2];
                                 break;
                             }
                         }
@@ -154,6 +127,31 @@ impl LinearSolver for IccgSolver {
                 }
 
                 l_lower[idx] = sum / l_diag[j];
+            }
+
+            // Compute diagonal AFTER off-diagonals.
+            let mut sum = 0.0;
+            for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
+                let j = matrix.csr_cols[k];
+                let val = matrix.csr_vals[k];
+                if j == i {
+                    sum = val;
+                } else if j < i {
+                    // Find L_ij in our structure
+                    for idx in l_row_ptr[i]..l_row_ptr[i + 1] {
+                        if l_col_idx[idx] == j {
+                            sum -= l_lower[idx] * l_lower[idx];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if sum <= 0.0 || !sum.is_finite() {
+                // Modified IC: add small positive value
+                l_diag[i] = 1e-12;
+            } else {
+                l_diag[i] = sum.sqrt();
             }
         }
 
@@ -185,6 +183,17 @@ impl LinearSolver for IccgSolver {
             }
         }
 
+        // Scale-aware convergence: use relative residual ||r|| / ||b|| < tol,
+        // matching the raw iccg_solve() semantics.  The previous code used the
+        // absolute preconditioned residual sqrt(r^T M^{-1} r) < tol, which is
+        // scale-dependent and uses a preconditioned quantity rather than the
+        // true residual.
+        let b_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if b_norm == 0.0 || !b_norm.is_finite() {
+            return Ok(vec![0.0f64; n]);
+        }
+        let conv_tol = self.tol * b_norm;
+
         // Preconditioned CG with IC(0)
         let mut x = vec![0.0f64; n];
         let mut r = rhs.to_vec();
@@ -195,9 +204,14 @@ impl LinearSolver for IccgSolver {
 
         let mut rz_old = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
 
-        if rz_old.sqrt() < self.tol {
+        // Check true residual for initial convergence.
+        let r_norm_sq = r.iter().map(|v| v * v).sum::<f64>();
+        if r_norm_sq.sqrt() < conv_tol {
             return Ok(x);
         }
+
+        // Scale of initial preconditioned residual for relative convergence.
+        let rz_scale = rz_old.abs().sqrt();
 
         for _iter in 0..self.max_iter {
             // A * p
@@ -228,7 +242,9 @@ impl LinearSolver for IccgSolver {
             z = self.apply_preconditioner(&r)?;
             let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
 
-            if rz_new.sqrt() < self.tol {
+            // Check true residual for convergence (not preconditioned residual).
+            let r_norm_sq = r.iter().map(|v| v * v).sum::<f64>();
+            if r_norm_sq.sqrt() < conv_tol || rz_new.abs().sqrt() < self.tol * rz_scale {
                 return Ok(x);
             }
 
@@ -248,7 +264,6 @@ impl IccgSolver {
     fn apply_preconditioner(&self, r: &[f64]) -> Result<Vec<f64>, SolverError> {
         let n = self.n;
         let mut y = vec![0.0f64; n];
-        let mut z = vec![0.0f64; n];
 
         // Forward: L y = r
         for i in 0..n {
@@ -260,14 +275,15 @@ impl IccgSolver {
             y[i] = sum / self.l_diag[i];
         }
 
-        // Backward: L^T z = y
+        // Backward: L^T z = y via scattered updates.
+        let mut z = y;
         for i in (0..n).rev() {
-            let mut sum = y[i];
+            let zi = z[i] / self.l_diag[i];
+            z[i] = zi;
             for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] - 1 {
                 let j = self.l_col_idx[idx];
-                sum -= self.l_lower[idx] * z[j];
+                z[j] -= self.l_lower[idx] * zi;
             }
-            z[i] = sum / self.l_diag[i];
         }
 
         Ok(z)

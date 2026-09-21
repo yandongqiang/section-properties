@@ -82,12 +82,22 @@ impl LinearSolver for CgSolver {
             }
         }
 
+        // Scale-aware convergence: use relative residual ||r|| / ||b|| < tol,
+        // matching the raw cg_solve() semantics.  This prevents scale-dependent
+        // behaviour where small ||b|| causes premature "convergence" and large
+        // ||b|| prevents convergence.
+        let b_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if b_norm == 0.0 || !b_norm.is_finite() {
+            return Ok(vec![0.0f64; n]);
+        }
+        let conv_tol = self.tol * b_norm;
+
         let mut x = vec![0.0f64; n];
         let mut r = rhs.to_vec();
         let mut p = r.clone();
         let mut rsold = r.iter().map(|v| v * v).sum::<f64>();
 
-        if rsold.sqrt() < self.tol {
+        if rsold.sqrt() < conv_tol {
             return Ok(x);
         }
 
@@ -119,7 +129,7 @@ impl LinearSolver for CgSolver {
 
             let rsnew = r.iter().map(|v| v * v).sum::<f64>();
 
-            if rsnew.sqrt() < self.tol {
+            if rsnew.sqrt() < conv_tol {
                 return Ok(x);
             }
 
