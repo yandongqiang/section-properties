@@ -135,7 +135,7 @@ impl LinearSolver for IccgSolver {
                 let j = matrix.csr_cols[k];
                 let val = matrix.csr_vals[k];
                 if j == i {
-                    sum = val;
+                    sum += val;
                 } else if j < i {
                     // Find L_ij in our structure
                     for idx in l_row_ptr[i]..l_row_ptr[i + 1] {
@@ -148,8 +148,10 @@ impl LinearSolver for IccgSolver {
             }
 
             if sum <= 0.0 || !sum.is_finite() {
-                // Modified IC: add small positive value
-                l_diag[i] = 1e-12;
+                return Err(SolverError::singular(format!(
+                    "IC(0) breakdown at row {i}: non-positive diagonal ({:.2e})",
+                    sum
+                )));
             } else {
                 l_diag[i] = sum.sqrt();
             }
