@@ -395,10 +395,12 @@ impl ElasticComposite {
             || !iy_global.is_finite()
             || !ixy_global.is_finite()
         {
-            return Err(CompositeError::NonFiniteModularRatio {
-                index: self.components.len(),
-                e_component: f64::NAN,
-                e_ref,
+            return Err(CompositeError::NonFiniteDerivedProperty {
+                stage: "weighted_accumulation",
+                detail: format!(
+                    "total_area={}, first_x={}, first_y={}, ix_global={}, iy_global={}, ixy_global={}",
+                    total_area, first_x, first_y, ix_global, iy_global, ixy_global
+                ),
             });
         }
 
@@ -1252,5 +1254,58 @@ mod tests {
         assert!(r.principal_i11.is_finite());
         assert!(r.principal_i22.is_finite());
         assert!(r.principal_phi.is_finite());
+    }
+
+    #[test]
+    fn p2_01_case_a_modular_ratio_overflow_variant() {
+        let sec = rect_section(0.0, 0.0, 0.3, 0.5);
+        let mat_huge = Material::new(1e308, 0.3, 7850.0, "huge");
+        let mat_tiny = Material::new(1e-308, 0.3, 7850.0, "tiny");
+        let comp =
+            ElasticComposite::new(vec![CompositeComponent::new(sec, mat_huge).unwrap()]).unwrap();
+        let result = comp.analyze(&mat_tiny);
+        assert!(
+            matches!(result, Err(CompositeError::NonFiniteModularRatio { .. })),
+            "Case A: expected NonFiniteModularRatio, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn p2_01_case_b_accumulation_overflow_variant() {
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+        let s = rect_section(0.0, 1e200, 1e-10, 1e190);
+        let comp = ElasticComposite::new(vec![CompositeComponent::new(s, mat).unwrap()]).unwrap();
+        let result = comp.analyze(&mat);
+        assert!(
+            matches!(
+                result,
+                Err(CompositeError::NonFiniteDerivedProperty {
+                    stage: "weighted_accumulation",
+                    ..
+                })
+            ),
+            "Case B: expected NonFiniteDerivedProperty {{ stage: \"weighted_accumulation\" }}, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn p2_01_case_c_finite_input_ok() {
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+        let s1 = rect_section(0.0, 0.0, 0.3, 0.5);
+        let s2 = rect_section(0.1, 0.1, 0.05, 0.3);
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+        ])
+        .unwrap();
+        let result = comp.analyze(&mat1);
+        assert!(
+            matches!(result, Ok(_)),
+            "Case C: expected Ok for finite inputs, got {:?}",
+            result
+        );
     }
 }
