@@ -325,15 +325,18 @@ impl ElasticComposite {
 
         let e_ref = reference_material.youngs_modulus;
 
-        // Accumulators (global axes, transformed).
+        // --- Pass 1: composite centroid ---
+        // Accumulate transformed area and first moments only.
+        // Per-component inertia data is stored for Pass 2.
         let mut total_area = 0.0_f64;
         let mut first_x = 0.0_f64;
         let mut first_y = 0.0_f64;
-        let mut ix_global = 0.0_f64;
-        let mut iy_global = 0.0_f64;
-        let mut ixy_global = 0.0_f64;
 
         let mut component_results: Vec<ComponentAnalysis> =
+            Vec::with_capacity(self.components.len());
+
+        // (n, area, cx, cy, ix, iy, ixy) for each component
+        let mut comp_data: Vec<(f64, f64, f64, f64, f64, f64, f64)> =
             Vec::with_capacity(self.components.len());
 
         for (i, comp) in self.components.iter().enumerate() {
@@ -352,15 +355,6 @@ impl ElasticComposite {
             let cx = props.centroid.x;
             let cy = props.centroid.y;
 
-            // Centroidal → global via parallel-axis theorem:
-            //   I_x,global = I_x,c + A · cy²
-            //   I_y,global = I_y,c + A · cx²
-            //   I_xy,global = I_xy,c + A · cx · cy
-            let ix_g = props.ix + area * cy * cy;
-            let iy_g = props.iy + area * cx * cx;
-            let ixy_g = props.ixy + area * cx * cy;
-
-            // Apply modular ratio.
             let n_area = n * area;
             if !n_area.is_finite() {
                 return Err(CompositeError::NonFiniteModularRatio {
@@ -372,10 +366,8 @@ impl ElasticComposite {
             total_area += n_area;
             first_x += n_area * cx;
             first_y += n_area * cy;
-            ix_global += n * ix_g;
-            iy_global += n * iy_g;
-            ixy_global += n * ixy_g;
 
+            comp_data.push((n, area, cx, cy, props.ix, props.iy, props.ixy));
             component_results.push(ComponentAnalysis {
                 material: comp.material,
                 modular_ratio: n,
@@ -388,18 +380,12 @@ impl ElasticComposite {
         if total_area.abs() <= f64::EPSILON {
             return Err(CompositeError::ZeroTransformedArea);
         }
-        if !total_area.is_finite()
-            || !first_x.is_finite()
-            || !first_y.is_finite()
-            || !ix_global.is_finite()
-            || !iy_global.is_finite()
-            || !ixy_global.is_finite()
-        {
+        if !total_area.is_finite() || !first_x.is_finite() || !first_y.is_finite() {
             return Err(CompositeError::NonFiniteDerivedProperty {
                 stage: "weighted_accumulation",
                 detail: format!(
-                    "total_area={}, first_x={}, first_y={}, ix_global={}, iy_global={}, ixy_global={}",
-                    total_area, first_x, first_y, ix_global, iy_global, ixy_global
+                    "total_area={}, first_x={}, first_y={}",
+                    total_area, first_x, first_y
                 ),
             });
         }
@@ -416,13 +402,21 @@ impl ElasticComposite {
             });
         }
 
-        // Global → centroidal via parallel-axis theorem:
-        //   I_x,c = I_x,global − A · ȳ²
-        //   I_y,c = I_y,global − A · x̄²
-        //   I_xy,c = I_xy,global − A · x̄ · ȳ
-        let ix_c = ix_global - total_area * centroid.y * centroid.y;
-        let iy_c = iy_global - total_area * centroid.x * centroid.x;
-        let ixy_c = ixy_global - total_area * centroid.x * centroid.y;
+        // --- Pass 2: direct centroidal accumulation ---
+        // Accumulate inertia directly about the composite centroid using
+        // the parallel-axis theorem with (y_i - cy) offsets.  This avoids
+        // the catastrophic cancellation that occurs when subtracting
+        // large `ix_global - total_area * cy^2` values.
+        let mut ix_c = 0.0_f64;
+        let mut iy_c = 0.0_f64;
+        let mut ixy_c = 0.0_f64;
+        for &(n, area, cx, cy, ix_i, iy_i, ixy_i) in &comp_data {
+            let dx = cx - centroid.x;
+            let dy = cy - centroid.y;
+            ix_c += n * (ix_i + area * dy * dy);
+            iy_c += n * (iy_i + area * dx * dx);
+            ixy_c += n * (ixy_i + area * dx * dy);
+        }
         if !ix_c.is_finite() || !iy_c.is_finite() || !ixy_c.is_finite() {
             return Err(CompositeError::NonFiniteDerivedProperty {
                 stage: "centroidal_inertia",
@@ -1307,5 +1301,217 @@ mod tests {
             "Case C: expected Ok for finite inputs, got {:?}",
             result
         );
+    }
+
+    /// Analytical centroidal Ix for a rectangle: b*h^3/12
+    fn rect_ix_local(b: f64, h: f64) -> f64 {
+        b * h * h * h / 12.0
+    }
+
+    /// Analytical centroidal Iy for a rectangle: h*b^3/12
+    fn rect_iy_local(b: f64, h: f64) -> f64 {
+        h * b * b * b / 12.0
+    }
+
+    #[test]
+    fn composite_centroidal_inertia_stable_at_large_translation() {
+        let b = 0.1_f64;
+        let h = 0.1_f64;
+        let ix_true = rect_ix_local(b, h);
+        let iy_true = rect_iy_local(b, h);
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+
+        let scales: [f64; 7] = [1e0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];
+
+        for &y in &scales {
+            let sec = rect_section(0.0, y, b, h);
+            let comp =
+                ElasticComposite::new(vec![CompositeComponent::new(sec, mat).unwrap()]).unwrap();
+            let r = comp.analyze(&mat).unwrap();
+
+            let ix_relerr = (r.ix - ix_true).abs() / ix_true;
+            let iy_relerr = (r.iy - iy_true).abs() / iy_true;
+
+            assert!(
+                r.ix.is_finite() && r.ix > 0.0,
+                "Y={:.0e}: Ix={} should be finite and positive",
+                y,
+                r.ix
+            );
+            assert!(
+                r.iy.is_finite() && r.iy > 0.0,
+                "Y={:.0e}: Iy={} should be finite and positive",
+                y,
+                r.iy
+            );
+
+            let tol = if y <= 1e8 { 1e-3 } else { 1e-1 };
+            assert!(
+                ix_relerr < tol,
+                "Y={:.0e}: Ix relative error {:.2e} should be < {:.0e}",
+                y,
+                ix_relerr,
+                tol
+            );
+            assert!(
+                iy_relerr < tol,
+                "Y={:.0e}: Iy relative error {:.2e} should be < {:.0e}",
+                y,
+                iy_relerr,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn composite_translation_invariance_at_large_scales() {
+        let b = 0.1_f64;
+        let h = 0.1_f64;
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+
+        let s1_base = rect_section(0.0, 0.0, b, h);
+        let s2_base = rect_section(0.05, 0.05, b, h);
+        let comp_base = ElasticComposite::new(vec![
+            CompositeComponent::new(s1_base, mat).unwrap(),
+            CompositeComponent::new(s2_base, mat).unwrap(),
+        ])
+        .unwrap();
+        let r_base = comp_base.analyze(&mat).unwrap();
+
+        for &dy in &[1e4, 1e6, 1e8] {
+            let s1 = rect_section(0.0, dy, b, h);
+            let s2 = rect_section(0.05, dy + 0.05, b, h);
+            let comp = ElasticComposite::new(vec![
+                CompositeComponent::new(s1, mat).unwrap(),
+                CompositeComponent::new(s2, mat).unwrap(),
+            ])
+            .unwrap();
+            let r = comp.analyze(&mat).unwrap();
+
+            let ix_relerr = (r.ix - r_base.ix).abs() / r_base.ix;
+            let iy_relerr = (r.iy - r_base.iy).abs() / r_base.iy;
+
+            let tol = if dy <= 1e6 { 1e-6 } else { 1e-3 };
+            assert!(
+                ix_relerr < tol,
+                "dy={:.0e}: Ix relative error {:.2e} should be < {:.0e}",
+                dy,
+                ix_relerr,
+                tol
+            );
+            assert!(
+                iy_relerr < tol,
+                "dy={:.0e}: Iy relative error {:.2e} should be < {:.0e}",
+                dy,
+                iy_relerr,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn composite_symmetric_pair_at_large_scales() {
+        let b = 0.1_f64;
+        let h = 0.1_f64;
+        let area = b * h;
+        let ix_local = rect_ix_local(b, h);
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+
+        for &y in &[1e4, 1e8, 1e12] {
+            let s1 = rect_section(0.0, y, b, h);
+            let s2 = rect_section(0.0, -y - h, b, h);
+            let comp = ElasticComposite::new(vec![
+                CompositeComponent::new(s1, mat).unwrap(),
+                CompositeComponent::new(s2, mat).unwrap(),
+            ])
+            .unwrap();
+            let r = comp.analyze(&mat).unwrap();
+
+            assert!(
+                r.centroid.y.abs() < 1e-6,
+                "Y={:.0e}: centroid.y={} should be ~0",
+                y,
+                r.centroid.y
+            );
+            assert!(
+                r.ix > 0.0 && r.iy > 0.0,
+                "Y={:.0e}: Ix={} and Iy={} should be positive",
+                y,
+                r.ix,
+                r.iy
+            );
+
+            let d = y + h / 2.0;
+            let ix_ref = 2.0 * (ix_local + area * d * d);
+            let ix_relerr = (r.ix - ix_ref).abs() / ix_ref;
+            let tol = if y <= 1e8 { 1e-6 } else { 1e-3 };
+            assert!(
+                ix_relerr < tol,
+                "Y={:.0e}: Ix relative error {:.2e} should be < {:.0e}",
+                y,
+                ix_relerr,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn composite_independent_reference_comparison() {
+        let b = 0.1_f64;
+        let h = 0.1_f64;
+        let area = b * h;
+        let ix_local = rect_ix_local(b, h);
+        let iy_local = rect_iy_local(b, h);
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+
+        for &y in &[1e0, 1e4, 1e8, 1e12] {
+            let sec = rect_section(0.0, y, b, h);
+            let comp =
+                ElasticComposite::new(vec![CompositeComponent::new(sec, mat).unwrap()]).unwrap();
+            let r = comp.analyze(&mat).unwrap();
+
+            let cy_component = y + h / 2.0;
+            let cx_component = 0.0 + b / 2.0;
+            let total_area_ref = area;
+            let cy_ref = cy_component;
+            let cx_ref = cx_component;
+            let dy = cy_component - cy_ref;
+            let dx = cx_component - cx_ref;
+            let ix_ref = ix_local + area * dy * dy;
+            let iy_ref = iy_local + area * dx * dx;
+
+            let area_tol = if y <= 1e6 {
+                1e-10
+            } else if y <= 1e10 {
+                1e-6
+            } else {
+                1e-3
+            };
+            assert!(
+                (total_area_ref - r.area).abs() / total_area_ref < area_tol,
+                "Y={:.0e}: area mismatch: r.area={:.6e} vs ref={:.6e}",
+                y,
+                r.area,
+                total_area_ref
+            );
+
+            let ix_relerr = (r.ix - ix_local).abs() / ix_local;
+            let iy_relerr = (r.iy - iy_local).abs() / iy_local;
+            let tol = if y <= 1e8 { 1e-3 } else { 1e-1 };
+            assert!(
+                ix_relerr < tol,
+                "Y={:.0e}: Ix relerr {:.2e} vs analytical {:.6e}",
+                y,
+                ix_relerr,
+                ix_local
+            );
+            assert!(
+                iy_relerr < tol,
+                "Y={:.0e}: Iy relerr {:.2e} vs analytical {:.6e}",
+                y,
+                iy_relerr,
+                iy_local
+            );
+        }
     }
 }

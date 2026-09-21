@@ -244,49 +244,88 @@ impl SectionProperties {
     /// Returns `Err` if the net section area is zero or near-zero
     /// (degenerate geometry where outer area equals total hole area).
     pub fn try_from_compound(compound: &CompoundGeometry) -> Result<Self, String> {
-        let mut area = 0.0;
-        let mut first_x = 0.0;
-        let mut first_y = 0.0;
-        let mut ix = 0.0;
-        let mut iy = 0.0;
-        let mut ixy = 0.0;
-
-        // Collect every polygon (outer + holes) with transforms applied, so we
-        // can iterate them once for moments and again for fibre distances.
         let polygons: Vec<crate::geometry::Polygon> = compound.polygons();
 
-        // Polygon orientation convention (enforced by Section / Geometry):
-        // outer -> CCW (positive signed area)
-        // holes -> CW (negative signed area)
-        // Therefore we use signed geometric quantities directly.
+        // Pick a reference point near the geometry (first vertex of first polygon).
+        // All computations use coordinates shifted by this point to avoid
+        // precision loss in the shoelace formula for sections far from the origin.
+        let (x0, y0) = if let Some(first) = polygons.first() {
+            if let Some(v) = first.vertices.first() {
+                (v.x, v.y)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        // --- Pass 1: area and first moments (shifted) ---
+        let mut area = 0.0;
+        let mut qx_shifted = 0.0; // Σ A_i * (cx_i - x0)
+        let mut qy_shifted = 0.0; // Σ A_i * (cy_i - y0)
+
         for poly in &polygons {
-            let signed_area = poly.signed_area();
-            let centroid = poly.centroid();
+            for i in 0..poly.vertices.len() {
+                let p1 = poly.vertices[i];
+                let p2 = poly.vertices[(i + 1) % poly.vertices.len()];
 
-            area += signed_area;
-            first_x += signed_area * centroid.x;
-            first_y += signed_area * centroid.y;
+                let x1 = p1.x - x0;
+                let y1 = p1.y - y0;
+                let x2 = p2.x - x0;
+                let y2 = p2.y - y0;
 
-            ix += poly.moment_of_inertia_x();
-            iy += poly.moment_of_inertia_y();
-            ixy += poly.product_of_inertia_xy();
+                let cross = x1 * y2 - x2 * y1;
+
+                area += cross;
+                qx_shifted += (x1 + x2) * cross;
+                qy_shifted += (y1 + y2) * cross;
+            }
         }
+        area *= 0.5;
+        qx_shifted /= 6.0;
+        qy_shifted /= 6.0;
 
         if area.abs() <= f64::EPSILON {
             return Err("Section area is too small to compute properties".into());
         }
 
-        // Global centroid
-        let centroid = Point::new(first_x / area, first_y / area);
+        // Composite centroid: cx = x0 + qx_shifted / area, etc.
+        let centroid = Point::new(x0 + qx_shifted / area, y0 + qy_shifted / area);
 
-        // Parallel-axis theorem:
-        //
-        // I_x,c = I_x,global - A * cy²
-        // I_y,c = I_y,global - A * cx²
-        // I_xy,c = I_xy,global - A * cx * cy
-        let ix_c = ix - area * centroid.y.powi(2);
-        let iy_c = iy - area * centroid.x.powi(2);
-        let ixy_c = ixy - area * centroid.x * centroid.y;
+        // --- Pass 2: centroidal inertia via direct integration about centroid ---
+        // Shift all vertices relative to the composite centroid before computing
+        // moments.  This avoids catastrophic cancellation that occurs when
+        // subtracting large `Ix_global - A * cy²` values for sections far from
+        // the origin.
+        let mut ix_c = 0.0;
+        let mut iy_c = 0.0;
+        let mut ixy_c = 0.0;
+        for poly in &polygons {
+            for i in 0..poly.vertices.len() {
+                let p1 = poly.vertices[i];
+                let p2 = poly.vertices[(i + 1) % poly.vertices.len()];
+
+                let x1 = p1.x - centroid.x;
+                let y1 = p1.y - centroid.y;
+                let x2 = p2.x - centroid.x;
+                let y2 = p2.y - centroid.y;
+
+                let cross = x1 * y2 - x2 * y1;
+
+                ix_c += (y1 * y1 + y1 * y2 + y2 * y2) * cross;
+                iy_c += (x1 * x1 + x1 * x2 + x2 * x2) * cross;
+                ixy_c += (x1 * y2 + 2.0 * x1 * y1 + 2.0 * x2 * y2 + x2 * y1) * cross;
+            }
+        }
+        ix_c /= 12.0;
+        iy_c /= 12.0;
+        ixy_c /= 24.0;
+
+        // Global inertia (for struct fields) via reverse parallel-axis.
+        // This is addition, not subtraction — no cancellation.
+        let ix = ix_c + area * centroid.y * centroid.y;
+        let iy = iy_c + area * centroid.x * centroid.x;
+        let ixy = ixy_c + area * centroid.x * centroid.y;
 
         // Maximum fiber distances measure from the centroid to the extreme
         // boundary of the section (used for elastic section modulus).
@@ -430,8 +469,8 @@ impl SectionProperties {
                 zyy_plus,
                 zyy_minus,
                 perimeter,
-                qx: first_y,
-                qy: first_x,
+                qx: area * centroid.y,
+                qy: area * centroid.x,
                 ixx_g: ix,
                 iyy_g: iy,
                 ixy_g: ixy,
