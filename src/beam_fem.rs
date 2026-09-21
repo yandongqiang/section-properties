@@ -66,8 +66,8 @@ impl BeamSection {
         }
     }
 
-    /// Create from [`SectionProperties`] for a beam aligned with the **global
-    /// x-axis**.
+    /// Create from [`crate::SectionProperties`] for a beam aligned with the
+    /// **global x-axis**.
     ///
     /// The second moment of area is `props.ix = ∫y² dA`, which resists
     /// bending in the global x-y plane about the z-axis — the correct
@@ -85,8 +85,8 @@ impl BeamSection {
         }
     }
 
-    /// Create from [`SectionProperties`] for a beam aligned with the **global
-    /// y-axis**.
+    /// Create from [`crate::SectionProperties`] for a beam aligned with the
+    /// **global y-axis**.
     ///
     /// The second moment of area is `props.iy = ∫x² dA`, which resists
     /// bending in the global x-y plane about the z-axis — the correct

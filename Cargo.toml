@@ -16,6 +16,8 @@ exclude = [
     "docs/",
     "examples_tmp/",
     ".codegraph/",
+    ".github/",
+    "PHASE47_SOLVER_AUDIT.md",
 ]
 
 [dependencies]

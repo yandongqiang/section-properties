@@ -282,7 +282,7 @@ impl EquilibriumReport {
 
     /// Force tolerance used by [`Self::is_balanced`]: `effective_rel_tol *
     /// force_scale`, where `force_scale = Σ|F| + Σ|M| / l_char` (see
-    /// [`equilibrium_scales`]). The force residuals `fx_residual` and
+    /// `equilibrium_scales`). The force residuals `fx_residual` and
     /// `fy_residual` are compared against this value.
     ///
     /// This is identical to the [`Self::tolerance`] field, exposed as a
@@ -294,7 +294,7 @@ impl EquilibriumReport {
 
     /// Moment tolerance used by [`Self::is_balanced`]: `effective_rel_tol *
     /// moment_scale`, where `moment_scale = Σ|M| + Σ|F| * l_char` (see
-    /// [`equilibrium_scales`]). The moment residual `mz_residual` is
+    /// `equilibrium_scales`). The moment residual `mz_residual` is
     /// compared against this value.
     ///
     /// This is generally **not** equal to [`Self::tolerance`] (which is the
