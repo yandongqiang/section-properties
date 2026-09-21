@@ -1143,17 +1143,18 @@ impl BeamModel {
 
     /// Fix a single DOF to a prescribed value.
     ///
-    /// Panics if `node_idx` is out of bounds, `dof` is not 0/1/2, or `value`
-    /// is not finite (programmer error). Use [`Self::try_fix_dof`] for a
-    /// fallible version.
+    /// Panics if `node_idx` is out of bounds, `dof` is not 0/1/2, `value`
+    /// is not finite, or the DOF already has a conflicting prescribed value
+    /// (programmer error). Use [`Self::try_fix_dof`] for a fallible version.
     pub fn fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) {
         self.try_fix_dof(node_idx, dof, value)
             .unwrap_or_else(|e| panic!("{}", e));
     }
 
     /// Fallible counterpart of [`Self::fix_dof`]: returns a structured error for
-    /// an out-of-bounds node index, an invalid DOF (must be 0, 1 or 2), or a
-    /// non-finite prescribed value, instead of panicking.
+    /// an out-of-bounds node index, an invalid DOF (must be 0, 1 or 2), a
+    /// non-finite prescribed value, or a conflicting existing prescribed
+    /// displacement on the same DOF, instead of panicking.
     pub fn try_fix_dof(&mut self, node_idx: usize, dof: usize, value: f64) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
             return Err(FemError::InvalidInput(format!(
@@ -1236,7 +1237,8 @@ impl BeamModel {
 
     /// Fix a node completely (all 3 DOFs to 0).
     ///
-    /// Panics if `node_idx` is out of bounds (programmer error). Use
+    /// Panics if `node_idx` is out of bounds or any DOF already has a
+    /// conflicting prescribed value (programmer error). Use
     /// [`Self::try_fix_node`] for a fallible version.
     pub fn fix_node(&mut self, node_idx: usize) {
         self.try_fix_node(node_idx)
@@ -1244,7 +1246,14 @@ impl BeamModel {
     }
 
     /// Fallible counterpart of [`Self::fix_node`]: returns a structured error
-    /// for an out-of-bounds node index instead of panicking.
+    /// for an out-of-bounds node index or a conflicting existing prescribed
+    /// displacement on any of the node's DOFs, instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if any DOF already
+    /// has a conflicting prescribed value.
     pub fn try_fix_node(&mut self, node_idx: usize) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
             return Err(FemError::InvalidInput(format!(
@@ -1274,6 +1283,8 @@ impl BeamModel {
     ///
     /// [`FemError::InvalidInput`] for an out-of-bounds node index or a
     /// non-finite prescribed value.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if the DOF already
+    /// has a conflicting prescribed value.
     pub fn try_fix(&mut self, node_idx: usize, dof: Dof, value: f64) -> Result<(), FemError> {
         self.try_fix_dof(node_idx, dof.index(), value)
     }

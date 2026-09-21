@@ -437,6 +437,8 @@ impl FrameModel {
     /// # Errors
     ///
     /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if any of the node's
+    /// DOFs already has a conflicting prescribed value.
     pub fn fix(&mut self, node: NodeHandle) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.try_fix_node(i)

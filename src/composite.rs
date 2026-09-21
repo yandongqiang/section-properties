@@ -118,6 +118,16 @@ pub enum CompositeError {
         e_component: f64,
         e_ref: f64,
     },
+
+    /// A derived section property (centroid, centroidal inertia, or principal-axis
+    /// quantity) is not finite even though all input components were finite.
+    ///
+    /// This indicates that the combination of coordinates, areas, and modular
+    /// ratios causes an intermediate arithmetic overflow (e.g. `diff * diff`
+    /// in the Mohr's-circle principal-axis calculation) or a catastrophic
+    /// cancellation that produces `Inf` or `NaN`.
+    #[error("non-finite derived section property at stage '{stage}': {detail}")]
+    NonFiniteDerivedProperty { stage: &'static str, detail: String },
 }
 
 /// A geometric section component paired with a material.
@@ -394,6 +404,15 @@ impl ElasticComposite {
 
         // Transformed centroid.
         let centroid = Point::new(first_x / total_area, first_y / total_area);
+        if !centroid.x.is_finite() || !centroid.y.is_finite() {
+            return Err(CompositeError::NonFiniteDerivedProperty {
+                stage: "centroid",
+                detail: format!(
+                    "centroid = ({}, {}) from first_x={}, first_y={}, total_area={}",
+                    centroid.x, centroid.y, first_x, first_y, total_area
+                ),
+            });
+        }
 
         // Global → centroidal via parallel-axis theorem:
         //   I_x,c = I_x,global − A · ȳ²
@@ -402,6 +421,15 @@ impl ElasticComposite {
         let ix_c = ix_global - total_area * centroid.y * centroid.y;
         let iy_c = iy_global - total_area * centroid.x * centroid.x;
         let ixy_c = ixy_global - total_area * centroid.x * centroid.y;
+        if !ix_c.is_finite() || !iy_c.is_finite() || !ixy_c.is_finite() {
+            return Err(CompositeError::NonFiniteDerivedProperty {
+                stage: "centroidal_inertia",
+                detail: format!(
+                    "ix_c={}, iy_c={}, ixy_c={} (centroid=({}, {}), total_area={})",
+                    ix_c, iy_c, ixy_c, centroid.x, centroid.y, total_area
+                ),
+            });
+        }
 
         // Principal axes (Mohr's circle, same convention as SectionProperties).
         let avg = (ix_c + iy_c) * 0.5;
@@ -410,6 +438,15 @@ impl ElasticComposite {
         let i11 = avg + radius;
         let i22 = avg - radius;
         let phi = 0.5 * (2.0 * ixy_c).atan2(ix_c - iy_c);
+        if !i11.is_finite() || !i22.is_finite() || !phi.is_finite() {
+            return Err(CompositeError::NonFiniteDerivedProperty {
+                stage: "principal_axes",
+                detail: format!(
+                    "i11={}, i22={}, phi={} (ix_c={}, iy_c={}, ixy_c={})",
+                    i11, i22, phi, ix_c, iy_c, ixy_c
+                ),
+            });
+        }
 
         Ok(CompositeAnalysisResult {
             area: total_area,
@@ -1137,12 +1174,83 @@ mod tests {
     #[test]
     fn p1_01_large_but_finite_modular_ratio() {
         let sec = rect_section(0.0, 0.0, 0.3, 0.5);
-        let mat_huge = Material::new(1e200, 0.3, 7850.0, "huge");
-        let mat_tiny = Material::new(1e-100, 0.3, 7850.0, "tiny");
+        let mat_huge = Material::new(1e20, 0.3, 7850.0, "huge");
+        let mat_tiny = Material::new(1e-10, 0.3, 7850.0, "tiny");
         let comp =
             ElasticComposite::new(vec![CompositeComponent::new(sec, mat_huge).unwrap()]).unwrap();
         let result = comp.analyze(&mat_tiny).unwrap();
         assert!(result.area.is_finite(), "area should be finite");
         assert!(result.ix.is_finite(), "ix should be finite");
+        assert!(result.principal_i11.is_finite(), "i11 should be finite");
+        assert!(result.principal_i22.is_finite(), "i22 should be finite");
+    }
+
+    #[test]
+    fn p0_01_reproduce_principal_axis_overflow() {
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+        let s1 = rect_section(0.0, 1e100, 0.1, 1e90);
+        let s2 = rect_section(0.0, -1e100, 0.1, 1e90);
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat).unwrap(),
+            CompositeComponent::new(s2, mat).unwrap(),
+        ])
+        .unwrap();
+        let result = comp.analyze(&mat);
+        match result {
+            Ok(r) => panic!(
+                "P0-01 NOT fixed: expected Err but got Ok with i11={}, i22={}",
+                r.principal_i11, r.principal_i22
+            ),
+            Err(CompositeError::NonFiniteDerivedProperty { stage, .. }) => {
+                println!("P0-01 confirmed: stage = {stage}");
+                assert!(stage == "principal_axes" || stage == "centroidal_inertia");
+            }
+            Err(e) => panic!("P0-01 unexpected error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn p0_01_normal_composite_not_rejected() {
+        let mat = Material::new(1.0, 0.0, 1.0, "unit");
+        let s1 = rect_section(0.0, 1e10, 0.1, 0.1);
+        let s2 = rect_section(0.0, -1e10, 0.1, 0.1);
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat).unwrap(),
+            CompositeComponent::new(s2, mat).unwrap(),
+        ])
+        .unwrap();
+        let result = comp.analyze(&mat).unwrap();
+        assert!(result.area.is_finite());
+        assert!(result.ix.is_finite());
+        assert!(result.iy.is_finite());
+        assert!(result.ixy.is_finite());
+        assert!(result.principal_i11.is_finite());
+        assert!(result.principal_i22.is_finite());
+        assert!(result.principal_phi.is_finite());
+        assert!(result.centroid.x.is_finite());
+        assert!(result.centroid.y.is_finite());
+    }
+
+    #[test]
+    fn p0_02_all_finite_results_invariant() {
+        let mat1 = Material::new(30e9, 0.2, 2400.0, "concrete");
+        let mat2 = Material::new(200e9, 0.3, 7850.0, "steel");
+        let s1 = rect_section(0.0, 0.0, 0.3, 0.5);
+        let s2 = rect_section(0.1, 0.1, 0.05, 0.3);
+        let comp = ElasticComposite::new(vec![
+            CompositeComponent::new(s1, mat1).unwrap(),
+            CompositeComponent::new(s2, mat2).unwrap(),
+        ])
+        .unwrap();
+        let r = comp.analyze(&mat1).unwrap();
+        assert!(r.area.is_finite());
+        assert!(r.centroid.x.is_finite());
+        assert!(r.centroid.y.is_finite());
+        assert!(r.ix.is_finite());
+        assert!(r.iy.is_finite());
+        assert!(r.ixy.is_finite());
+        assert!(r.principal_i11.is_finite());
+        assert!(r.principal_i22.is_finite());
+        assert!(r.principal_phi.is_finite());
     }
 }

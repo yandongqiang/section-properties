@@ -94,22 +94,38 @@ impl WarpingProperties {
     /// Analytical formulas are available for validation/testing but are NOT used as fallbacks.
     ///
     /// `nu` is the Poisson's ratio of the material (e.g., 0.3 for steel).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying FEM analysis fails (e.g., invalid section geometry
+    /// or mesh generation failure). For a fallible version, use [`try_from_section`].
+    ///
+    /// [`try_from_section`]: WarpingProperties::try_from_section
     pub fn from_section(section: &Section, nu: f64) -> Self {
+        Self::try_from_section(section, nu).expect(
+            "FEM warping analysis failed. This should not happen for valid sections. \
+             Check mesh generation and section validity.",
+        )
+    }
+
+    /// Fallible version of [`from_section`] that propagates FEM errors instead of panicking.
+    ///
+    /// Returns `Err` if mesh generation or the FEM solve fails for the given section.
+    ///
+    /// [`from_section`]: WarpingProperties::from_section
+    pub fn try_from_section(
+        section: &Section,
+        nu: f64,
+    ) -> Result<Self, crate::mesh::fem::FemError> {
         let props = SectionProperties::from_section(section);
         let area = props.area;
 
         // Use FEM as the primary method for ALL sections
         // This matches Python sectionproperties which uses FEM as the core method
-        let fem = compute_fem_warping_properties(section, &props, nu).expect(
-            "FEM warping analysis failed. This should not happen for valid sections. \
-             Check mesh generation and section validity.",
-        );
+        let fem = compute_fem_warping_properties(section, &props, nu)?;
 
         // Also compute the full FEM solution to get tau_sv_max for unit torque
-        let fem_solution = compute_fem_solution(section, &props, nu).expect(
-            "FEM stress recovery failed after warping analysis succeeded. \
-             Check mesh generation and section validity.",
-        );
+        let fem_solution = compute_fem_solution(section, &props, nu)?;
 
         // FEM solves in centroidal coordinates; report in global axes
         // (Python convention: shear centre in section coordinates).
@@ -199,7 +215,7 @@ impl WarpingProperties {
         // Max St. Venant shear stress for unit torque from FEM
         let tau_sv_max_unit = fem_solution.tau_sv_max;
 
-        Self {
+        Ok(Self {
             j,
             iw,
             shear_center,
@@ -231,7 +247,7 @@ impl WarpingProperties {
             beta_22_minus,
             omega_max: fem.omega_max,
             tau_sv_max_unit,
-        }
+        })
     }
 
     /// Torsional stiffness (GJ).
@@ -1073,5 +1089,40 @@ mod tests {
             "channel Iw should be positive, got {}",
             props.iw
         );
+    }
+
+    #[test]
+    fn try_from_section_ok_for_valid_section() {
+        let poly = Polygon::new(vec![
+            Point::new(-0.1, -0.05),
+            Point::new(0.1, -0.05),
+            Point::new(0.1, 0.05),
+            Point::new(-0.1, 0.05),
+        ]);
+        let section = Section::new(poly, vec![]);
+        let result = WarpingProperties::try_from_section(&section, 0.3);
+        assert!(
+            result.is_ok(),
+            "try_from_section should succeed for valid section"
+        );
+        let props = result.unwrap();
+        assert!(props.j > 0.0);
+        assert!(props.area > 0.0);
+    }
+
+    #[test]
+    fn try_from_section_matches_from_section() {
+        let poly = Polygon::new(vec![
+            Point::new(-0.1, -0.05),
+            Point::new(0.1, -0.05),
+            Point::new(0.1, 0.05),
+            Point::new(-0.1, 0.05),
+        ]);
+        let section = Section::new(poly, vec![]);
+        let fallible = WarpingProperties::try_from_section(&section, 0.3).unwrap();
+        let panicking = WarpingProperties::from_section(&section, 0.3);
+        assert!((fallible.j - panicking.j).abs() < 1e-15);
+        assert!((fallible.iw - panicking.iw).abs() < 1e-15);
+        assert!((fallible.area - panicking.area).abs() < 1e-15);
     }
 }
