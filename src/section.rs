@@ -333,7 +333,9 @@ impl Section {
     /// Checks (all relative to the section's oriented polygons):
     /// 1. All hole vertices lie inside the outer polygon (boundary-touching is
     ///    accepted, matching [`Polygon::contains_point`] on-edge semantics).
-    /// 2. No hole edge properly crosses the outer boundary.
+    /// 2. No hole edge interacts with the outer boundary (crosses, touches, or
+    ///    overlaps).  Boundary-touching by a hole **edge** is rejected even
+    ///    though a hole **vertex** on the boundary is accepted in step 1.
     /// 3. No two holes overlap (area overlap) or nest (one contains another).
     /// 4. Holes are oriented CW (negative signed area).
     ///
@@ -419,7 +421,8 @@ impl Section {
     /// Validates (see [`Section::validate`]):
     /// - All hole vertices lie inside the outer boundary (boundary-touching accepted)
     /// - No two holes overlap or nest (no hole-within-hole)
-    /// - No hole edge properly crosses the outer boundary
+    /// - No hole edge interacts with the outer boundary (crosses, touches, or
+    ///   overlaps); edge-level boundary-touching is rejected
     /// - Orientation is normalised to outer CCW / holes CW
     ///
     /// Returns `Err` with a descriptive message if validation fails.

@@ -465,9 +465,13 @@ impl FrameModel {
     ///
     /// Applied through the existing static condensation
     /// (`K_ff u_f = f_f - K_fc u_c`); no penalty constraints are used.
+    ///
+    /// If the DOF was previously constrained (e.g. by [`fix`](Self::fix)),
+    /// the existing prescription is **replaced** — this allows the common
+    /// workflow of fixing a support node and then applying a settlement.
     pub fn restrain(&mut self, node: NodeHandle, dof: Dof, value: f64) -> Result<(), FemError> {
         let i = self.check_node(node)?;
-        self.inner.try_fix(i, dof, value)
+        self.inner.try_override(i, dof, value)
     }
 
     /// Apply a **global** nodal force `(fx, fy)`.

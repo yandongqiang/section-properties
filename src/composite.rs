@@ -108,6 +108,16 @@ pub enum CompositeError {
     /// The reference material modulus is invalid.
     #[error("invalid reference material modulus: E={value}")]
     InvalidReferenceModulus { value: f64 },
+
+    /// The modular ratio `E_i / E_ref` is not finite (overflow).
+    #[error(
+        "non-finite modular ratio for component {index}: E={e_component:.6e} / E_ref={e_ref:.6e}"
+    )]
+    NonFiniteModularRatio {
+        index: usize,
+        e_component: f64,
+        e_ref: f64,
+    },
 }
 
 /// A geometric section component paired with a material.
@@ -321,6 +331,13 @@ impl ElasticComposite {
                 .map_err(|detail| CompositeError::InvalidGeometry { index: i, detail })?;
 
             let n = comp.material.youngs_modulus / e_ref;
+            if !n.is_finite() {
+                return Err(CompositeError::NonFiniteModularRatio {
+                    index: i,
+                    e_component: comp.material.youngs_modulus,
+                    e_ref,
+                });
+            }
             let area = props.area;
             let cx = props.centroid.x;
             let cy = props.centroid.y;
@@ -335,6 +352,13 @@ impl ElasticComposite {
 
             // Apply modular ratio.
             let n_area = n * area;
+            if !n_area.is_finite() {
+                return Err(CompositeError::NonFiniteModularRatio {
+                    index: i,
+                    e_component: comp.material.youngs_modulus,
+                    e_ref,
+                });
+            }
             total_area += n_area;
             first_x += n_area * cx;
             first_y += n_area * cy;
@@ -353,6 +377,19 @@ impl ElasticComposite {
 
         if total_area.abs() <= f64::EPSILON {
             return Err(CompositeError::ZeroTransformedArea);
+        }
+        if !total_area.is_finite()
+            || !first_x.is_finite()
+            || !first_y.is_finite()
+            || !ix_global.is_finite()
+            || !iy_global.is_finite()
+            || !ixy_global.is_finite()
+        {
+            return Err(CompositeError::NonFiniteModularRatio {
+                index: self.components.len(),
+                e_component: f64::NAN,
+                e_ref,
+            });
         }
 
         // Transformed centroid.
@@ -1078,5 +1115,34 @@ mod tests {
         assert!((r_near.area - r_single.area).abs() / r_single.area < 1e-10);
         assert!((r_near.ix - r_single.ix).abs() / r_single.ix < 1e-10);
         assert!((r_near.centroid.y - r_single.centroid.y).abs() < 1e-10);
+    }
+
+    #[test]
+    fn p1_01_reproduce_modular_ratio_overflow() {
+        let sec = rect_section(0.0, 0.0, 0.3, 0.5);
+        let mat_huge = Material::new(1e308, 0.3, 7850.0, "huge");
+        let mat_tiny = Material::new(1e-308, 0.3, 7850.0, "tiny");
+        let comp =
+            ElasticComposite::new(vec![CompositeComponent::new(sec, mat_huge).unwrap()]).unwrap();
+        let result = comp.analyze(&mat_tiny);
+        match result {
+            Ok(r) => panic!(
+                "P1-01 NOT fixed: expected Err but got Ok with area={}, ix={}",
+                r.area, r.ix
+            ),
+            Err(e) => println!("P1-01 confirmed: got Err = {:?}", e),
+        }
+    }
+
+    #[test]
+    fn p1_01_large_but_finite_modular_ratio() {
+        let sec = rect_section(0.0, 0.0, 0.3, 0.5);
+        let mat_huge = Material::new(1e200, 0.3, 7850.0, "huge");
+        let mat_tiny = Material::new(1e-100, 0.3, 7850.0, "tiny");
+        let comp =
+            ElasticComposite::new(vec![CompositeComponent::new(sec, mat_huge).unwrap()]).unwrap();
+        let result = comp.analyze(&mat_tiny).unwrap();
+        assert!(result.area.is_finite(), "area should be finite");
+        assert!(result.ix.is_finite(), "ix should be finite");
     }
 }

@@ -1174,6 +1174,62 @@ impl BeamModel {
                 value
             )));
         }
+        for &(n, d, v) in &self.fixed_dofs {
+            if n == node_idx && d == dof {
+                let scale = (v.abs() + value.abs()).max(1.0);
+                if (v - value).abs() > 1e-12 * scale {
+                    return Err(FemError::ConflictingPrescribedDisplacement {
+                        node_idx,
+                        dof,
+                        first_value: v,
+                        conflicting_value: value,
+                    });
+                }
+                return Ok(());
+            }
+        }
+        self.fixed_dofs.push((node_idx, dof, value));
+        Ok(())
+    }
+
+    /// Override (upsert) a prescribed displacement: if `(node_idx, dof)` is
+    /// already constrained, replace its value; otherwise add a new constraint.
+    ///
+    /// Unlike [`Self::try_fix_dof`], this does **not** detect conflicting
+    /// values — it silently replaces the previous prescription.  Use this when
+    /// the caller explicitly intends to override (e.g. applying a support
+    /// settlement after a full fix).
+    pub fn try_override_dof(
+        &mut self,
+        node_idx: usize,
+        dof: usize,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if node_idx >= self.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            )));
+        }
+        if dof >= 3 {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid DOF: {} (must be 0, 1, or 2)",
+                dof
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Prescribed value must be finite, got {}",
+                value
+            )));
+        }
+        for entry in &mut self.fixed_dofs {
+            if entry.0 == node_idx && entry.1 == dof {
+                entry.2 = value;
+                return Ok(());
+            }
+        }
         self.fixed_dofs.push((node_idx, dof, value));
         Ok(())
     }
@@ -1222,6 +1278,16 @@ impl BeamModel {
         self.try_fix_dof(node_idx, dof.index(), value)
     }
 
+    /// Typed counterpart of [`Self::try_override_dof`]: override (upsert) the
+    /// prescribed displacement for `(node_idx, dof)` to `value`.
+    ///
+    /// Unlike [`Self::try_fix`], this silently replaces any existing
+    /// constraint on the same DOF instead of returning
+    /// [`FemError::ConflictingPrescribedDisplacement`].
+    pub fn try_override(&mut self, node_idx: usize, dof: Dof, value: f64) -> Result<(), FemError> {
+        self.try_override_dof(node_idx, dof.index(), value)
+    }
+
     /// Constrain all three DOFs of a node to the given prescribed values.
     ///
     /// Use this for a prescribed displacement/rotation (e.g. a support
@@ -1229,10 +1295,11 @@ impl BeamModel {
     /// fully fixed node is `try_fix_node_with_values(i, 0.0, 0.0, 0.0)`, which
     /// is what [`Self::try_fix_node`] does.
     ///
-    /// This is a convenience wrapper: it delegates to [`Self::try_fix_dof`]
+    /// This is a convenience wrapper: it delegates to [`Self::try_override_dof`]
     /// for `ux`, `uy` and `rz`, so it uses the same boundary-condition storage
     /// and the same static-condensation path. It does not add a second BC
-    /// representation and does not change reaction recovery.
+    /// representation and does not change reaction recovery.  Any existing
+    /// constraint on the same DOF is **replaced**.
     ///
     /// # Errors
     ///
@@ -1263,9 +1330,9 @@ impl BeamModel {
                 )));
             }
         }
-        self.try_fix_dof(node_idx, Dof::Ux.index(), ux)?;
-        self.try_fix_dof(node_idx, Dof::Uy.index(), uy)?;
-        self.try_fix_dof(node_idx, Dof::Rz.index(), rz)?;
+        self.try_override_dof(node_idx, Dof::Ux.index(), ux)?;
+        self.try_override_dof(node_idx, Dof::Uy.index(), uy)?;
+        self.try_override_dof(node_idx, Dof::Rz.index(), rz)?;
         Ok(())
     }
 
@@ -3016,6 +3083,16 @@ pub enum FemError {
     OrphanNode(String),
     #[error("Disconnected structure: {0}")]
     DisconnectedStructure(String),
+    #[error(
+        "Conflicting prescribed displacement at node {node_idx}, DOF {dof}: \
+             first value {first_value}, conflicting value {conflicting_value}"
+    )]
+    ConflictingPrescribedDisplacement {
+        node_idx: usize,
+        dof: usize,
+        first_value: f64,
+        conflicting_value: f64,
+    },
 }
 
 impl FemError {
@@ -3235,5 +3312,77 @@ mod tests {
         assert_eq!(model.dof_index(1, 0), 3);
         assert_eq!(model.dof_index(1, 1), 4);
         assert_eq!(model.dof_index(1, 2), 5);
+    }
+
+    #[test]
+    fn p1_02_reproduce_conflicting_prescribed_displacement() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_fix_dof(0, 1, 0.0).unwrap();
+        let result = model.try_fix_dof(0, 1, 0.01);
+        match result {
+            Ok(()) => {
+                panic!("P1-02 NOT fixed: conflicting prescribed displacement silently accepted")
+            }
+            Err(e) => println!("P1-02 confirmed: got Err = {:?}", e),
+        }
+    }
+
+    #[test]
+    fn p1_02_same_prescribed_value_is_idempotent() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_fix_dof(0, 1, 0.005).unwrap();
+        model.try_fix_dof(0, 1, 0.005).unwrap();
+        assert_eq!(model.fixed_dofs.len(), 1);
+    }
+
+    #[test]
+    fn p1_02_different_dofs_are_independent() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_fix_dof(0, 0, 0.0).unwrap();
+        model.try_fix_dof(0, 1, 0.01).unwrap();
+        model.try_fix_dof(0, 2, 0.02).unwrap();
+    }
+
+    #[test]
+    fn p1_02_different_nodes_are_independent() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_fix_dof(0, 0, 0.0).unwrap();
+        model.try_fix_dof(1, 0, 0.01).unwrap();
+    }
+
+    #[test]
+    fn p1_02_override_after_fix_allows_settlement() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_fix_node(0).unwrap();
+        model.try_override_dof(0, 1, -0.005).unwrap();
+        assert_eq!(model.fixed_dofs.len(), 3);
+        let uy = model
+            .fixed_dofs
+            .iter()
+            .find(|&&(n, d, _)| n == 0 && d == 1)
+            .map(|&(_, _, v)| v)
+            .unwrap();
+        assert_eq!(uy, -0.005);
+    }
+
+    #[test]
+    fn p1_02_override_replaces_existing_value() {
+        let mut model = BeamModel::new();
+        model.add_node(BeamNode::new(0, 0.0, 0.0));
+        model.add_node(BeamNode::new(1, 1.0, 0.0));
+        model.try_override_dof(0, 1, 0.01).unwrap();
+        model.try_override_dof(0, 1, 0.02).unwrap();
+        assert_eq!(model.fixed_dofs.len(), 1);
+        assert_eq!(model.fixed_dofs[0].2, 0.02);
     }
 }
