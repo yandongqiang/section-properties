@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-22
+
 ### Breaking changes
 
 - **Removed `SolverError::BackendNotAvailable` variant.** This was a
