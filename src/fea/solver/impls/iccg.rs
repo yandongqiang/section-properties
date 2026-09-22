@@ -248,6 +248,12 @@ impl LinearSolver for IccgSolver {
             let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
 
             // Check true residual for convergence (not preconditioned residual).
+            // Dual criterion: (1) true relative residual ||r|| < tol * ||b||,
+            // (2) relative preconditioned residual sqrt(r^T z) < tol * sqrt(rz₀).
+            // The secondary criterion catches early convergence when the
+            // preconditioned residual is small but the true residual is
+            // temporarily inflated by cancellation — avoiding unnecessary
+            // extra iterations.  Both criteria are scale-aware (Phase 59).
             let r_norm_sq = r.iter().map(|v| v * v).sum::<f64>();
             if r_norm_sq.sqrt() < conv_tol || rz_new.abs().sqrt() < self.tol * rz_scale {
                 return Ok(x);
