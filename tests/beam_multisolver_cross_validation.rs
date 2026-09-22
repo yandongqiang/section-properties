@@ -513,12 +513,12 @@ fn test_global_equilibrium_force_and_moment() {
     for (e, fe) in r.end_global.iter().enumerate() {
         let elem = &model.elements[e];
         let map = [
-            model.dof_index(elem.node_i, 0),
-            model.dof_index(elem.node_i, 1),
-            model.dof_index(elem.node_i, 2),
-            model.dof_index(elem.node_j, 0),
-            model.dof_index(elem.node_j, 1),
-            model.dof_index(elem.node_j, 2),
+            elem.node_i * 3 + 0,
+            elem.node_i * 3 + 1,
+            elem.node_i * 3 + 2,
+            elem.node_j * 3 + 0,
+            elem.node_j * 3 + 1,
+            elem.node_j * 3 + 2,
         ];
         for k in 0..6 {
             assembled[map[k]] += fe[k];

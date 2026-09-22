@@ -89,12 +89,12 @@ fn end_forces_from_principle(model: &BeamModel, solver: &BeamSolver, e: usize) -
     let ni = model.nodes[el.node_i].point();
     let nj = model.nodes[el.node_j].point();
     let map = [
-        model.dof_index(el.node_i, 0),
-        model.dof_index(el.node_i, 1),
-        model.dof_index(el.node_i, 2),
-        model.dof_index(el.node_j, 0),
-        model.dof_index(el.node_j, 1),
-        model.dof_index(el.node_j, 2),
+        el.node_i * 3 + 0,
+        el.node_i * 3 + 1,
+        el.node_i * 3 + 2,
+        el.node_j * 3 + 0,
+        el.node_j * 3 + 1,
+        el.node_j * 3 + 2,
     ];
     let u = solver.displacements();
     let ug = [

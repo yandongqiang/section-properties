@@ -95,14 +95,14 @@ fn an_udl_rot(q: f64, l: f64, ei: f64) -> f64 {
 // Used for the residual and energy audits (not the production reaction routine).
 // ---------------------------------------------------------------------------
 
-fn element_dof_map(model: &BeamModel, e: &BeamElement) -> [usize; 6] {
+fn element_dof_map(e: &BeamElement) -> [usize; 6] {
     [
-        model.dof_index(e.node_i, 0),
-        model.dof_index(e.node_i, 1),
-        model.dof_index(e.node_i, 2),
-        model.dof_index(e.node_j, 0),
-        model.dof_index(e.node_j, 1),
-        model.dof_index(e.node_j, 2),
+        e.node_i * 3 + 0,
+        e.node_i * 3 + 1,
+        e.node_i * 3 + 2,
+        e.node_j * 3 + 0,
+        e.node_j * 3 + 1,
+        e.node_j * 3 + 2,
     ]
 }
 
@@ -111,7 +111,7 @@ fn scatter_local(model: &BeamModel, e: &BeamElement, local: [f64; 6], f: &mut [f
     let ni = model.nodes[e.node_i].point();
     let nj = model.nodes[e.node_j].point();
     let t = e.transformation_matrix(ni, nj);
-    let map = element_dof_map(model, e);
+    let map = element_dof_map(e);
     for (i, &m) in map.iter().enumerate() {
         let mut g = 0.0;
         for (j, &l) in local.iter().enumerate() {
@@ -129,7 +129,7 @@ fn assemble_k_f(model: &BeamModel) -> (Vec<Vec<f64>>, Vec<f64>) {
         let ni = model.nodes[e.node_i].point();
         let nj = model.nodes[e.node_j].point();
         let ke = e.global_stiffness(ni, nj);
-        let map = element_dof_map(model, e);
+        let map = element_dof_map(e);
         for a in 0..6 {
             for b in 0..6 {
                 k[map[a]][map[b]] += ke[a][b];
@@ -139,7 +139,7 @@ fn assemble_k_f(model: &BeamModel) -> (Vec<Vec<f64>>, Vec<f64>) {
 
     let mut f = vec![0.0f64; n];
     for &(node, dof, v) in &model.nodal_forces {
-        f[model.dof_index(node, dof)] += v;
+        f[node * 3 + dof] += v;
     }
     for dl in &model.distributed_loads {
         let e = &model.elements[dl.element_idx];
@@ -158,7 +158,7 @@ fn assemble_k_f(model: &BeamModel) -> (Vec<Vec<f64>>, Vec<f64>) {
         scatter_local(model, e, local, &mut f);
     }
     for am in &model.applied_moments {
-        f[model.dof_index(am.node_idx, 2)] += am.value;
+        f[am.node_idx * 3 + 2] += am.value;
     }
     (k, f)
 }
@@ -178,7 +178,7 @@ fn audit(model: &BeamModel, solver: &BeamSolver) -> Audit {
 
     let mut fixed = vec![false; n];
     for &(node, dof, _) in &model.fixed_dofs {
-        fixed[model.dof_index(node, dof)] = true;
+        fixed[node * 3 + dof] = true;
     }
 
     // r = K u - f  (independent dense mat-vec).

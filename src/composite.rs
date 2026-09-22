@@ -1509,15 +1509,7 @@ mod tests {
                 ElasticComposite::new(vec![CompositeComponent::new(sec, mat).unwrap()]).unwrap();
             let r = comp.analyze(&mat).unwrap();
 
-            let cy_component = y + h / 2.0;
-            let cx_component = 0.0 + b / 2.0;
             let total_area_ref = area;
-            let cy_ref = cy_component;
-            let cx_ref = cx_component;
-            let dy = cy_component - cy_ref;
-            let dx = cx_component - cx_ref;
-            let ix_ref = ix_local + area * dy * dy;
-            let iy_ref = iy_local + area * dx * dx;
 
             let area_tol = if y <= 1e6 {
                 1e-10
