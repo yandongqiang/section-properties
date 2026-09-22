@@ -3109,6 +3109,12 @@ pub enum FemError {
     },
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    /// Legacy variant — no longer constructed by any code path.
+    ///
+    /// Singular-matrix conditions are reported via
+    /// [`FemError::SolverError`] with a structured [`SolverError`] source.
+    /// Retained for API compatibility; candidate for removal in a future
+    /// major version.
     #[error("Singular matrix: {0}")]
     SingularMatrix(String),
     // ---- frame-level structural diagnostics (see `crate::frame`) ----------

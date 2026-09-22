@@ -135,6 +135,13 @@ pub enum CompositeError {
 /// The section geometry is owned (cloned) so that the original user data
 /// is never mutated.  The transformed section is an analytical
 /// representation only — the original geometry remains recoverable.
+///
+/// The fields `section` and `material` are public, so callers can construct
+/// a `CompositeComponent` directly with a struct literal, bypassing the
+/// validation in [`new`](Self::new).  In that case
+/// [`ElasticComposite::analyze`] re-validates each component's material
+/// before computation, so an invalid material is caught at analysis time
+/// rather than at construction time.
 #[derive(Debug, Clone)]
 pub struct CompositeComponent {
     /// The geometric section (outer boundary + optional holes).
@@ -321,6 +328,8 @@ impl ElasticComposite {
     ///
     /// Returns `Err` if:
     /// * the reference material modulus is invalid,
+    /// * any component's material fails [`Material::is_valid`](crate::material::Material::is_valid)
+    ///   (this catches components constructed via struct literal bypass),
     /// * any component's geometry is degenerate,
     /// * the transformed net area is zero or near-zero.
     pub fn analyze(

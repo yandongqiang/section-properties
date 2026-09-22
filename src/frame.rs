@@ -445,6 +445,12 @@ impl FrameModel {
     }
 
     /// Pin a node: restrain `ux` and `uy`, leave the rotation free.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if either `ux` or `uy`
+    /// already has a conflicting prescribed value.
     pub fn pin(&mut self, node: NodeHandle) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.try_fix_dof(i, Dof::Ux.index(), 0.0)?;
@@ -452,12 +458,24 @@ impl FrameModel {
     }
 
     /// Roller restraining the vertical translation (`uy = 0`), horizontal free.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if `uy` already has a
+    /// conflicting prescribed value.
     pub fn roller_y(&mut self, node: NodeHandle) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.try_fix_dof(i, Dof::Uy.index(), 0.0)
     }
 
     /// Roller restraining the horizontal translation (`ux = 0`), vertical free.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::ConflictingPrescribedDisplacement`] if `ux` already has a
+    /// conflicting prescribed value.
     pub fn roller_x(&mut self, node: NodeHandle) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.try_fix_dof(i, Dof::Ux.index(), 0.0)
@@ -471,6 +489,11 @@ impl FrameModel {
     /// If the DOF was previously constrained (e.g. by [`fix`](Self::fix)),
     /// the existing prescription is **replaced** — this allows the common
     /// workflow of fixing a support node and then applying a settlement.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::InvalidInput`] if `value` is not finite.
     pub fn restrain(&mut self, node: NodeHandle, dof: Dof, value: f64) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.try_override(i, dof, value)
@@ -501,6 +524,10 @@ impl FrameModel {
     }
 
     /// Apply a **global** nodal moment `mz` (counter-clockwise positive).
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
     pub fn nodal_moment(&mut self, node: NodeHandle, mz: f64) -> Result<(), FemError> {
         let i = self.check_node(node)?;
         self.inner.add_applied_moment(i, mz)
@@ -510,6 +537,10 @@ impl FrameModel {
     ///
     /// `qy > 0` is upward in local +y; `qx > 0` is tensile (towards `node_j`).
     /// Repeated calls accumulate on the same member.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if the handle is not valid.
     pub fn member_udl(&mut self, member: MemberHandle, qx: f64, qy: f64) -> Result<(), FemError> {
         let i = self.check_member(member)?;
         self.inner.add_distributed_load(i, qx, qy)
@@ -520,6 +551,10 @@ impl FrameModel {
     ///
     /// `xi = 0` / `xi = 1` places the load at a node; it is applied exactly once
     /// (no double counting).
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if the handle is not valid.
     pub fn member_point_load(
         &mut self,
         member: MemberHandle,

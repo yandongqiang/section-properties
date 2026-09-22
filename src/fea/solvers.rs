@@ -17,7 +17,13 @@ pub enum SolverKind {
     Pardiso,
 }
 
-/// Error type for solver operations.
+/// Error type for the legacy direct-solver layer (`fea::matrix`).
+///
+/// This is distinct from [`crate::fea::solver::SolverError`], which is the
+/// unified error type for the current solver interface.  The two types are
+/// not interchangeable; this one exists for backward compatibility with
+/// the legacy `fea::solvers` module and is a candidate for unification in
+/// a future major version.
 #[derive(Debug, Clone)]
 pub enum SolverError {
     FactorizationFailed(String),

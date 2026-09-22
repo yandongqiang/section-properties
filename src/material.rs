@@ -47,6 +47,10 @@ impl Material {
     }
 
     /// Create a new material with all properties specified.
+    ///
+    /// This is an **unchecked constructor** — it does not validate the
+    /// inputs.  Call [`is_valid`](Self::is_valid) to verify that the
+    /// resulting material has physically admissible properties.
     pub fn with_all(
         youngs_modulus: f64,
         shear_modulus: f64,

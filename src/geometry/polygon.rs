@@ -51,6 +51,21 @@ pub struct Polygon {
 }
 
 impl Polygon {
+    /// Create a polygon from a list of vertices.
+    ///
+    /// Consecutive duplicate vertices and a trailing vertex that closes back
+    /// on the first are removed automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// * fewer than 3 vertices are provided,
+    /// * any vertex has a non-finite `x` or `y`,
+    /// * fewer than 3 distinct vertices remain after deduplication,
+    /// * the polygon has (near-)zero signed area (degenerate).
+    ///
+    /// The area check uses a numerically stable vertex-reference formula so
+    /// that polygons far from the origin are not spuriously rejected.
     pub fn new(vertices: Vec<Point>) -> Self {
         assert!(vertices.len() >= 3, "Polygon needs at least 3 vertices");
 
