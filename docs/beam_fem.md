@@ -215,10 +215,16 @@ this is verified across `dense`, `skyline_ldlt` and `sparse_lu` in
 `FemError` is the error type returned by the fallible Beam FEM APIs:
 
 ```text
-FemError::InvalidModel(String)   // structural problems with the model
-FemError::InvalidInput(String)   // invalid arguments (index, position, non-finite value)
-FemError::SolverError(String)    // propagated linear-solver failure (e.g. singular system)
-FemError::SingularMatrix(String)
+FemError::InvalidModel(String)          // structural problems with the model
+FemError::InvalidInput(String)          // invalid arguments (index, position, non-finite value)
+FemError::SolverError { source, message } // propagated linear-solver failure (structured)
+FemError::InvalidNode(String)           // frame: invalid node handle
+FemError::InvalidMember(String)         // frame: invalid member handle
+FemError::ZeroLengthMember(String)      // frame: zero-length member
+FemError::DuplicateMember(String)       // frame: duplicate member
+FemError::OrphanNode(String)            // frame: node not connected to any member
+FemError::DisconnectedStructure(String) // frame: multiple independent substructures
+FemError::ConflictingPrescribedDisplacement { .. } // conflicting prescribed DOF
 ```
 
 Examples (all covered by `tests/beam_fem_robustness.rs`):
