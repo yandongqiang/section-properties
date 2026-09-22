@@ -27,6 +27,10 @@ pub struct Material {
 
 impl Material {
     /// Create a new material from E and ν (computes G = E / (2(1+ν))).
+    ///
+    /// This is an **unchecked constructor** — it does not validate the
+    /// inputs.  Call [`is_valid`](Self::is_valid) to verify that the
+    /// resulting material has physically admissible properties.
     pub fn new(youngs_modulus: f64, poissons_ratio: f64, density: f64, name: &'static str) -> Self {
         let shear_modulus = youngs_modulus / (2.0 * (1.0 + poissons_ratio));
         Self {
@@ -96,11 +100,25 @@ impl Material {
     }
 
     /// Check if material properties are physically valid.
+    ///
+    /// Returns `true` only when every field is finite and within the
+    /// physically admissible range for an isotropic linear-elastic solid:
+    ///
+    /// * `E > 0` and finite
+    /// * `G > 0` and finite
+    /// * `-1 < ν < 0.5` (strict on both sides: ν = -1 gives G = ∞,
+    ///   ν = 0.5 gives infinite bulk modulus)
+    /// * `ρ ≥ 0` and finite (zero density is admissible for a massless
+    ///   placeholder)
     pub fn is_valid(&self) -> bool {
-        self.youngs_modulus > 0.0
+        self.youngs_modulus.is_finite()
+            && self.youngs_modulus > 0.0
+            && self.shear_modulus.is_finite()
             && self.shear_modulus > 0.0
-            && self.poissons_ratio >= -1.0
+            && self.poissons_ratio.is_finite()
+            && self.poissons_ratio > -1.0
             && self.poissons_ratio < 0.5
+            && self.density.is_finite()
             && self.density >= 0.0
     }
 }

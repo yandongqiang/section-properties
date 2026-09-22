@@ -148,8 +148,18 @@ impl CompositeComponent {
     ///
     /// Returns `Err` if the Young's modulus is not a positive, finite value
     /// or if the section geometry is degenerate.
+    ///
+    /// The material is also checked via [`Material::is_valid`](crate::material::Material::is_valid),
+    /// which verifies that `E`, `G`, `ν`, and `ρ` are all finite and within
+    /// their physically admissible ranges.
     pub fn new(section: Section, material: Material) -> Result<Self, CompositeError> {
         validate_modulus(material.youngs_modulus, material.name)?;
+        if !material.is_valid() {
+            return Err(CompositeError::InvalidModulus {
+                name: material.name.to_string(),
+                value: material.youngs_modulus,
+            });
+        }
         let area = section.area();
         if area.abs() <= f64::EPSILON {
             return Err(CompositeError::InvalidGeometry {
@@ -322,6 +332,19 @@ impl ElasticComposite {
                 value: reference_material.youngs_modulus,
             },
         )?;
+
+        // Re-validate each component's material.  CompositeComponent has pub
+        // fields, so users can bypass CompositeComponent::new and construct
+        // an instance with invalid properties directly.  This guard catches
+        // such bypasses at analysis time.
+        for comp in &self.components {
+            if !comp.material.is_valid() {
+                return Err(CompositeError::InvalidModulus {
+                    name: comp.material.name.to_string(),
+                    value: comp.material.youngs_modulus,
+                });
+            }
+        }
 
         let e_ref = reference_material.youngs_modulus;
 
