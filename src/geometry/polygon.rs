@@ -83,11 +83,37 @@ impl Polygon {
 
         let poly = Self { vertices: dedup };
         assert!(
-            poly.signed_area().abs() > f64::EPSILON,
+            poly.signed_area_stable().abs() > f64::EPSILON,
             "Polygon has (near-)zero area"
         );
 
         poly
+    }
+
+    /// Compute signed area using vertex-reference shifted coordinates.
+    ///
+    /// Numerically stable for polygons far from the origin, unlike
+    /// [`signed_area`](Self::signed_area) which uses the global shoelace
+    /// formula and suffers catastrophic cancellation when vertex
+    /// coordinates are large.
+    fn signed_area_stable(&self) -> f64 {
+        let n = self.vertices.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let x0 = self.vertices[0].x;
+        let y0 = self.vertices[0].y;
+        let mut area2 = 0.0;
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let x1 = p1.x - x0;
+            let y1 = p1.y - y0;
+            let x2 = p2.x - x0;
+            let y2 = p2.y - y0;
+            area2 += x1 * y2 - x2 * y1;
+        }
+        0.5 * area2
     }
 
     /// Offset the polygon by `distance` using mitred corners.
@@ -360,28 +386,118 @@ impl Polygon {
         sum / 24.0
     }
 
-    /// Calculate the second moment of area about the centroidal x-axis.
-    pub fn centroidal_moment_of_inertia_x(&self) -> f64 {
-        let area = self.area();
-        let centroid = self.centroid();
+    /// Compute the centroid offset from the first vertex using shifted
+    /// (vertex-relative) coordinates.
+    ///
+    /// Returns `(dx, dy)` where `centroid = vertices[0] + (dx, dy)`.
+    /// All intermediate values are small (order of polygon extent), avoiding
+    /// the catastrophic cancellation that the global-coordinate shoelace
+    /// formula suffers when the polygon is far from the origin.
+    fn centroid_offset_from_first_vertex(&self) -> (f64, f64) {
+        let n = self.vertices.len();
+        let x0 = self.vertices[0].x;
+        let y0 = self.vertices[0].y;
 
-        self.moment_of_inertia_x() - area * centroid.y.powi(2)
+        let mut area2 = 0.0; // 2 * signed_area
+        let mut qx = 0.0; // 6 * A * (cx - x0)
+        let mut qy = 0.0; // 6 * A * (cy - y0)
+
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let x1 = p1.x - x0;
+            let y1 = p1.y - y0;
+            let x2 = p2.x - x0;
+            let y2 = p2.y - y0;
+            let cross = x1 * y2 - x2 * y1;
+            area2 += cross;
+            qx += (x1 + x2) * cross;
+            qy += (y1 + y2) * cross;
+        }
+
+        assert!(
+            area2.abs() > f64::EPSILON,
+            "Cannot calculate centroid of a degenerate polygon"
+        );
+
+        // qx / (6 * signed_area) = qx / (3 * area2)
+        (qx / (3.0 * area2), qy / (3.0 * area2))
+    }
+
+    /// Calculate the second moment of area about the centroidal x-axis.
+    ///
+    /// Uses a **vertex-reference two-pass strategy**: the first vertex is
+    /// used as a reference point so that all shifted coordinates are small
+    /// (order of polygon extent).  The centroid offset is computed in these
+    /// shifted coordinates, then the moment integral is evaluated about the
+    /// centroid.  This avoids the catastrophic cancellation that occurs in
+    /// `Ix_global - A * y_c²` when the polygon is far from the origin.
+    pub fn centroidal_moment_of_inertia_x(&self) -> f64 {
+        let n = self.vertices.len();
+        let x0 = self.vertices[0].x;
+        let y0 = self.vertices[0].y;
+        let (dx, dy) = self.centroid_offset_from_first_vertex();
+
+        let mut sum = 0.0;
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let y1 = (p1.y - y0) - dy;
+            let y2 = (p2.y - y0) - dy;
+            let x1 = (p1.x - x0) - dx;
+            let x2 = (p2.x - x0) - dx;
+            let cross = x1 * y2 - x2 * y1;
+            sum += (y1 * y1 + y1 * y2 + y2 * y2) * cross;
+        }
+        sum / 12.0
     }
 
     /// Calculate the second moment of area about the centroidal y-axis.
+    ///
+    /// Uses the same vertex-reference two-pass strategy as
+    /// [`centroidal_moment_of_inertia_x`](Self::centroidal_moment_of_inertia_x).
     pub fn centroidal_moment_of_inertia_y(&self) -> f64 {
-        let area = self.area();
-        let centroid = self.centroid();
+        let n = self.vertices.len();
+        let x0 = self.vertices[0].x;
+        let y0 = self.vertices[0].y;
+        let (dx, dy) = self.centroid_offset_from_first_vertex();
 
-        self.moment_of_inertia_y() - area * centroid.x.powi(2)
+        let mut sum = 0.0;
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let y1 = (p1.y - y0) - dy;
+            let y2 = (p2.y - y0) - dy;
+            let x1 = (p1.x - x0) - dx;
+            let x2 = (p2.x - x0) - dx;
+            let cross = x1 * y2 - x2 * y1;
+            sum += (x1 * x1 + x1 * x2 + x2 * x2) * cross;
+        }
+        sum / 12.0
     }
 
     /// Calculate the product of area about the centroidal axes.
+    ///
+    /// Uses the same vertex-reference two-pass strategy as
+    /// [`centroidal_moment_of_inertia_x`](Self::centroidal_moment_of_inertia_x).
     pub fn centroidal_product_of_inertia_xy(&self) -> f64 {
-        let area = self.area();
-        let centroid = self.centroid();
+        let n = self.vertices.len();
+        let x0 = self.vertices[0].x;
+        let y0 = self.vertices[0].y;
+        let (dx, dy) = self.centroid_offset_from_first_vertex();
 
-        self.product_of_inertia_xy() - area * centroid.x * centroid.y
+        let mut sum = 0.0;
+        for i in 0..n {
+            let p1 = self.vertices[i];
+            let p2 = self.vertices[(i + 1) % n];
+            let y1 = (p1.y - y0) - dy;
+            let y2 = (p2.y - y0) - dy;
+            let x1 = (p1.x - x0) - dx;
+            let x2 = (p2.x - x0) - dx;
+            let cross = x1 * y2 - x2 * y1;
+            sum += (x1 * y2 + 2.0 * x1 * y1 + 2.0 * x2 * y2 + x2 * y1) * cross;
+        }
+        sum / 24.0
     }
 
     /// Rotate all vertices about the origin by `angle` radians (CCW positive).
