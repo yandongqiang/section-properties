@@ -99,34 +99,37 @@ impl LinearSolver for IccgSolver {
         // IC(0) factorization (Cholesky form: L L^T ≈ A, L_ii = sqrt(d_i))
         for i in 0..n {
             // Compute off-diagonals FIRST (diagonal depends on them).
-            for idx in l_row_ptr[i]..l_row_ptr[i + 1] - 1 {
-                let j = l_col_idx[idx];
+            // Guard against empty rows (e.g. zero diagonal skipped by compress()).
+            if l_row_ptr[i + 1] > l_row_ptr[i] {
+                for idx in l_row_ptr[i]..l_row_ptr[i + 1] - 1 {
+                    let j = l_col_idx[idx];
 
-                // Find A_ij
-                let mut a_ij = 0.0;
-                for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
-                    if matrix.csr_cols[k] == j {
-                        a_ij = matrix.csr_vals[k];
-                        break;
+                    // Find A_ij
+                    let mut a_ij = 0.0;
+                    for k in matrix.row_ptr[i]..matrix.row_ptr[i + 1] {
+                        if matrix.csr_cols[k] == j {
+                            a_ij = matrix.csr_vals[k];
+                            break;
+                        }
                     }
-                }
-                let mut sum = a_ij;
+                    let mut sum = a_ij;
 
-                // Subtract contributions: sum -= Σ_{k<j} L_ik * L_jk
-                for idx2 in l_row_ptr[j]..l_row_ptr[j + 1] {
-                    let k = l_col_idx[idx2];
-                    if k < j {
-                        // Find L_ik
-                        for idx3 in l_row_ptr[i]..l_row_ptr[i + 1] {
-                            if l_col_idx[idx3] == k {
-                                sum -= l_lower[idx3] * l_lower[idx2];
-                                break;
+                    // Subtract contributions: sum -= Σ_{k<j} L_ik * L_jk
+                    for idx2 in l_row_ptr[j]..l_row_ptr[j + 1] {
+                        let k = l_col_idx[idx2];
+                        if k < j {
+                            // Find L_ik
+                            for idx3 in l_row_ptr[i]..l_row_ptr[i + 1] {
+                                if l_col_idx[idx3] == k {
+                                    sum -= l_lower[idx3] * l_lower[idx2];
+                                    break;
+                                }
                             }
                         }
                     }
-                }
 
-                l_lower[idx] = sum / l_diag[j];
+                    l_lower[idx] = sum / l_diag[j];
+                }
             }
 
             // Compute diagonal AFTER off-diagonals.
