@@ -104,12 +104,12 @@ fn compare_coo_vecs(rust_data: &serde_json::Value, py_data: &serde_json::Value, 
         label,
         max_abs
     );
-    // Only assert relative diff for entries with magnitude > 1e-8
+    // Only assert relative diff for entries with magnitude > 1e-8.
+    // NaN or Infinity indicates a numerical breakdown (e.g. NaN in matrix
+    // entries), which must fail rather than silently pass.
     assert!(
-        max_rel_meaningful < 1e-8
-            || max_rel_meaningful.is_infinite()
-            || max_rel_meaningful.is_nan(),
-        "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
+        max_rel_meaningful.is_finite() && max_rel_meaningful < 1e-8,
+        "{}: max relative diff (meaningful) {:.2e} is not finite or >= 1e-8",
         label,
         max_rel_meaningful
     );
@@ -159,12 +159,11 @@ fn compare_vecs(rust_vec: &[f64], py_vec: &[f64], label: &str) {
         label,
         max_abs
     );
-    // Only assert relative diff for entries with magnitude > 1e-8
+    // Only assert relative diff for entries with magnitude > 1e-8.
+    // NaN or Infinity indicates a numerical breakdown, which must fail.
     assert!(
-        max_rel_meaningful < 1e-8
-            || max_rel_meaningful.is_infinite()
-            || max_rel_meaningful.is_nan(),
-        "{}: max relative diff (meaningful) {:.2e} >= 1e-8",
+        max_rel_meaningful.is_finite() && max_rel_meaningful < 1e-8,
+        "{}: max relative diff (meaningful) {:.2e} is not finite or >= 1e-8",
         label,
         max_rel_meaningful
     );

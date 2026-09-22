@@ -52,7 +52,7 @@ impl LinearSolver for PardisoSolverWrapper {
 
         #[cfg(not(feature = "pardiso"))]
         {
-            Err(SolverError::backend_not_available(
+            Err(SolverError::backend_unavailable(
                 "PARDISO feature not enabled",
             ))
         }

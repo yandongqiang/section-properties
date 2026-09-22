@@ -20,7 +20,7 @@ library in a single, dependency-light Rust crate.
   compound-geometry validation.
 - **Finite-element warping analysis** (`mesh`, `fea`, `plastic::warping_fem`):
   TRI3/TRI6 meshing, sparse direct and iterative solvers (sparse LU, skyline
-  LDLᵀ, PCG, ICCG, optional Intel MKL PARDISO), and warping/torsion constants.
+  LDLᵀ, CG, ICCG, optional Intel MKL PARDISO), and warping/torsion constants.
 - **Plastic analysis** (`plastic`): section classification (EN 1993-1-1 /
   AISC 360), plastic section moduli, interaction diagrams, and torsion analysis.
 - **Cold-formed steel** (`cold_formed_analysis`): effective width method,
@@ -70,6 +70,8 @@ let result: Result<SectionProperties, String> =
 ```
 
 ## Building and testing
+
+Requires Rust 1.85+ (edition 2024).
 
 ```bash
 cargo build

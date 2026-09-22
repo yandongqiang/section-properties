@@ -151,9 +151,6 @@ pub enum SolverError {
     #[error("convergence failed: {0}")]
     ConvergenceFailed(String),
 
-    #[error("backend not available: {0}")]
-    BackendNotAvailable(String),
-
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
@@ -210,10 +207,6 @@ impl SolverError {
 
     pub fn convergence_failed(msg: impl Into<String>) -> Self {
         Self::ConvergenceFailed(msg.into())
-    }
-
-    pub fn backend_not_available(msg: impl Into<String>) -> Self {
-        Self::BackendNotAvailable(msg.into())
     }
 
     pub fn not_implemented(msg: impl Into<String>) -> Self {

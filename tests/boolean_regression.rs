@@ -403,10 +403,11 @@ fn regression_offset_self_intersection() {
     let offset = l_shape.offset(0.1);
     assert!(offset.is_some());
 
-    // Larger inward offset on L-shape can self-intersect
-    let inward = l_shape.offset(-0.5);
-    // Should still return something (largest valid loop)
-    assert!(inward.is_some() || inward.is_none()); // either is acceptable
+    // Larger inward offset on L-shape can self-intersect.
+    // offset() returns the largest valid loop if one exists, or None if
+    // the offset is too aggressive. Either outcome is acceptable here;
+    // the call itself verifies that offset does not panic.
+    let _inward = l_shape.offset(-0.5);
 }
 
 #[test]

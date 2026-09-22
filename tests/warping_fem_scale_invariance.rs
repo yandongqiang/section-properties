@@ -79,10 +79,7 @@ fn run_scale_test(name: &str, section: Section, scales: &[f64]) {
             MeshControl::Fine,
         ) {
             Ok(r) => r,
-            Err(e) => {
-                println!("FEM failed at scale {:.0e}: {:?}", s, e);
-                continue;
-            }
+            Err(e) => panic!("FEM failed at scale {:.0e}: {:?}", s, e),
         };
         let elapsed = start.elapsed();
 
@@ -113,8 +110,7 @@ fn run_scale_test(name: &str, section: Section, scales: &[f64]) {
         .iter()
         .position(|(s, _)| (s - 1.0).abs() < f64::EPSILON);
     if base_idx.is_none() {
-        println!("No base scale (s=1) result found, skipping verification");
-        return;
+        panic!("No base scale (s=1) result found — FEM failed at base scale");
     }
     let base_idx = base_idx.unwrap();
     let (_, base_result) = &results[base_idx];
@@ -195,28 +191,43 @@ fn run_scale_test(name: &str, section: Section, scales: &[f64]) {
             omega_max_err
         };
 
-        // Allow generous tolerance for FEM discretization + solver differences
-        let tol = 1e-1; // 10% tolerance
+        // Tolerance based on observed max error ~6.6% (Angle s=1e3, J).
+        // 15% gives ~2.3× headroom for platform/precision variation while
+        // still catching genuine regressions.
+        let tol = 1.5e-1; // 15% tolerance
 
         // For J and Iw, check relative error is small
-        assert!(j_err_val < 1.0, "J error too large: {:.2e}", j_err_val);
-        assert!(iw_err_val < 1.0, "Iw error too large: {:.2e}", iw_err_val);
+        assert!(
+            j_err_val < tol,
+            "J error too large: {:.2e} > {:.2e}",
+            j_err_val,
+            tol
+        );
+        assert!(
+            iw_err_val < tol,
+            "Iw error too large: {:.2e} > {:.2e}",
+            iw_err_val,
+            tol
+        );
 
         // For shear center, use absolute tolerance when expected is near zero
         assert!(
-            sc_x_err_val < 1.0 || (base_sc_x * s).abs() < 1e-6,
-            "Shear centre X error too large: {:.2e}",
-            sc_x_err_val
+            sc_x_err_val < tol || (base_sc_x * s).abs() < 1e-6,
+            "Shear centre X error too large: {:.2e} > {:.2e}",
+            sc_x_err_val,
+            tol
         );
         assert!(
-            sc_y_err_val < 1.0 || (base_sc_y * s).abs() < 1e-6,
-            "Shear centre Y error too large: {:.2e}",
-            sc_y_err_val
+            sc_y_err_val < tol || (base_sc_y * s).abs() < 1e-6,
+            "Shear centre Y error too large: {:.2e} > {:.2e}",
+            sc_y_err_val,
+            tol
         );
         assert!(
-            omega_max_err_val < 1.0,
-            "omega_max error too large: {:.2e}",
-            omega_max_err_val
+            omega_max_err_val < tol,
+            "omega_max error too large: {:.2e} > {:.2e}",
+            omega_max_err_val,
+            tol
         );
 
         println!("  PASS: All quantities scale correctly (errors within tolerance)");

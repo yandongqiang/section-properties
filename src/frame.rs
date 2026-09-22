@@ -199,7 +199,8 @@ pub struct EquilibriumReport {
     /// moment tolerance is **not** stored in this field; use
     /// [`Self::moment_tolerance`] to obtain it. Using `tolerance` to
     /// threshold `mz_residual` gives a wrong verdict when `l_char != 1`.
-    pub tolerance: f64,
+    /// Private: use [`Self::force_tolerance`] or [`Self::moment_tolerance`].
+    tolerance: f64,
     /// Σ of the absolute applied and reaction **force** magnitudes actually
     /// present (per load term, not per resultant — a self-cancelling load pair
     /// must not collapse the scale to zero). Private: it only feeds
@@ -575,6 +576,12 @@ impl FrameModel {
     /// otherwise). The selected solver is used exactly once; if it fails the
     /// error is returned directly — there is no automatic retry with a
     /// different backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError`] if the model is invalid (see [`Self::validate`]),
+    /// the stiffness matrix is singular/near-singular, or the solver backend
+    /// fails.
     pub fn solve(&self) -> Result<FrameAnalysisResult, FemError> {
         self.solve_with(SolverSelection::Auto)
     }
@@ -599,6 +606,11 @@ impl FrameModel {
     ///
     /// After solving, [`FrameAnalysisResult::solver_name`] reports which
     /// backend was actually used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError`] if the model is invalid, the requested solver is
+    /// unavailable, or the solve fails (singular/near-singular matrix).
     pub fn solve_with(&self, selection: SolverSelection) -> Result<FrameAnalysisResult, FemError> {
         FrameSolver::new(self).with_selection(selection).solve()
     }

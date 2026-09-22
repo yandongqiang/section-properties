@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes
+
+- **Removed `SolverError::BackendNotAvailable` variant.** This was a
+  near-duplicate of `BackendUnavailable` with no semantic distinction.
+  All call sites now use `BackendUnavailable`.
+- **Privatized `EquilibriumReport::tolerance` field.** The field name
+  suggested a general tolerance but it only holds the **force** tolerance.
+  Use `force_tolerance()` or `moment_tolerance()` instead.
+
+### Non-breaking changes
+
+- Added `Default` impl for `BeamModel` (equivalent to `new()`).
+- Fixed tautological tests: `rust_on_python_mesh` now asserts FEM success
+  and finite results; `boolean_regression` tautological assertion removed;
+  `global_matrix_comparison` now asserts output file is non-empty.
+- Fixed NaN-accepting assertions in `global_matrix_cross_validation`:
+  NaN/Infinity in relative error now fails the assertion.
+- Tightened `warping_fem_scale_invariance` tolerance from 100% to 15%
+  (observed max error ~6.6%); FEM failures now panic instead of silently
+  skipping.
+- Documentation: added `# Errors` sections to `BeamSolver::solve`,
+  `FrameModel::solve`, `FrameModel::solve_with`; fixed README PCG→CG
+  terminology; added Rust 1.85+ requirement to README.
+
 ## 0.2.0
 
 ### Breaking changes

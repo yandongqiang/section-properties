@@ -14,7 +14,9 @@ fn test_section(section_name: &str, section: Section, output_dir: &str) {
     let output_path = format!("{}/{}.json", output_dir, section_name.replace(' ', "_"));
     println!("\nExporting {} to {}", section_name, output_path);
     export_global_warping_matrices(&section, section_name, &output_path).expect("Export failed");
-    println!("✓ Exported successfully");
+    let metadata = std::fs::metadata(&output_path).expect("Output file not created");
+    assert!(metadata.len() > 0, "Output file is empty: {}", output_path);
+    println!("✓ Exported {} bytes", metadata.len());
 }
 
 #[test]

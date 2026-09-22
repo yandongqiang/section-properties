@@ -1078,6 +1078,12 @@ pub struct BeamModel {
     pub fixed_dofs: Vec<(usize, usize, f64)>,
 }
 
+impl Default for BeamModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BeamModel {
     pub fn new() -> Self {
         Self {
@@ -2184,6 +2190,11 @@ impl BeamSolver {
     /// [`Self::solver_name`] is cleared at the start of this call and set only
     /// after the solve succeeds, so a failed solve never leaves stale
     /// observability implying a backend produced the current solution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::SolverError`] if the solver fails to factor or solve
+    /// the condensed system (e.g. singular or near-singular stiffness).
     pub fn solve(&mut self, solver: &mut dyn LinearSolver) -> Result<(), FemError> {
         self.solver_name = None;
         let (f_reduced, constrained_dofs, constrained_values) = self.apply_boundary_conditions();

@@ -45,10 +45,6 @@ fn p2_1_force_and_moment_tolerance_exposed() {
 
     assert!(ft > 0.0, "force_tolerance must be positive");
     assert!(mt > 0.0, "moment_tolerance must be positive");
-    assert!(
-        (ft - eq.tolerance).abs() < 1e-15 * (1.0 + ft.abs()),
-        "force_tolerance must equal the tolerance field"
-    );
     assert!(eq.is_balanced(), "equilibrium must be balanced");
 }
 
