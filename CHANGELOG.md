@@ -25,6 +25,10 @@
 - Documentation: added `# Errors` sections to `BeamSolver::solve`,
   `FrameModel::solve`, `FrameModel::solve_with`; fixed README PCG→CG
   terminology; added Rust 1.85+ requirement to README.
+- Fixed stale documentation: `BeamElement::transformation_matrix` doc
+  direction (global→local, not local→global); README quick start missing
+  `ParametricSection` trait import; `ElasticComposite::new` doc claimed
+  validation that was not implemented.
 
 ## 0.2.0
 
