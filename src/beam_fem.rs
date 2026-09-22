@@ -1312,6 +1312,16 @@ impl BeamModel {
     /// representation and does not change reaction recovery.  Any existing
     /// constraint on the same DOF is **replaced**.
     ///
+    /// # Override vs conflict semantics
+    ///
+    /// Unlike [`Self::try_fix_node`], which delegates to [`Self::try_fix_dof`]
+    /// and returns [`FemError::ConflictingPrescribedDisplacement`] when a DOF
+    /// already has a different prescribed value, this method **silently
+    /// replaces** the existing constraint.  This is intentional: the typical
+    /// use case is applying a support settlement after an initial full fix
+    /// (`try_fix_node(i)` → `try_fix_node_with_values(i, 0.0, -0.01, 0.0)`),
+    /// where the override is the desired behaviour.
+    ///
     /// # Errors
     ///
     /// [`FemError::InvalidInput`] for an out-of-bounds node index or any
@@ -2257,14 +2267,24 @@ impl BeamSolver {
     /// is now rejected.  Prefer the typed [`Self::displacement_dof`] with
     /// [`Dof`] for compile-time safety.
     ///
-    /// Out-of-range node indices return `Ok(0.0)` (no panic). Before a
-    /// successful solve the whole displacement vector is zero, so this also
-    /// returns `Ok(0.0)`.
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds.  Previously
+    /// out-of-range node indices silently returned `Ok(0.0)`; this is now
+    /// rejected for consistency with [`Self::displacement_dof`].
+    ///
+    /// Before a successful solve the whole displacement vector is zero, so
+    /// a valid query returns `Ok(0.0)`.
     pub fn displacement(&self, node_idx: usize, dof: usize) -> Result<f64, FemError> {
         if dof >= 3 {
             return Err(FemError::InvalidInput(format!(
                 "Invalid DOF index: {} (must be 0=Ux, 1=Uy, 2=Rz)",
                 dof
+            )));
+        }
+        if node_idx >= self.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.model.nodes.len().saturating_sub(1)
             )));
         }
         let idx = self.model.dof_index(node_idx, dof);
@@ -2399,14 +2419,24 @@ impl BeamSolver {
     /// is now rejected.  Prefer the typed [`Self::reaction_dof`] with [`Dof`]
     /// for compile-time safety.
     ///
-    /// Out-of-range node indices return `Ok(0.0)` (no panic). Before a
-    /// successful solve this returns the raw `K·0 - f` value, which is not
-    /// a physical support reaction (see [`Self::reactions`]).
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds.  Previously
+    /// out-of-range node indices silently returned `Ok(0.0)`; this is now
+    /// rejected for consistency with [`Self::reaction_dof`].
+    ///
+    /// Before a successful solve this returns the raw `K·0 - f` value, which
+    /// is not a physical support reaction (see [`Self::reactions`]).
     pub fn reaction(&self, node_idx: usize, dof: usize) -> Result<f64, FemError> {
         if dof >= 3 {
             return Err(FemError::InvalidInput(format!(
                 "Invalid DOF index: {} (must be 0=Ux, 1=Uy, 2=Rz)",
                 dof
+            )));
+        }
+        if node_idx >= self.model.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.model.nodes.len().saturating_sub(1)
             )));
         }
         let idx = self.model.dof_index(node_idx, dof);
