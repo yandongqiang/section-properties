@@ -41,7 +41,7 @@ library in a single, dependency-light Rust crate.
 ## Quick start
 
 ```rust
-use section_properties::{SectionProperties, section_library::steel::ISection};
+use section_properties::{ParametricSection, SectionProperties, section_library::steel::ISection};
 
 let isection = ISection::from_designation("IPE300").unwrap();
 let section = isection.build();

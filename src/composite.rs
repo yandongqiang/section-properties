@@ -287,8 +287,9 @@ pub struct ElasticComposite {
 impl ElasticComposite {
     /// Create a new composite section from a list of components.
     ///
-    /// Returns `Err` if the list is empty or if any component has invalid
-    /// material or geometry.
+    /// Returns `Err` if the list is empty. Individual component validation
+    /// (material/geometry) is performed by [`CompositeComponent::new`] and
+    /// [`Self::analyze`].
     pub fn new(components: Vec<CompositeComponent>) -> Result<Self, CompositeError> {
         if components.is_empty() {
             return Err(CompositeError::NoComponents);

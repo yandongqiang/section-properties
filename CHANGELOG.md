@@ -10,8 +10,8 @@
   `SolverError::SingularMatrix` or `SolverError::NearSingularMatrix`.
 
 - **Unified `SolverError`.** The duplicate `fea::solvers::SolverError` enum has
-  been removed; `fea::solvers` now re-exports the canonical
-  `fea::solver::SolverError`. If you imported `fea::solvers::SolverError`,
+  been removed; `fea::solvers` now uses the canonical
+  `fea::solver::SolverError` internally. If you imported `fea::solvers::SolverError`,
   switch to `fea::solver::SolverError` (or the top-level re-export
   `section_properties::SolverError`).
 

@@ -251,9 +251,10 @@ convention above.
 - `BeamModel::try_fix(node, Dof, value)` — typed form of `try_fix_dof`.
 - `BeamModel::try_fix_node_with_values(node, ux, uy, rz)` — prescribed
   displacement/rotation for all three DOFs of a node (e.g. a support
-  settlement). It delegates to `try_fix_dof`, shares the same boundary-condition
-  storage and static-condensation path, and validates all inputs before
-  recording anything, so a rejected call leaves the model unchanged.
+  settlement). It delegates to `try_override_dof`, shares the same
+  boundary-condition storage and static-condensation path, and validates all
+  inputs before recording anything, so a rejected call leaves the model
+  unchanged. Any existing constraint on the same DOF is silently replaced.
 - `BeamElement::to_local_force(node_i, node_j, gx, gy) -> (fx_local, fy_local)`
   — rotate a **global** force (or load-intensity) vector into the element's
   **local** axes for use with `add_distributed_load` / `add_point_load`.

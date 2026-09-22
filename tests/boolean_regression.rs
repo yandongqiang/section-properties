@@ -645,8 +645,6 @@ fn regression_compound_hole_validation() {
     use section_properties::geometry::{CompoundGeometry, Section};
 
     // Nested holes should be rejected
-    let hole_outer = square(1.0, 1.0, 2.0);
-    let hole_inner = square(1.5, 1.5, 1.0);
     let s = Section::new(
         square(0.0, 0.0, 4.0),
         vec![square(1.0, 1.0, 2.0), square(1.5, 1.5, 1.0)],

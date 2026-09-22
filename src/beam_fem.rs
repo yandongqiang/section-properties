@@ -548,7 +548,7 @@ impl BeamElement {
 
     /// Compute coordinate transformation matrix (6x6)
     ///
-    /// Transforms from local to global coordinates
+    /// Transforms from global to local coordinates (u_local = T · u_global)
     /// Local DOF: [u_i, v_i, θ_i, u_j, v_j, θ_j]
     /// Global DOF: [U_i, V_i, Θ_i, U_j, V_j, Θ_j]
     pub fn transformation_matrix(&self, node_i: Point, node_j: Point) -> [[f64; 6]; 6] {
@@ -947,7 +947,7 @@ impl AppliedMoment {
 /// A single degree of freedom of a beam node.
 ///
 /// Ergonomic typed alternative to the raw `0/1/2` DOF indices used by
-/// `BeamModel::dof_index` and [`BeamModel::try_fix_dof`]. The mapping is
+/// `BeamModel::try_fix_dof` (and the crate-internal `dof_index` helper). The mapping is
 /// fixed by the frozen Beam FEM contract (`docs/beam_fem.md`):
 ///
 /// ```text
