@@ -87,14 +87,26 @@ fn poissons_ratio_nan_rejected() {
 
 #[test]
 fn poissons_ratio_inf_rejected() {
-    let mat = Material::with_all(200e9, 76.9e9, f64::INFINITY, 7850.0, 0.0, 0.0, 0.0, "nu=inf");
+    let mat = Material::with_all(
+        200e9,
+        76.9e9,
+        f64::INFINITY,
+        7850.0,
+        0.0,
+        0.0,
+        0.0,
+        "nu=inf",
+    );
     assert!(!mat.is_valid(), "ν = Inf must be invalid");
 }
 
 #[test]
 fn poissons_ratio_half_rejected() {
     let mat = Material::with_all(200e9, 76.9e9, 0.5, 7850.0, 0.0, 0.0, 0.0, "nu=0.5");
-    assert!(!mat.is_valid(), "ν = 0.5 must be invalid (incompressible limit)");
+    assert!(
+        !mat.is_valid(),
+        "ν = 0.5 must be invalid (incompressible limit)"
+    );
 }
 
 #[test]
@@ -112,7 +124,10 @@ fn density_inf_rejected() {
 #[test]
 fn density_zero_accepted() {
     let mat = Material::with_all(200e9, 76.9e9, 0.3, 0.0, 0.0, 0.0, 0.0, "rho=0");
-    assert!(mat.is_valid(), "density = 0 should be valid (massless placeholder)");
+    assert!(
+        mat.is_valid(),
+        "density = 0 should be valid (massless placeholder)"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -147,7 +162,10 @@ fn composite_rejects_nu_minus_one() {
     let mat = Material::with_all(200e9, 76.9e9, -1.0, 7850.0, 0.0, 0.0, 0.0, "nu=-1");
     let result = CompositeComponent::new(sec, mat);
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), CompositeError::InvalidModulus { .. }));
+    assert!(matches!(
+        result.unwrap_err(),
+        CompositeError::InvalidModulus { .. }
+    ));
 }
 
 #[test]
@@ -194,19 +212,28 @@ fn composite_accepts_valid_material() {
 fn analyze_rejects_pub_field_bypass_nu_minus_one() {
     let sec = rect_section(0.1, 0.1);
     let mat = Material::with_all(200e9, 76.9e9, -1.0, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent { section: sec, material: mat };
+    let comp = CompositeComponent {
+        section: sec,
+        material: mat,
+    };
     let ec = ElasticComposite::new(vec![comp]).unwrap();
     let ref_mat = valid_material();
     let result = ec.analyze(&ref_mat);
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), CompositeError::InvalidModulus { .. }));
+    assert!(matches!(
+        result.unwrap_err(),
+        CompositeError::InvalidModulus { .. }
+    ));
 }
 
 #[test]
 fn analyze_rejects_pub_field_bypass_nu_nan() {
     let sec = rect_section(0.1, 0.1);
     let mat = Material::with_all(200e9, 76.9e9, f64::NAN, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent { section: sec, material: mat };
+    let comp = CompositeComponent {
+        section: sec,
+        material: mat,
+    };
     let ec = ElasticComposite::new(vec![comp]).unwrap();
     let ref_mat = valid_material();
     assert!(ec.analyze(&ref_mat).is_err());
@@ -216,7 +243,10 @@ fn analyze_rejects_pub_field_bypass_nu_nan() {
 fn analyze_rejects_pub_field_bypass_g_inf() {
     let sec = rect_section(0.1, 0.1);
     let mat = Material::with_all(200e9, f64::INFINITY, 0.3, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent { section: sec, material: mat };
+    let comp = CompositeComponent {
+        section: sec,
+        material: mat,
+    };
     let ec = ElasticComposite::new(vec![comp]).unwrap();
     let ref_mat = valid_material();
     assert!(ec.analyze(&ref_mat).is_err());
@@ -226,7 +256,10 @@ fn analyze_rejects_pub_field_bypass_g_inf() {
 fn analyze_rejects_pub_field_bypass_density_nan() {
     let sec = rect_section(0.1, 0.1);
     let mat = Material::with_all(200e9, 76.9e9, 0.3, f64::NAN, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent { section: sec, material: mat };
+    let comp = CompositeComponent {
+        section: sec,
+        material: mat,
+    };
     let ec = ElasticComposite::new(vec![comp]).unwrap();
     let ref_mat = valid_material();
     assert!(ec.analyze(&ref_mat).is_err());
@@ -236,7 +269,10 @@ fn analyze_rejects_pub_field_bypass_density_nan() {
 fn analyze_accepts_valid_pub_field_construction() {
     let sec = rect_section(0.1, 0.1);
     let mat = valid_material();
-    let comp = CompositeComponent { section: sec, material: mat };
+    let comp = CompositeComponent {
+        section: sec,
+        material: mat,
+    };
     let ec = ElasticComposite::new(vec![comp]).unwrap();
     let ref_mat = valid_material();
     assert!(ec.analyze(&ref_mat).is_ok());
