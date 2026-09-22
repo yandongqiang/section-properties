@@ -947,7 +947,7 @@ impl AppliedMoment {
 /// A single degree of freedom of a beam node.
 ///
 /// Ergonomic typed alternative to the raw `0/1/2` DOF indices used by
-/// [`BeamModel::dof_index`] and [`BeamModel::try_fix_dof`]. The mapping is
+/// `BeamModel::dof_index` and [`BeamModel::try_fix_dof`]. The mapping is
 /// fixed by the frozen Beam FEM contract (`docs/beam_fem.md`):
 ///
 /// ```text
@@ -1494,12 +1494,12 @@ impl BeamModel {
         self.nodes.len() * 3
     }
 
-    /// Map (node_idx, dof) to global DOF index
+    /// Map (node_idx, dof) to global DOF index.
     ///
     /// Note: node_idx must be the index in the nodes Vec (0, 1, 2, ...).
     /// This is NOT an arbitrary user-defined ID. Node IDs are implicitly their
     /// position in the nodes vector.
-    pub fn dof_index(&self, node_idx: usize, dof: usize) -> usize {
+    pub(crate) fn dof_index(&self, node_idx: usize, dof: usize) -> usize {
         node_idx * 3 + dof
     }
 }
@@ -2258,7 +2258,7 @@ impl BeamSolver {
     ///
     /// `dof` is a raw index in the **global** system: `0 = ux`, `1 = uy`,
     /// `2 = rz`; the assembled slot is `3*node_idx + dof`
-    /// ([`BeamModel::dof_index`]).
+    /// (`3*node_idx + dof`).
     ///
     /// # Errors
     ///
@@ -2359,7 +2359,7 @@ impl BeamSolver {
     ///
     /// Laid out as `[ux0, uy0, rz0, ux1, uy1, rz1, ...]`, i.e. slot
     /// `3*node + dof` with `dof` = `0/1/2` = `ux/uy/rz`
-    /// ([`BeamModel::dof_index`]). Before a successful solve every entry is
+    /// (`3*node_idx + dof`). Before a successful solve every entry is
     /// `0.0`.
     pub fn displacements(&self) -> &[f64] {
         &self.u_global
@@ -3109,14 +3109,6 @@ pub enum FemError {
     },
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    /// Legacy variant — no longer constructed by any code path.
-    ///
-    /// Singular-matrix conditions are reported via
-    /// [`FemError::SolverError`] with a structured [`SolverError`] source.
-    /// Retained for API compatibility; candidate for removal in a future
-    /// major version.
-    #[error("Singular matrix: {0}")]
-    SingularMatrix(String),
     // ---- frame-level structural diagnostics (see `crate::frame`) ----------
     #[error("Invalid node: {0}")]
     InvalidNode(String),

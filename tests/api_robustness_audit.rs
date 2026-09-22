@@ -3,7 +3,7 @@
 //! Verifies fixes for:
 //! - P1-01: legacy displacement/reaction out-of-range node_idx returns Err
 //! - P1-02: try_fix_node_with_values override semantics (intentional, documented)
-//! - P1-03: CompositeComponent pub-field bypass (mitigated by Phase 62 analyze revalidation)
+//! - P1-03: CompositeComponent pub-field bypass (resolved by v0.2.0 private fields)
 
 use section_properties::beam_fem::{
     BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof,

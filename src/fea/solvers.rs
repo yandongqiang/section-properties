@@ -1,6 +1,7 @@
 //! Solver backends. See module docs in [`crate::fea`].
 
 use super::{CgResult, CgStatus, SkylineLdlt, SparseMatrix, cg_solve};
+use crate::fea::solver::SolverError;
 
 /// Selectable solver backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,40 +16,6 @@ pub enum SolverKind {
     Iccg,
     /// Intel MKL PARDISO via FFI (requires the `pardiso` feature and MKL).
     Pardiso,
-}
-
-/// Error type for the legacy direct-solver layer (`fea::matrix`).
-///
-/// This is distinct from [`crate::fea::solver::SolverError`], which is the
-/// unified error type for the current solver interface.  The two types are
-/// not interchangeable; this one exists for backward compatibility with
-/// the legacy `fea::solvers` module and is a candidate for unification in
-/// a future major version.
-#[derive(Debug, Clone)]
-pub enum SolverError {
-    FactorizationFailed(String),
-    SolveFailed(String),
-    InvalidInput(String),
-    NotImplemented(String),
-}
-
-impl std::fmt::Display for SolverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SolverError::FactorizationFailed(msg) => write!(f, "factorization failed: {}", msg),
-            SolverError::SolveFailed(msg) => write!(f, "solve failed: {}", msg),
-            SolverError::InvalidInput(msg) => write!(f, "invalid input: {}", msg),
-            SolverError::NotImplemented(msg) => write!(f, "not implemented: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for SolverError {}
-
-impl From<String> for SolverError {
-    fn from(s: String) -> Self {
-        SolverError::SolveFailed(s)
-    }
 }
 
 /// Direct solver types (factor once, solve many).
@@ -79,7 +46,9 @@ impl FactoredDirectSolver {
     /// Factor `matrix` with the selected direct backend.
     pub fn factor(kind: DirectSolver, matrix: &SparseMatrix) -> Result<Self, SolverError> {
         match kind {
-            DirectSolver::SparseLu => Ok(FactoredDirectSolver::Lu(SparseLu::factor(matrix)?)),
+            DirectSolver::SparseLu => Ok(FactoredDirectSolver::Lu(
+                SparseLu::factor(matrix).map_err(|e| SolverError::FactorizationFailed(e))?,
+            )),
             DirectSolver::SkylineLdlt => Ok(FactoredDirectSolver::Ldlt(
                 SkylineLdlt::factor(matrix)
                     .map_err(|e| SolverError::FactorizationFailed(e.to_string()))?,

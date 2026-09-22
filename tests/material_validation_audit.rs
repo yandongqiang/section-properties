@@ -1,9 +1,9 @@
 //! Phase 62: Material & Composite validation hardening regression tests.
 //!
 //! Verifies fixes for findings P1-1 (ν = -1 accepted), P1-2 (E = Inf
-//! accepted), P1-3 (new() unchecked), P1-6 (CompositeComponent pub fields
-//! bypass validation), and P2-10 (CompositeComponent::new doesn't validate
-//! ν/density).
+//! accepted), P1-3 (new() unchecked), and P2-10 (CompositeComponent::new
+//! doesn't validate ν/density).  P1-6 (pub field bypass) is resolved by
+//! v0.2.0 private fields — bypass is no longer possible.
 
 use section_properties::composite::{CompositeComponent, CompositeError, ElasticComposite};
 use section_properties::geometry::{Point, Polygon};
@@ -204,76 +204,7 @@ fn composite_accepts_valid_material() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// P1-6: ElasticComposite::analyze() must re-validate components
-// (CompositeComponent has pub fields — users can bypass new())
+// P1-6: CompositeComponent fields are private (v0.2.0) — struct literal
+// bypass is no longer possible.  Constructor validation is covered by
+// the P2-10 tests above.  analyze() retains defense-in-depth re-validation.
 // ─────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn analyze_rejects_pub_field_bypass_nu_minus_one() {
-    let sec = rect_section(0.1, 0.1);
-    let mat = Material::with_all(200e9, 76.9e9, -1.0, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent {
-        section: sec,
-        material: mat,
-    };
-    let ec = ElasticComposite::new(vec![comp]).unwrap();
-    let ref_mat = valid_material();
-    let result = ec.analyze(&ref_mat);
-    assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        CompositeError::InvalidModulus { .. }
-    ));
-}
-
-#[test]
-fn analyze_rejects_pub_field_bypass_nu_nan() {
-    let sec = rect_section(0.1, 0.1);
-    let mat = Material::with_all(200e9, 76.9e9, f64::NAN, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent {
-        section: sec,
-        material: mat,
-    };
-    let ec = ElasticComposite::new(vec![comp]).unwrap();
-    let ref_mat = valid_material();
-    assert!(ec.analyze(&ref_mat).is_err());
-}
-
-#[test]
-fn analyze_rejects_pub_field_bypass_g_inf() {
-    let sec = rect_section(0.1, 0.1);
-    let mat = Material::with_all(200e9, f64::INFINITY, 0.3, 7850.0, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent {
-        section: sec,
-        material: mat,
-    };
-    let ec = ElasticComposite::new(vec![comp]).unwrap();
-    let ref_mat = valid_material();
-    assert!(ec.analyze(&ref_mat).is_err());
-}
-
-#[test]
-fn analyze_rejects_pub_field_bypass_density_nan() {
-    let sec = rect_section(0.1, 0.1);
-    let mat = Material::with_all(200e9, 76.9e9, 0.3, f64::NAN, 0.0, 0.0, 0.0, "bypass");
-    let comp = CompositeComponent {
-        section: sec,
-        material: mat,
-    };
-    let ec = ElasticComposite::new(vec![comp]).unwrap();
-    let ref_mat = valid_material();
-    assert!(ec.analyze(&ref_mat).is_err());
-}
-
-#[test]
-fn analyze_accepts_valid_pub_field_construction() {
-    let sec = rect_section(0.1, 0.1);
-    let mat = valid_material();
-    let comp = CompositeComponent {
-        section: sec,
-        material: mat,
-    };
-    let ec = ElasticComposite::new(vec![comp]).unwrap();
-    let ref_mat = valid_material();
-    assert!(ec.analyze(&ref_mat).is_ok());
-}

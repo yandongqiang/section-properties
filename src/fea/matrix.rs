@@ -145,7 +145,7 @@ pub trait Matrix: Send + Sync {
 }
 
 // Import SolverError for the trait
-use crate::fea::solvers::SolverError;
+use crate::fea::solver::SolverError;
 
 // Implement Matrix for SparseMatrix
 impl Matrix for SparseMatrix {

@@ -136,18 +136,15 @@ pub enum CompositeError {
 /// is never mutated.  The transformed section is an analytical
 /// representation only — the original geometry remains recoverable.
 ///
-/// The fields `section` and `material` are public, so callers can construct
-/// a `CompositeComponent` directly with a struct literal, bypassing the
-/// validation in [`new`](Self::new).  In that case
-/// [`ElasticComposite::analyze`] re-validates each component's material
-/// before computation, so an invalid material is caught at analysis time
-/// rather than at construction time.
+/// Fields are private; construction is only possible through
+/// [`new`](Self::new), which validates the material via
+/// [`Material::is_valid`](crate::material::Material::is_valid).  This
+/// guarantees that every `CompositeComponent` instance has a physically
+/// admissible material.
 #[derive(Debug, Clone)]
 pub struct CompositeComponent {
-    /// The geometric section (outer boundary + optional holes).
-    pub section: Section,
-    /// The isotropic linear-elastic material assigned to this component.
-    pub material: Material,
+    section: Section,
+    material: Material,
 }
 
 impl CompositeComponent {
@@ -191,6 +188,16 @@ impl CompositeComponent {
     /// The net geometric area of this component's section.
     pub fn area(&self) -> f64 {
         self.section.area()
+    }
+
+    /// Borrow the geometric section.
+    pub fn section(&self) -> &Section {
+        &self.section
+    }
+
+    /// Borrow the material.
+    pub fn material(&self) -> &Material {
+        &self.material
     }
 }
 
@@ -329,7 +336,7 @@ impl ElasticComposite {
     /// Returns `Err` if:
     /// * the reference material modulus is invalid,
     /// * any component's material fails [`Material::is_valid`](crate::material::Material::is_valid)
-    ///   (this catches components constructed via struct literal bypass),
+    ///   (defense-in-depth — components are validated at construction),
     /// * any component's geometry is degenerate,
     /// * the transformed net area is zero or near-zero.
     pub fn analyze(
@@ -342,10 +349,10 @@ impl ElasticComposite {
             },
         )?;
 
-        // Re-validate each component's material.  CompositeComponent has pub
-        // fields, so users can bypass CompositeComponent::new and construct
-        // an instance with invalid properties directly.  This guard catches
-        // such bypasses at analysis time.
+        // Defense-in-depth: re-validate each component's material.
+        // CompositeComponent fields are private (v0.2.0), so construction
+        // via CompositeComponent::new is the only public path and it
+        // validates.  This guard is retained as a safety net.
         for comp in &self.components {
             if !comp.material.is_valid() {
                 return Err(CompositeError::InvalidModulus {
