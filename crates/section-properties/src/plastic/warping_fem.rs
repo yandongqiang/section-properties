@@ -71,7 +71,7 @@ pub fn compute_fem_solution(
     section: &Section,
     props: &SectionProperties,
     nu: f64,
-) -> Result<FemSolution, crate::mesh::fem::FemError> {
+) -> Result<FemSolution, crate::fea::FemError> {
     let unified = compute_fem_warping_solution(section, props, nu, MeshControl::Coarse)?;
     Ok(FemSolution {
         tri6_mesh: unified.tri6_mesh,
@@ -161,7 +161,7 @@ pub fn compute_fem_warping_properties(
     section: &Section,
     props: &SectionProperties,
     nu: f64,
-) -> Result<FemWarpingResult, crate::mesh::fem::FemError> {
+) -> Result<FemWarpingResult, crate::fea::FemError> {
     let unified = compute_fem_warping_solution(section, props, nu, MeshControl::Normal)?;
     Ok(FemWarpingResult {
         j: unified.j,
@@ -193,7 +193,7 @@ fn solve_with_fallback(
     k_reg: &SparseMatrix,
     c: &[f64],
     f: &[f64],
-) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+) -> Result<Vec<f64>, crate::fea::FemError> {
     if let Some(s) = solver {
         // solve_full returns (u, lambda) for the Lagrange system
         // [K_reg  C; C^T  0] [u; lambda] = [f; 0].
@@ -302,7 +302,7 @@ fn solve_compare_exact_vs_regularized(
         Option<ExactSolverFailure>,
         bool,
     ),
-    crate::mesh::fem::FemError,
+    crate::fea::FemError,
 > {
     let n = f.len();
 
@@ -743,7 +743,7 @@ pub fn compute_fem_warping_solution(
     props: &SectionProperties,
     nu: f64,
     mesh_control: MeshControl,
-) -> Result<FemWarpingSolution, crate::mesh::fem::FemError> {
+) -> Result<FemWarpingSolution, crate::fea::FemError> {
     let cx = props.centroid.x;
     let cy = props.centroid.y;
     let ixx = props.ix;
@@ -760,7 +760,7 @@ pub fn compute_fem_warping_solution(
 
     let mesh = mesh_section(section, params);
     if mesh.elements.is_empty() {
-        return Err(crate::mesh::fem::FemError::ConvergenceFailed);
+        return Err(crate::fea::FemError::ConvergenceFailed);
     }
 
     let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
@@ -1345,7 +1345,7 @@ pub fn warping_svg(
     width: u32,
     height: u32,
     nu: f64,
-) -> Result<String, crate::mesh::fem::FemError> {
+) -> Result<String, crate::fea::FemError> {
     use crate::io::{SvgExportOptions, plot_warping_svg};
     let fem = compute_fem_warping_solution(section, props, nu, MeshControl::Coarse)?;
     let opts = SvgExportOptions {
@@ -1700,7 +1700,7 @@ pub fn diag_test_eps(
     props: &SectionProperties,
     _nu: f64,
     eps_multiplier: f64,
-) -> Result<(f64, f64, f64, f64), crate::mesh::fem::FemError> {
+) -> Result<(f64, f64, f64, f64), crate::fea::FemError> {
     let _cx = props.centroid.x;
     let _cy = props.centroid.y;
     let ixx = props.ix;
@@ -1717,7 +1717,7 @@ pub fn diag_test_eps(
 
     let mesh = mesh_section(section, params);
     if mesh.elements.is_empty() {
-        return Err(crate::mesh::fem::FemError::ConvergenceFailed);
+        return Err(crate::fea::FemError::ConvergenceFailed);
     }
 
     let diag = ((bounds.1 - bounds.0).powi(2) + (bounds.3 - bounds.2).powi(2)).sqrt();
@@ -1878,7 +1878,7 @@ pub fn diagnose_warping_fem(
     section: &Section,
     name: &str,
     _nu: f64,
-) -> Result<WarpingDiagnostics, crate::mesh::fem::FemError> {
+) -> Result<WarpingDiagnostics, crate::fea::FemError> {
     let props = SectionProperties::from_section(section);
 
     // Mesh
@@ -2024,7 +2024,7 @@ pub fn diagnose_warping_fem(
             auto_regularize_singular: false,
         },
     )
-    .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?;
+    .map_err(|_| crate::fea::FemError::SingularMatrix)?;
 
     let solver_opt = Some(solver);
     let omega = solve_with_fallback(&solver_opt, &k_reg, &c_global, &f_torsion)?;

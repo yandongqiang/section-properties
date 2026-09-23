@@ -113,10 +113,7 @@ impl WarpingProperties {
     /// Returns `Err` if mesh generation or the FEM solve fails for the given section.
     ///
     /// [`from_section`]: WarpingProperties::from_section
-    pub fn try_from_section(
-        section: &Section,
-        nu: f64,
-    ) -> Result<Self, crate::mesh::fem::FemError> {
+    pub fn try_from_section(section: &Section, nu: f64) -> Result<Self, crate::fea::FemError> {
         let props = SectionProperties::from_section(section);
         let area = props.area;
 

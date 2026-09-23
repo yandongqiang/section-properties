@@ -7,10 +7,6 @@ pub mod fem;
 pub mod fem_analysis;
 pub mod triangulation;
 
-pub use fem::{
-    AnalysisResults, ElementType, FemModel, FemSolver, LoadCase, MaterialProps, StressResult,
-    analyze_section,
-};
 pub use fem_analysis::{
     FemCompositeAnalysis, FemGeometricProperties, FemSectionAnalysis, FemWarpingProperties,
     PropertyComparison, StressPlotData, StressPost,

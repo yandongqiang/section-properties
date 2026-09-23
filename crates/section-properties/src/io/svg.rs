@@ -4,7 +4,7 @@
 //! properties, and stress visualization.
 
 use crate::geometry::{Point, Polygon};
-use crate::mesh::StressResult;
+use crate::mesh::fem::StressResult;
 use crate::section::Section;
 use crate::section_properties::SectionProperties;
 

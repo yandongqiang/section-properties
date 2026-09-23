@@ -4,9 +4,11 @@
 //! stress analysis, and warping/torsion properties - mirroring Python
 //! sectionproperties analysis workflow.
 
+use crate::fea::FemError;
 use crate::geometry::{Point, Polygon};
+use crate::mesh::fem::StressResult;
 use crate::material::Material;
-use crate::mesh::{Mesh, MeshParams, fem::*, mesh_section};
+use crate::mesh::{Mesh, MeshParams, mesh_section};
 use crate::section::Section;
 use crate::section_library::CompositeSection;
 use crate::section_properties::SectionProperties;

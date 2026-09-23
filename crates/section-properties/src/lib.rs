@@ -93,7 +93,7 @@ pub use crate::composite::{
     ElasticComposite,
 };
 pub use crate::fea::{
-    LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
+    FemError, LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
     solver::SelectionReason, solver::SolverBackend, solver::SolverCapabilities,
     solver::SolverError, solver::SolverRegistry, solver::SolverSelection,
     solver::SolverSelectionInfo, solvers,
@@ -102,9 +102,8 @@ pub use crate::fea::{
 pub use crate::io::to_interactive_html as to_html;
 pub use crate::material::Material;
 pub use crate::mesh::{
-    AnalysisResults, ElementType, FemCompositeAnalysis, FemGeometricProperties, FemModel,
-    FemSectionAnalysis, FemSolver, FemWarpingProperties, LoadCase, MaterialProps, Mesh, MeshParams,
-    PropertyComparison, StressPlotData, StressPost, StressResult, analyze_section,
+    FemCompositeAnalysis, FemGeometricProperties, FemSectionAnalysis, FemWarpingProperties, Mesh,
+    MeshParams, PropertyComparison, StressPlotData, StressPost,
 };
 pub use crate::plastic::warping_fem::warping_svg;
 pub use crate::plastic::{

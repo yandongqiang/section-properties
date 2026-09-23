@@ -3,6 +3,7 @@
 //! Provides 2D plane stress/strain and plate bending elements,
 //! stiffness matrix assembly, displacement solution, and stress recovery.
 
+use crate::fea::FemError;
 use crate::geometry::Point;
 use crate::material::Material;
 use crate::mesh::{Mesh, MeshParams};
@@ -838,37 +839,6 @@ pub struct AnalysisResults {
     pub nodal_stresses: Vec<StressResult>,
     pub reactions: Vec<(usize, usize, f64)>,
 }
-
-/// FEM errors.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FemError {
-    SingularMatrix,
-    InvalidMesh,
-    MaterialNotFound,
-    ConvergenceFailed,
-    DegenerateElement,
-    InvalidElementOrientation,
-}
-
-impl std::fmt::Display for FemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FemError::SingularMatrix => write!(f, "Singular stiffness matrix"),
-            FemError::InvalidMesh => write!(f, "Invalid mesh"),
-            FemError::MaterialNotFound => write!(f, "Material not found"),
-            FemError::ConvergenceFailed => write!(f, "Solver did not converge"),
-            FemError::DegenerateElement => {
-                write!(f, "Degenerate element (zero or negative Jacobian)")
-            }
-            FemError::InvalidElementOrientation => write!(
-                f,
-                "Invalid element orientation (negative Jacobian, CW winding)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FemError {}
 
 #[cfg(test)]
 mod tests {

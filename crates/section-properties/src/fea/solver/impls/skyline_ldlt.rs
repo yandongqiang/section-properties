@@ -60,7 +60,7 @@ impl LinearSolver for SkylineLdltSolver {
         let ldlt = crate::fea::SkylineLdlt::factor(matrix).map_err(|e| match e {
             // Preserve the "singular / not SPD" contract for callers that
             // distinguish it from a generic factorisation failure.
-            crate::mesh::fem::FemError::SingularMatrix => SolverError::singular(e.to_string()),
+            crate::fea::FemError::SingularMatrix => SolverError::singular(e.to_string()),
             _ => SolverError::factorization_failed(e.to_string()),
         })?;
 

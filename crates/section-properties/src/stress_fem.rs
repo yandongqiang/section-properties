@@ -23,7 +23,7 @@ pub fn calculate_stress_fem(
     props: &SectionProperties,
     loads: SectionLoads,
     nu: f64,
-) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
+) -> Result<Vec<StressAtPoint>, crate::fea::FemError> {
     let fem = compute_fem_solution(section, props, nu)?;
     compute_stress_from_fem(&fem, props, loads)
 }
@@ -33,7 +33,7 @@ fn compute_stress_from_fem(
     fem: &FemSolution,
     props: &SectionProperties,
     loads: SectionLoads,
-) -> Result<Vec<StressAtPoint>, crate::mesh::fem::FemError> {
+) -> Result<Vec<StressAtPoint>, crate::fea::FemError> {
     let _cx = props.centroid.x;
     let _cy = props.centroid.y;
     let ea = props.area;
@@ -103,7 +103,7 @@ fn compute_stress_from_fem(
     }
 
     if result.is_empty() {
-        Err(crate::mesh::fem::FemError::ConvergenceFailed)
+        Err(crate::fea::FemError::ConvergenceFailed)
     } else {
         Ok(result)
     }

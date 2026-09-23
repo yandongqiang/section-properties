@@ -8,6 +8,44 @@ use crate::geometry::Point;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// FEM Error type
+// ---------------------------------------------------------------------------
+
+/// FEM errors for section-level finite element analysis.
+///
+/// Used by Tri6 element validation, warping FEM, stress FEM, and
+/// legacy mesh FEM routines.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FemError {
+    SingularMatrix,
+    InvalidMesh,
+    MaterialNotFound,
+    ConvergenceFailed,
+    DegenerateElement,
+    InvalidElementOrientation,
+}
+
+impl std::fmt::Display for FemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FemError::SingularMatrix => write!(f, "Singular stiffness matrix"),
+            FemError::InvalidMesh => write!(f, "Invalid mesh"),
+            FemError::MaterialNotFound => write!(f, "Material not found"),
+            FemError::ConvergenceFailed => write!(f, "Solver did not converge"),
+            FemError::DegenerateElement => {
+                write!(f, "Degenerate element (zero or negative Jacobian)")
+            }
+            FemError::InvalidElementOrientation => write!(
+                f,
+                "Invalid element orientation (negative Jacobian, CW winding)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FemError {}
+
+// ---------------------------------------------------------------------------
 // FEM Tolerances
 // ---------------------------------------------------------------------------
 
@@ -364,7 +402,7 @@ impl Tri6 {
         em: f64,
         gm: f64,
         rho: f64,
-    ) -> Result<Self, crate::mesh::fem::FemError> {
+    ) -> Result<Self, crate::fea::FemError> {
         let mut coords = [[0.0; 6]; 2];
         for i in 0..6 {
             coords[0][i] = points[i].x;
@@ -373,10 +411,10 @@ impl Tri6 {
         // Check orientation at centroid (xi=eta=zeta=1/3)
         let sf = shape_function(&coords, (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
         if sf.j.abs() <= JACOBIAN_TOL {
-            return Err(crate::mesh::fem::FemError::DegenerateElement);
+            return Err(crate::fea::FemError::DegenerateElement);
         }
         if sf.j < 0.0 {
-            return Err(crate::mesh::fem::FemError::InvalidElementOrientation);
+            return Err(crate::fea::FemError::InvalidElementOrientation);
         }
         Ok(Self {
             el_id,
@@ -806,7 +844,7 @@ pub fn tri3_to_tri6(tri3_nodes: &[Point], tri3_elements: &[[usize; 3]]) -> Tri6M
 ///
 /// Returns `Err(FemError::DegenerateElement)` if any element has
 /// zero or negative Jacobian determinant at any Gauss point.
-pub fn validate_tri6_mesh(mesh: &Tri6Mesh) -> Result<(), crate::mesh::fem::FemError> {
+pub fn validate_tri6_mesh(mesh: &Tri6Mesh) -> Result<(), crate::fea::FemError> {
     let gps = gauss_points(6);
     for &elem in mesh.elements.iter() {
         let mut coords = [[0.0; 6]; 2];
@@ -817,7 +855,7 @@ pub fn validate_tri6_mesh(mesh: &Tri6Mesh) -> Result<(), crate::mesh::fem::FemEr
         for &(_, eta, xi, zeta) in &gps {
             let sf = shape_function(&coords, (eta, xi, zeta));
             if sf.j <= JACOBIAN_TOL {
-                return Err(crate::mesh::fem::FemError::DegenerateElement);
+                return Err(crate::fea::FemError::DegenerateElement);
             }
         }
     }
@@ -852,7 +890,7 @@ pub fn build_tri6_elements(
     em: f64,
     gm: f64,
     rho: f64,
-) -> Result<Vec<Tri6>, crate::mesh::fem::FemError> {
+) -> Result<Vec<Tri6>, crate::fea::FemError> {
     let gps = gauss_points(6);
     let mut elements = Vec::with_capacity(mesh.elements.len());
     for (i, &elem) in mesh.elements.iter().enumerate() {
@@ -892,7 +930,7 @@ pub fn build_tri6_elements(
             }
         }
         if degenerate {
-            return Err(crate::mesh::fem::FemError::DegenerateElement);
+            return Err(crate::fea::FemError::DegenerateElement);
         }
         elements.push(Tri6::from_points(i, points, elem, em, gm, rho)?);
     }
@@ -1340,7 +1378,7 @@ pub fn solve_lagrange_sparse(
     k: &SparseMatrix,
     c: &[f64],
     f: &[f64],
-) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+) -> Result<Vec<f64>, crate::fea::FemError> {
     solve_lagrange_sparse_tol(k, c, f, 1e-6)
 }
 
@@ -1350,7 +1388,7 @@ pub fn solve_lagrange_sparse_tol(
     c: &[f64],
     f: &[f64],
     tol: f64,
-) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+) -> Result<Vec<f64>, crate::fea::FemError> {
     // Tight tolerances (needed for shear-centre difference quantities)
     // require a proportionally larger iteration budget.
     let n = k.n;
@@ -1420,7 +1458,7 @@ pub fn solve_lagrange(
     k: &[Vec<f64>],
     c: &[f64],
     f: &[f64],
-) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+) -> Result<Vec<f64>, crate::fea::FemError> {
     let n = k.len();
     // Augmented system (n+1)×(n+1)
     let mut a = vec![vec![0.0; n + 1]; n + 1];
@@ -1443,7 +1481,7 @@ pub fn solve_lagrange(
 
 /// Solve a dense linear system A*x = b in place (Gaussian elimination with partial pivoting).
 /// Returns `Err(FemError::SingularMatrix)` if the matrix is singular.
-pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh::fem::FemError> {
+pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::fea::FemError> {
     let n = a.len();
     // Compute matrix scale for scale-invariant tolerance
     let mut scale = 0.0f64;
@@ -1469,7 +1507,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
         }
         let pivot = a[k][k];
         if pivot.abs() < pivot_tol {
-            return Err(crate::mesh::fem::FemError::SingularMatrix);
+            return Err(crate::fea::FemError::SingularMatrix);
         }
         for i in (k + 1)..n {
             let factor = a[i][k] / pivot;
@@ -1483,7 +1521,7 @@ pub fn solve_dense(a: &mut [Vec<f64>], b: &mut [f64]) -> Result<(), crate::mesh:
     for k in (0..n).rev() {
         let pivot = a[k][k];
         if pivot.abs() < pivot_tol {
-            return Err(crate::mesh::fem::FemError::SingularMatrix);
+            return Err(crate::fea::FemError::SingularMatrix);
         }
         let mut sum = 0.0;
         for j in (k + 1)..n {
@@ -1717,7 +1755,7 @@ impl DirectLagrangeSolver {
     /// PARDISO is powerful but demands a fully provisioned MKL runtime;
     /// select it explicitly via [`DirectLagrangeSolver::with_kernel`] when
     /// the environment is known to be complete.
-    pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, crate::mesh::fem::FemError> {
+    pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, crate::fea::FemError> {
         Self::with_kernel(LagrangeKernel::Skyline, k, c, SolverOptions::default())
     }
 
@@ -1727,16 +1765,14 @@ impl DirectLagrangeSolver {
         k: &SparseMatrix,
         c: &[f64],
         opts: SolverOptions,
-    ) -> Result<Self, crate::mesh::fem::FemError> {
+    ) -> Result<Self, crate::fea::FemError> {
         let instance = match kernel {
             LagrangeKernel::Skyline => {
                 let mut m = k.clone();
                 m.compress();
                 let m = match SkylineLdlt::factor(&m) {
                     Ok(ldlt) => ldlt,
-                    Err(crate::mesh::fem::FemError::SingularMatrix)
-                        if opts.auto_regularize_singular =>
-                    {
+                    Err(crate::fea::FemError::SingularMatrix) if opts.auto_regularize_singular => {
                         let mut m_reg = k.clone();
                         m_reg.compress();
                         let mut diag_avg = 0.0;
@@ -1757,7 +1793,7 @@ impl DirectLagrangeSolver {
             #[cfg(feature = "pardiso")]
             LagrangeKernel::Pardiso => LagrangeKernelInstance::Pardiso(std::sync::Mutex::new(
                 crate::fea::solvers::pardiso::PardisoSolver::new(k, c)
-                    .map_err(|_| crate::mesh::fem::FemError::SingularMatrix)?,
+                    .map_err(|_| crate::fea::FemError::SingularMatrix)?,
             )),
         };
         Ok(Self {
@@ -1768,12 +1804,12 @@ impl DirectLagrangeSolver {
     }
 
     /// Solve [K c; c^T 0] [u; lam] = [f; 0] and return u.
-    pub fn solve(&self, f: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+    pub fn solve(&self, f: &[f64]) -> Result<Vec<f64>, crate::fea::FemError> {
         self.solve_full(f).map(|(u, _lam)| u)
     }
 
     /// Solve returning `(u, lambda)`.
-    pub fn solve_full(&self, f: &[f64]) -> Result<(Vec<f64>, f64), crate::mesh::fem::FemError> {
+    pub fn solve_full(&self, f: &[f64]) -> Result<(Vec<f64>, f64), crate::fea::FemError> {
         match &self.kernel {
             LagrangeKernelInstance::Skyline(ldlt) => {
                 let w1 = ldlt.solve(f)?;
@@ -1798,7 +1834,7 @@ impl DirectLagrangeSolver {
                 p.lock()
                     .unwrap()
                     .solve_with_multiplier(f)
-                    .map_err(|e| crate::mesh::fem::FemError::ConvergenceFailed)
+                    .map_err(|e| crate::fea::FemError::ConvergenceFailed)
             }
         }
     }
@@ -1913,7 +1949,7 @@ impl SkylineLdlt {
         self.scale
     }
 
-    pub fn factor(matrix: &SparseMatrix) -> Result<Self, crate::mesh::fem::FemError> {
+    pub fn factor(matrix: &SparseMatrix) -> Result<Self, crate::fea::FemError> {
         use std::collections::HashMap;
 
         let n = matrix.n;
@@ -2023,7 +2059,7 @@ impl SkylineLdlt {
                 }
                 // Scale-invariant pivot check
                 if diag[k].abs() < pivot_tol {
-                    return Err(crate::mesh::fem::FemError::SingularMatrix);
+                    return Err(crate::fea::FemError::SingularMatrix);
                 }
                 lower[rs_i + (k - first[i])] = s / diag[k];
             }
@@ -2033,7 +2069,7 @@ impl SkylineLdlt {
                 d -= l_ik * l_ik * diag[k];
             }
             if !(d > 0.0) || !d.is_finite() {
-                return Err(crate::mesh::fem::FemError::SingularMatrix);
+                return Err(crate::fea::FemError::SingularMatrix);
             }
             diag[i] = d;
         }
@@ -2053,10 +2089,10 @@ impl SkylineLdlt {
     }
 
     /// Solve A x = b.
-    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, crate::fea::FemError> {
         let n = self.n;
         if b.len() != n {
-            return Err(crate::mesh::fem::FemError::InvalidMesh);
+            return Err(crate::fea::FemError::InvalidMesh);
         }
 
         // Permute the right-hand side into the RCM ordering.
@@ -2073,7 +2109,7 @@ impl SkylineLdlt {
         let pivot_tol = PIVOT_TOL_BASE * self.scale.max(1.0);
         for i in 0..n {
             if self.diag[i].abs() < pivot_tol {
-                return Err(crate::mesh::fem::FemError::SingularMatrix);
+                return Err(crate::fea::FemError::SingularMatrix);
             }
             x[i] /= self.diag[i];
         }
@@ -2098,11 +2134,7 @@ impl SkylineLdlt {
     /// Solve with a Lagrange multiplier constraint vector, mirroring
     /// [`solve_lagrange_sparse`]: u = w1 - lambda * w2 with
     /// lambda = (c.w1)/(c.w2).
-    pub fn solve_lagrange(
-        &self,
-        c: &[f64],
-        f: &[f64],
-    ) -> Result<Vec<f64>, crate::mesh::fem::FemError> {
+    pub fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Result<Vec<f64>, crate::fea::FemError> {
         let w1 = self.solve(f)?;
         let w2 = self.solve(c)?;
         let ct_w2: f64 = c.iter().zip(w2.iter()).map(|(&a, &b)| a * b).sum();
@@ -2599,18 +2631,12 @@ mod tests {
         // validate_tri6_mesh should return DegenerateElement error
         let result = validate_tri6_mesh(&mesh);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            crate::mesh::fem::FemError::DegenerateElement
-        );
+        assert_eq!(result.unwrap_err(), crate::fea::FemError::DegenerateElement);
 
         // build_tri6_elements should return DegenerateElement error
         let result = build_tri6_elements(&mesh, 200e9, 80e9, 7850.0);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            crate::mesh::fem::FemError::DegenerateElement
-        );
+        assert_eq!(result.unwrap_err(), crate::fea::FemError::DegenerateElement);
     }
 
     #[test]
@@ -2640,7 +2666,7 @@ mod tests {
         assert!(result.is_err(), "CW triangle should fail");
         assert_eq!(
             result.unwrap_err(),
-            crate::mesh::fem::FemError::InvalidElementOrientation
+            crate::fea::FemError::InvalidElementOrientation
         );
     }
 }
