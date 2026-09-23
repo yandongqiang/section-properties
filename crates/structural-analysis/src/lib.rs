@@ -34,7 +34,8 @@ pub mod frame;
 pub mod mechanism;
 
 pub use crate::beam_fem::{
-    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError,
+    BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, EndRelease,
+    FemError,
 };
 pub use crate::frame::{
     EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,

@@ -15,8 +15,8 @@ materials, and numerical infrastructure (sparse solvers, FEA kernels).
   `N(x)/V(x)/M(x)`, and pluggable `LinearSolver` backends
   (dense, skyline LDLᵀ, sparse LU, CG/ICCG).
 - **Frame analysis** (`frame`): multi-member 2D frame analysis with the
-  `FrameModel` façade — node/member handles, support vocabulary, global
-  equilibrium reporting, and solver selection.
+  `FrameModel` façade — node/member handles, support vocabulary, **member end
+  releases (hinges)**, global equilibrium reporting, and solver selection.
 - **Mechanism diagnostics** (`mechanism`): rank-deficiency detection and
   mechanism classification for under-restrained structures.
 
@@ -39,6 +39,39 @@ let result = frame.solve()?;
 let uy = result.displacement(tip, Dof::Uy)?;
 assert!((uy + 1.0e4 * 2.0f64.powi(3) / (3.0 * 200e9 * 2e-5)).abs() < 1e-12);
 assert!(result.equilibrium().is_balanced());
+# Ok(())
+# }
+```
+
+## Member end releases (hinges)
+
+A member end release removes the force-transfer between the member end and the
+node for a specific DOF (typically rotation). This models hinges, pins, and
+pinned connections.
+
+**Key distinction**: an end release does *not* remove or constrain the node's
+DOF — the node still has `Ux`, `Uy`, `Rz`. The release only affects how the
+*member* contributes to the global stiffness. This is different from
+`FrameModel::pin` which constrains a *node*.
+
+```rust
+use structural_analysis::{FrameModel, BeamSection, EndRelease, MemberHandle};
+use section_properties::Material;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut frame = FrameModel::new();
+let a = frame.add_node(0.0, 0.0)?;
+let b = frame.add_node(4.0, 0.0)?;
+let m: MemberHandle = frame.add_member_with_release(a, b,
+    Material::new(200e9, 0.3, 7850.0, "Steel"),
+    BeamSection::new(5e-3, 2e-5),
+    EndRelease::end_pin())?; // hinge at b
+frame.fix(a)?;
+frame.fix(b)?;
+frame.member_udl(m, 0.0, -1000.0)?;
+let result = frame.solve()?;
+let forces = result.member_end_forces(m)?;
+assert!(forces[5].abs() < 1.0); // M_j ≈ 0 (released)
 # Ok(())
 # }
 ```

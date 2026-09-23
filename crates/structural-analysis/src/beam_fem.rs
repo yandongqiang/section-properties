@@ -442,6 +442,92 @@ impl<'a> BeamAnalysisResult<'a> {
     }
 }
 
+/// Member end-release specification for a [`BeamElement`].
+///
+/// An end release removes the force-transfer between the member end and the
+/// structural node for a specific local DOF. The most common case is a
+/// **rotational release** (hinge/pin), which enforces the member-end moment
+/// to be zero.
+///
+/// # End release vs. node support
+///
+/// An end release does **not** remove or constrain the node's DOF. The node
+/// still has all 3 DOF (`Ux`, `Uy`, `Rz`). The release only affects how the
+/// *member* contributes to the global stiffness and how it recovers end forces.
+///
+/// For example, if member AB has an end release at B (rotation), then:
+/// - `M_AB(end B) = 0` — the member-end moment is zero.
+/// - `B.Rz` still exists as a structural DOF and may receive stiffness
+///   contributions from other members or support conditions.
+///
+/// This is fundamentally different from [`BeamModel::fix_dof`] which constrains
+/// a *node* DOF to a prescribed value.
+///
+/// # Implementation
+///
+/// Releases are applied via **static condensation** of the element local
+/// stiffness matrix. The released local DOFs are condensed out before
+/// transformation to global coordinates, so the global system retains all
+/// node DOFs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EndRelease {
+    /// Release rotational DOF at start node (`node_i`): enforces `M_i = 0`.
+    pub start_rotation: bool,
+    /// Release rotational DOF at end node (`node_j`): enforces `M_j = 0`.
+    pub end_rotation: bool,
+}
+
+impl EndRelease {
+    /// No release — fully rigid member-end connections (default).
+    pub const fn none() -> Self {
+        Self {
+            start_rotation: false,
+            end_rotation: false,
+        }
+    }
+
+    /// Release rotation at the start end only (pinned at `node_i`).
+    pub const fn start_pin() -> Self {
+        Self {
+            start_rotation: true,
+            end_rotation: false,
+        }
+    }
+
+    /// Release rotation at the end end only (pinned at `node_j`).
+    pub const fn end_pin() -> Self {
+        Self {
+            start_rotation: false,
+            end_rotation: true,
+        }
+    }
+
+    /// Release rotation at both ends (pinned–pinned).
+    pub const fn both_pins() -> Self {
+        Self {
+            start_rotation: true,
+            end_rotation: true,
+        }
+    }
+
+    /// Whether any DOF is released.
+    pub const fn is_empty(self) -> bool {
+        !self.start_rotation && !self.end_rotation
+    }
+
+    /// Local DOF indices that are released: `θ_i = 2`, `θ_j = 5`.
+    fn released_dofs(self) -> Vec<usize> {
+        let mut r = Vec::new();
+        if self.start_rotation {
+            r.push(2);
+        }
+        if self.end_rotation {
+            r.push(5);
+        }
+        r
+    }
+}
+
 /// 2D Euler–Bernoulli beam element between two nodes.
 ///
 /// Local axes: x from `node_i` to `node_j`, y transverse (positive up), with
@@ -458,10 +544,13 @@ pub struct BeamElement {
     pub material: Material,
     /// Cross-section properties
     pub section: BeamSection,
+    /// End releases for this member. Default is [`EndRelease::none`] (rigid
+    /// connections).
+    pub end_release: EndRelease,
 }
 
 impl BeamElement {
-    /// Create a new beam element
+    /// Create a new beam element with rigid end connections (no releases).
     pub fn new(
         node_i: usize,
         node_j: usize,
@@ -478,6 +567,33 @@ impl BeamElement {
             node_j,
             material,
             section,
+            end_release: EndRelease::none(),
+        })
+    }
+
+    /// Create a new beam element with the specified end releases.
+    ///
+    /// The releases are applied via static condensation of the element
+    /// stiffness matrix. See [`EndRelease`] for the distinction between
+    /// end releases and node support conditions.
+    pub fn with_end_release(
+        node_i: usize,
+        node_j: usize,
+        material: Material,
+        section: BeamSection,
+        end_release: EndRelease,
+    ) -> Result<Self, FemError> {
+        if node_i == node_j {
+            return Err(FemError::InvalidModel(
+                "Beam element cannot have same start and end node".to_string(),
+            ));
+        }
+        Ok(Self {
+            node_i,
+            node_j,
+            material,
+            section,
+            end_release,
         })
     }
 
@@ -639,7 +755,270 @@ impl BeamElement {
         k_global
     }
 
-    /// Compute consistent nodal load vector for uniform distributed load (6 DOF) in LOCAL coordinates
+    // -----------------------------------------------------------------
+    // End-release static condensation
+    // -----------------------------------------------------------------
+
+    /// Static-condense the released local DOFs from a 6×6 matrix.
+    ///
+    /// Given `K` partitioned into retained (c) and released (r) blocks:
+    /// ```text
+    /// K = [ K_cc  K_cr ]
+    ///     [ K_rc  K_rr ]
+    /// ```
+    /// returns a 6×6 matrix where the retained block is
+    /// `K_cc − K_cr · K_rr⁻¹ · K_rc` and the released rows/columns are zero.
+    fn condense_matrix(&self, k: [[f64; 6]; 6]) -> [[f64; 6]; 6] {
+        let released = self.end_release.released_dofs();
+        if released.is_empty() {
+            return k;
+        }
+
+        let mut is_released = [false; 6];
+        for &r in &released {
+            is_released[r] = true;
+        }
+        let retained: Vec<usize> = (0..6).filter(|&i| !is_released[i]).collect();
+
+        let n_c = retained.len();
+        let n_r = released.len();
+
+        // Extract K_rr (n_r × n_r) and invert
+        let mut k_rr = vec![vec![0.0; n_r]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (rj, &b) in released.iter().enumerate() {
+                k_rr[ri][rj] = k[a][b];
+            }
+        }
+        let k_rr_inv = invert_small(&k_rr);
+
+        // Extract K_rc (n_r × n_c) and K_cr (n_c × n_r)
+        let mut k_rc = vec![vec![0.0; n_c]; n_r];
+        let mut k_cr = vec![vec![0.0; n_r]; n_c];
+        for (ri, &a) in released.iter().enumerate() {
+            for (ci, &b) in retained.iter().enumerate() {
+                k_rc[ri][ci] = k[a][b];
+                k_cr[ci][ri] = k[b][a];
+            }
+        }
+
+        // K_cr * K_rr_inv * K_rc  (n_c × n_c)
+        let mut correction = vec![vec![0.0; n_c]; n_c];
+        for i in 0..n_c {
+            for j in 0..n_c {
+                let mut sum = 0.0;
+                for ri in 0..n_r {
+                    for rj in 0..n_r {
+                        sum += k_cr[i][ri] * k_rr_inv[ri][rj] * k_rc[rj][j];
+                    }
+                }
+                correction[i][j] = sum;
+            }
+        }
+
+        // Build result: retained block = K_cc - correction, released = 0
+        let mut result = [[0.0; 6]; 6];
+        for (ci, &a) in retained.iter().enumerate() {
+            for (cj, &b) in retained.iter().enumerate() {
+                result[a][b] = k[a][b] - correction[ci][cj];
+            }
+        }
+        result
+    }
+
+    /// Static-condense the released local DOFs from a 6-element load vector.
+    ///
+    /// Returns `f_c − K_cr · K_rr⁻¹ · f_r` in the retained positions and zero
+    /// in the released positions.  `k_local` is the **un-condensed** local
+    /// stiffness matrix needed to extract `K_cr` and `K_rr`.
+    fn condense_vector(&self, f: [f64; 6], k_local: &[[f64; 6]; 6]) -> [f64; 6] {
+        let released = self.end_release.released_dofs();
+        if released.is_empty() {
+            return f;
+        }
+
+        let mut is_released = [false; 6];
+        for &r in &released {
+            is_released[r] = true;
+        }
+        let retained: Vec<usize> = (0..6).filter(|&i| !is_released[i]).collect();
+
+        let n_c = retained.len();
+        let n_r = released.len();
+
+        // K_rr
+        let mut k_rr = vec![vec![0.0; n_r]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (rj, &b) in released.iter().enumerate() {
+                k_rr[ri][rj] = k_local[a][b];
+            }
+        }
+        let k_rr_inv = invert_small(&k_rr);
+
+        // K_cr (n_c × n_r)
+        let mut k_cr = vec![vec![0.0; n_r]; n_c];
+        for (ci, &a) in retained.iter().enumerate() {
+            for (ri, &b) in released.iter().enumerate() {
+                k_cr[ci][ri] = k_local[a][b];
+            }
+        }
+
+        // f_r
+        let f_r: Vec<f64> = released.iter().map(|&a| f[a]).collect();
+
+        // correction = K_cr * K_rr_inv * f_r  (n_c)
+        let mut correction = vec![0.0; n_c];
+        for i in 0..n_c {
+            let mut sum = 0.0;
+            for ri in 0..n_r {
+                for rj in 0..n_r {
+                    sum += k_cr[i][ri] * k_rr_inv[ri][rj] * f_r[rj];
+                }
+            }
+            correction[i] = sum;
+        }
+
+        let mut result = [0.0; 6];
+        for (ci, &a) in retained.iter().enumerate() {
+            result[a] = f[a] - correction[ci];
+        }
+        result
+    }
+
+    /// Element stiffness matrix (6×6) in **GLOBAL** coordinates with end
+    /// releases applied via static condensation.
+    ///
+    /// The condensation is performed in local coordinates before
+    /// transformation: `K_global = Tᵀ · condense(K_local) · T`.
+    pub(crate) fn released_global_stiffness(&self, node_i: Point, node_j: Point) -> [[f64; 6]; 6] {
+        let k_local = self.local_stiffness(node_i, node_j);
+        let k_condensed = self.condense_matrix(k_local);
+        let t = self.transformation_matrix(node_i, node_j);
+
+        let mut k_global = [[0.0; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                let mut sum = 0.0;
+                for k in 0..6 {
+                    for l in 0..6 {
+                        sum += t[k][i] * k_condensed[k][l] * t[l][j];
+                    }
+                }
+                k_global[i][j] = sum;
+            }
+        }
+        k_global
+    }
+
+    /// Consistent nodal load for uniform distributed load with end releases
+    /// applied. Returns the condensed 6-element vector in local coordinates.
+    pub(crate) fn released_consistent_nodal_load(
+        &self,
+        node_i: Point,
+        node_j: Point,
+        qx: f64,
+        qy: f64,
+    ) -> Result<[f64; 6], FemError> {
+        let f_local = self.consistent_nodal_load(node_i, node_j, qx, qy)?;
+        if self.end_release.is_empty() {
+            return Ok(f_local);
+        }
+        let k_local = self.local_stiffness(node_i, node_j);
+        Ok(self.condense_vector(f_local, &k_local))
+    }
+
+    /// Consistent nodal load for a point load with end releases applied.
+    /// Returns the condensed 6-element vector in local coordinates.
+    pub(crate) fn released_consistent_nodal_load_point(
+        &self,
+        node_i: Point,
+        node_j: Point,
+        position: f64,
+        fx: f64,
+        fy: f64,
+        mz: f64,
+    ) -> Result<[f64; 6], FemError> {
+        let f_local = self.consistent_nodal_load_point(node_i, node_j, position, fx, fy, mz)?;
+        if self.end_release.is_empty() {
+            return Ok(f_local);
+        }
+        let k_local = self.local_stiffness(node_i, node_j);
+        Ok(self.condense_vector(f_local, &k_local))
+    }
+
+    /// Recover the released local DOF displacements from the nodal
+    /// displacements and equivalent loads.
+    ///
+    /// Given `u_local` from the global solution (which contains the *node*
+    /// rotations, not the member-end rotations), computes the actual
+    /// member-end rotations for the released DOFs via the condensation
+    /// condition `u_r = K_rr⁻¹ · (f_r − K_rc · u_c)`.
+    ///
+    /// For non-released elements this is a no-op (returns `u_local` unchanged).
+    fn released_local_displacement(
+        &self,
+        u_local: [f64; 6],
+        f_equiv: [f64; 6],
+        k_local: &[[f64; 6]; 6],
+    ) -> [f64; 6] {
+        let released = self.end_release.released_dofs();
+        if released.is_empty() {
+            return u_local;
+        }
+
+        let mut is_released = [false; 6];
+        for &r in &released {
+            is_released[r] = true;
+        }
+        let retained: Vec<usize> = (0..6).filter(|&i| !is_released[i]).collect();
+
+        let n_c = retained.len();
+        let n_r = released.len();
+
+        // K_rr and its inverse
+        let mut k_rr = vec![vec![0.0; n_r]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (rj, &b) in released.iter().enumerate() {
+                k_rr[ri][rj] = k_local[a][b];
+            }
+        }
+        let k_rr_inv = invert_small(&k_rr);
+
+        // K_rc (n_r × n_c)
+        let mut k_rc = vec![vec![0.0; n_c]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (ci, &b) in retained.iter().enumerate() {
+                k_rc[ri][ci] = k_local[a][b];
+            }
+        }
+
+        // u_c and f_r
+        let u_c: Vec<f64> = retained.iter().map(|&a| u_local[a]).collect();
+        let f_r: Vec<f64> = released.iter().map(|&a| f_equiv[a]).collect();
+
+        // u_r = K_rr_inv * (f_r - K_rc * u_c)
+        let mut rhs = vec![0.0; n_r];
+        for ri in 0..n_r {
+            let mut krc_uc = 0.0;
+            for ci in 0..n_c {
+                krc_uc += k_rc[ri][ci] * u_c[ci];
+            }
+            rhs[ri] = f_r[ri] - krc_uc;
+        }
+        let mut u_r = vec![0.0; n_r];
+        for ri in 0..n_r {
+            for rj in 0..n_r {
+                u_r[ri] += k_rr_inv[ri][rj] * rhs[rj];
+            }
+        }
+
+        let mut result = u_local;
+        for (ri, &a) in released.iter().enumerate() {
+            result[a] = u_r[ri];
+        }
+        result
+    }
+
     ///
     /// Local DOF ordering: [u_i, v_i, θ_i, u_j, v_j, θ_j]
     /// Sign convention:
@@ -799,7 +1178,39 @@ impl BeamNode {
     }
 }
 
-/// Distributed load on a beam element in LOCAL coordinates
+/// Invert a small dense matrix (1×1 or 2×2) used for end-release condensation.
+///
+/// Panics for singular matrices or sizes > 2 — both are programming errors
+/// since the released DOF set is at most `{θ_i, θ_j}` and the diagonal
+/// entries `4·EI/L` are positive for valid elements.
+fn invert_small(m: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = m.len();
+    match n {
+        1 => {
+            let d = m[0][0];
+            assert!(
+                d.abs() > 1e-30,
+                "singular 1×1 matrix in end-release condensation"
+            );
+            vec![vec![1.0 / d]]
+        }
+        2 => {
+            let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+            assert!(
+                det.abs() > 1e-30,
+                "singular 2×2 matrix in end-release condensation"
+            );
+            let inv_det = 1.0 / det;
+            vec![
+                vec![m[1][1] * inv_det, -m[0][1] * inv_det],
+                vec![-m[1][0] * inv_det, m[0][0] * inv_det],
+            ]
+        }
+        _ => unreachable!("end-release condensation only supports ≤ 2 released DOFs"),
+    }
+}
+
+/// Uniform distributed load on a beam element (in LOCAL coordinates).
 ///
 /// Local coordinate system:
 /// - x axis: along beam from node_i to node_j (axial direction)
@@ -1754,7 +2165,7 @@ impl BeamSolver {
                 )));
             }
 
-            let k_global_elem = element.global_stiffness(node_i, node_j);
+            let k_global_elem = element.released_global_stiffness(node_i, node_j);
 
             // Map element DOFs to global DOFs
             let dof_map = [
@@ -1819,8 +2230,8 @@ impl BeamSolver {
                 )));
             }
 
-            // Compute consistent nodal load in local coordinates
-            let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
+            // Compute consistent nodal load in local coordinates (with releases)
+            let f_local = element.released_consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
 
             // Get transformation matrix
             let T = element.transformation_matrix(node_i, node_j);
@@ -1873,8 +2284,8 @@ impl BeamSolver {
                 )));
             }
 
-            // Compute consistent nodal load in local coordinates
-            let f_local = element.consistent_nodal_load_point(
+            // Compute consistent nodal load in local coordinates (with releases)
+            let f_local = element.released_consistent_nodal_load_point(
                 node_i,
                 node_j,
                 pl.position,
@@ -2650,12 +3061,6 @@ impl BeamSolver {
 
         // Internal nodal force: f_stiffness = K_local * u_local.
         let k_local = element.local_stiffness(node_i, node_j);
-        let mut f_stiffness = [0.0; 6];
-        for i in 0..6 {
-            for j in 0..6 {
-                f_stiffness[i] += k_local[i][j] * u_local[j];
-            }
-        }
 
         // Equivalent nodal forces from distributed and point loads on this
         // element. Applied moments at nodes are external concentrated loads,
@@ -2667,6 +3072,20 @@ impl BeamSolver {
             node_i,
             node_j,
         )?;
+
+        // For end-released elements, the released local DOFs (member-end
+        // rotations) differ from the nodal rotations in u_local. Recover the
+        // actual member-end displacements via the condensation condition
+        // u_r = K_rr⁻¹ (f_r − K_rc · u_c), then compute f_stiffness with the
+        // *original* K_local so the released end moment is exactly zero.
+        let u_local_full = element.released_local_displacement(u_local, f_equiv, &k_local);
+
+        let mut f_stiffness = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                f_stiffness[i] += k_local[i][j] * u_local_full[j];
+            }
+        }
 
         // Element-on-node end forces: f_end = f_equiv - f_stiffness.
         let mut end_forces = [0.0; 6];

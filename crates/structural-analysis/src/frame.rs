@@ -32,8 +32,8 @@
 //! # Current limitations (documented, not defects)
 //!
 //! * Parallel members between the same node pair are **not** supported: the
-//!   second one is rejected as a duplicate. Rigid offsets / releases are not
-//!   modelled.
+//!   second one is rejected as a duplicate. Member end releases (hinges) are
+//!   supported via [`FrameModel::add_member_with_release`].
 //! * A single connected structural system is required; multiple independent
 //!   substructures are rejected as disconnected.
 //! * Member loads are uniform (single `(qx, qy)` per member per call; repeated
@@ -65,7 +65,8 @@
 //! ```
 
 use crate::beam_fem::{
-    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError, ReducedSystem,
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, EndRelease, FemError,
+    ReducedSystem,
 };
 use crate::mechanism::diagnose_reduced;
 use section_properties::SolverSelection;
@@ -434,9 +435,100 @@ impl FrameModel {
         Ok(MemberHandle(self.inner.elements.len() - 1))
     }
 
-    /// Fully fix a node (`ux = uy = rz = 0`).
+    /// Add a member between two existing nodes with end releases.
+    ///
+    /// This is like [`add_member`](Self::add_member) but applies
+    /// [`EndRelease`] to the member. The release is enforced via static
+    /// condensation of the element stiffness matrix — the node DOFs are
+    /// **not** removed or constrained.
     ///
     /// # Errors
+    ///
+    /// Same as [`add_member`](Self::add_member).
+    ///
+    /// # Example — fixed-fixed beam with one end released
+    ///
+    /// ```rust
+    /// use structural_analysis::{FrameModel, BeamSection, EndRelease, MemberHandle};
+    /// use section_properties::Material;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut frame = FrameModel::new();
+    /// let a = frame.add_node(0.0, 0.0)?;
+    /// let b = frame.add_node(4.0, 0.0)?;
+    /// let m: MemberHandle = frame.add_member_with_release(a, b,
+    ///     Material::new(200e9, 0.3, 7850.0, "Steel"),
+    ///     BeamSection::new(5e-3, 2e-5),
+    ///     EndRelease::end_pin())?; // hinge at b
+    /// frame.fix(a)?;
+    /// frame.fix(b)?;
+    /// frame.member_udl(m, 0.0, -1000.0)?; // 1 kN/m downward
+    /// let result = frame.solve()?;
+    /// // Released end moment at b is zero
+    /// let forces = result.member_end_forces(m)?;
+    /// assert!(forces[5].abs() < 1.0); // M_j ≈ 0
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_member_with_release(
+        &mut self,
+        a: NodeHandle,
+        b: NodeHandle,
+        material: Material,
+        section: BeamSection,
+        end_release: EndRelease,
+    ) -> Result<MemberHandle, FemError> {
+        let ia = self.check_node(a)?;
+        let ib = self.check_node(b)?;
+        if ia == ib {
+            return Err(FemError::ZeroLengthMember(format!(
+                "member connects node {ia} to itself"
+            )));
+        }
+        let (pa, pb) = (self.inner.nodes[ia].point(), self.inner.nodes[ib].point());
+        let (dx, dy) = (pb.x - pa.x, pb.y - pa.y);
+        if !dx.is_finite() || !dy.is_finite() || dx * dx + dy * dy <= 0.0 {
+            return Err(FemError::ZeroLengthMember(format!(
+                "nodes {ia} and {ib} coincide at ({}, {})",
+                pa.x, pa.y
+            )));
+        }
+
+        let (e, area, inertia) = (material.youngs_modulus, section.area, section.second_moment);
+        if !e.is_finite() || e <= 0.0 {
+            return Err(FemError::InvalidInput(format!(
+                "Young's modulus must be finite and positive, got {e}"
+            )));
+        }
+        if !area.is_finite() || area <= 0.0 {
+            return Err(FemError::InvalidInput(format!(
+                "cross-section area must be finite and positive, got {area}"
+            )));
+        }
+        if !inertia.is_finite() || inertia <= 0.0 {
+            return Err(FemError::InvalidInput(format!(
+                "second moment of area must be finite and positive, got {inertia}"
+            )));
+        }
+
+        let (lo, hi) = if ia < ib { (ia, ib) } else { (ib, ia) };
+        for existing in &self.inner.elements {
+            let (elo, ehi) = if existing.node_i < existing.node_j {
+                (existing.node_i, existing.node_j)
+            } else {
+                (existing.node_j, existing.node_i)
+            };
+            if elo == lo && ehi == hi {
+                return Err(FemError::DuplicateMember(format!(
+                    "a member already connects nodes {lo} and {hi}; parallel members are not supported"
+                )));
+            }
+        }
+
+        let element = BeamElement::with_end_release(ia, ib, material, section, end_release)?;
+        self.inner.add_element(element);
+        Ok(MemberHandle(self.inner.elements.len() - 1))
+    }
     ///
     /// [`FemError::InvalidNode`] if the handle is not valid.
     /// [`FemError::ConflictingPrescribedDisplacement`] if any of the node's
@@ -1005,6 +1097,24 @@ impl FrameAnalysisResult {
         all.get(i)
             .copied()
             .ok_or_else(|| FemError::InvalidMember(format!("member handle {} is out of range", i)))
+    }
+
+    /// Section internal forces `N`, `V`, `M` (LOCAL) at `(member, xi)`.
+    ///
+    /// Delegates to [`BeamSolver::element_section_forces`]. For end-released
+    /// members, the released end moment is exactly zero.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if the handle is not valid.
+    /// [`FemError::InvalidInput`] if `xi` is not in `[0, 1]`.
+    pub fn section_forces(
+        &self,
+        member: MemberHandle,
+        xi: f64,
+    ) -> Result<crate::beam_fem::SectionForces, FemError> {
+        let i = self.check_member(member)?;
+        self.beam.element_section_forces(i, xi)
     }
 
     /// Global equilibrium check about the origin `(0, 0)`.

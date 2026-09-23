@@ -10,7 +10,7 @@
 use section_properties::SolverSelection;
 use section_properties::material::Material;
 use structural_analysis::beam_fem::{
-    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, FemError,
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, EndRelease, FemError,
 };
 
 // ---------------------------------------------------------------------------
@@ -234,6 +234,7 @@ fn test_invalid_node_element_dof_references() {
         node_j: 9,
         material: mat,
         section: sec,
+        end_release: EndRelease::none(),
     });
     bad_elem.fix_node(0);
     assert!(matches!(
