@@ -594,6 +594,41 @@ impl FrameModel {
         self.inner.try_override(i, dof, value)
     }
 
+    /// Add a spring support at a node DOF.
+    ///
+    /// The spring stiffness is added to the global stiffness matrix diagonal;
+    /// the DOF remains free and the spring provides finite restraint.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::InvalidInput`] if `stiffness` is not finite and positive.
+    pub fn spring(&mut self, node: NodeHandle, dof: Dof, stiffness: f64) -> Result<(), FemError> {
+        let i = self.check_node(node)?;
+        self.inner.spring(i, dof, stiffness)
+    }
+
+    /// Add an inclined roller at a node.
+    ///
+    /// Constrains displacement in direction `(nx, ny)` (auto-normalized);
+    /// the orthogonal direction is free. `value` is a prescribed displacement
+    /// (default 0.0).
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if the handle is not valid.
+    /// [`FemError::InvalidInput`] if `(nx, ny)` is zero or `value` is non-finite.
+    pub fn inclined_roller(
+        &mut self,
+        node: NodeHandle,
+        nx: f64,
+        ny: f64,
+        value: f64,
+    ) -> Result<(), FemError> {
+        let i = self.check_node(node)?;
+        self.inner.inclined_roller(i, nx, ny, value)
+    }
+
     /// Apply a **global** nodal force `(fx, fy)`.
     ///
     /// # Errors
@@ -639,6 +674,27 @@ impl FrameModel {
     pub fn member_udl(&mut self, member: MemberHandle, qx: f64, qy: f64) -> Result<(), FemError> {
         let i = self.check_member(member)?;
         self.inner.add_distributed_load(i, qx, qy)
+    }
+
+    /// Apply a trapezoidal distributed load in the member's **local** axes.
+    ///
+    /// `qx` / `qy` are the intensities at `node_i`; `qx_end` / `qy_end` at
+    /// `node_j`. The load varies linearly along the member. Repeated calls
+    /// accumulate on the same member.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if the handle is not valid.
+    pub fn member_trapezoidal(
+        &mut self,
+        member: MemberHandle,
+        qx: f64,
+        qy: f64,
+        qx_end: f64,
+        qy_end: f64,
+    ) -> Result<(), FemError> {
+        let i = self.check_member(member)?;
+        self.inner.add_trapezoidal_load(i, qx, qy, qx_end, qy_end)
     }
 
     /// Apply a point load in the member's **local** axes at normalised position

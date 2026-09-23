@@ -137,6 +137,37 @@ impl LoadCase {
         Ok(())
     }
 
+    /// Apply a trapezoidal distributed load in the member's **local** axes.
+    ///
+    /// `qx` / `qy` are the intensities at `node_i`; `qx_end` / `qy_end` at
+    /// `node_j`. The load varies linearly along the member.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if any component is non-finite.
+    pub fn member_trapezoidal(
+        &mut self,
+        member: MemberHandle,
+        qx: f64,
+        qy: f64,
+        qx_end: f64,
+        qy_end: f64,
+    ) -> Result<(), FemError> {
+        if !qx.is_finite() || !qy.is_finite() || !qx_end.is_finite() || !qy_end.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "trapezoidal load must be finite, got qx={qx}, qy={qy}, qx_end={qx_end}, qy_end={qy_end}"
+            )));
+        }
+        self.distributed_loads.push(DistributedLoad::trapezoidal(
+            member.index(),
+            qx,
+            qy,
+            qx_end,
+            qy_end,
+        ));
+        Ok(())
+    }
+
     /// Apply a point load in the member's **local** axes at normalised position
     /// `xi in [0, 1]`.
     ///

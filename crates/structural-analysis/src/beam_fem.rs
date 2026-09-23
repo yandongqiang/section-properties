@@ -912,14 +912,20 @@ impl BeamElement {
 
     /// Consistent nodal load for uniform distributed load with end releases
     /// applied. Returns the condensed 6-element vector in local coordinates.
-    pub(crate) fn released_consistent_nodal_load(
+    /// Consistent nodal load for a trapezoidal distributed load with end
+    /// releases applied. Returns the condensed 6-element vector in local
+    /// coordinates.
+    pub(crate) fn released_consistent_nodal_load_trapezoidal(
         &self,
         node_i: Point,
         node_j: Point,
         qx: f64,
+        qx_end: f64,
         qy: f64,
+        qy_end: f64,
     ) -> Result<[f64; 6], FemError> {
-        let f_local = self.consistent_nodal_load(node_i, node_j, qx, qy)?;
+        let f_local =
+            self.consistent_nodal_load_trapezoidal(node_i, node_j, qx, qx_end, qy, qy_end)?;
         if self.end_release.is_empty() {
             return Ok(f_local);
         }
@@ -1033,6 +1039,29 @@ impl BeamElement {
         qx: f64,
         qy: f64,
     ) -> Result<[f64; 6], FemError> {
+        self.consistent_nodal_load_trapezoidal(node_i, node_j, qx, qx, qy, qy)
+    }
+
+    /// Compute consistent nodal load vector for a trapezoidal distributed load
+    /// (6 DOF) in LOCAL coordinates.
+    ///
+    /// `qx` / `qy` are the intensities at `node_i`; `qx_end` / `qy_end` at
+    /// `node_j`. The load varies linearly along the element. For
+    /// `qx_end = qx` and `qy_end = qy` this reduces to the uniform case
+    /// ([`Self::consistent_nodal_load`]).
+    ///
+    /// Local DOF ordering: `[u_i, v_i, θ_i, u_j, v_j, θ_j]`
+    ///
+    /// Returns a 6-element vector in local coordinates.
+    pub fn consistent_nodal_load_trapezoidal(
+        &self,
+        node_i: Point,
+        node_j: Point,
+        qx: f64,
+        qx_end: f64,
+        qy: f64,
+        qy_end: f64,
+    ) -> Result<[f64; 6], FemError> {
         let L = self.length(node_i, node_j);
         if L <= 0.0 {
             return Err(FemError::InvalidInput(
@@ -1040,28 +1069,28 @@ impl BeamElement {
             ));
         }
 
-        // Consistent nodal load vector for uniform distributed load
-        // Axial (qx): linear shape functions
-        // f_u_i = qx * L / 2, f_u_j = qx * L / 2
-        //
-        // Transverse (qy): Hermite cubic shape functions
-        // f_v_i = qy * L / 2
-        // f_θ_i = qy * L^2 / 12  (positive = counterclockwise in local coords)
-        // f_v_j = qy * L / 2
-        // f_θ_j = -qy * L^2 / 12 (negative = clockwise in local coords)
-        //
-        // Note: Local v is positive upward, local θ is positive counterclockwise
-        let qx_L2 = qx * L / 2.0;
-        let qy_L2 = qy * L / 2.0;
-        let qy_L2_12 = qy * L * L / 12.0;
+        // Trapezoidal consistent nodal load (Hermite shape function integration).
+        // Axial (linear shape functions):
+        //   f_u_i = L*(2*qx + qx_end)/6, f_u_j = L*(qx + 2*qx_end)/6
+        // Transverse (Hermite cubic shape functions):
+        //   f_v_i = L*(7*qy + 3*qy_end)/20
+        //   f_θ_i = L²*(3*qy + 2*qy_end)/60
+        //   f_v_j = L*(3*qy + 7*qy_end)/20
+        //   f_θ_j = -L²*(2*qy + 3*qy_end)/60
+        let f_ui = L * (2.0 * qx + qx_end) / 6.0;
+        let f_uj = L * (qx + 2.0 * qx_end) / 6.0;
+        let f_vi = L * (7.0 * qy + 3.0 * qy_end) / 20.0;
+        let f_ti = L * L * (3.0 * qy + 2.0 * qy_end) / 60.0;
+        let f_vj = L * (3.0 * qy + 7.0 * qy_end) / 20.0;
+        let f_tj = -L * L * (2.0 * qy + 3.0 * qy_end) / 60.0;
 
         Ok([
-            qx_L2,     // u_i: axial
-            qy_L2,     // v_i: transverse
-            qy_L2_12,  // θ_i: moment (CCW positive)
-            qx_L2,     // u_j: axial
-            qy_L2,     // v_j: transverse
-            -qy_L2_12, // θ_j: moment (CW negative)
+            f_ui, // u_i: axial
+            f_vi, // v_i: transverse
+            f_ti, // θ_i: moment (CCW positive)
+            f_uj, // u_j: axial
+            f_vj, // v_j: transverse
+            f_tj, // θ_j: moment (CW negative)
         ])
     }
 
@@ -1224,19 +1253,44 @@ fn invert_small(m: &[Vec<f64>]) -> Vec<Vec<f64>> {
 pub struct DistributedLoad {
     /// Element index (index in elements Vec)
     pub element_idx: usize,
-    /// Uniform axial load per unit length [N/m] in local x direction
+    /// Uniform axial load per unit length [N/m] in local x direction (start value)
     pub qx: f64,
-    /// Uniform transverse load per unit length [N/m] in local y direction
+    /// Uniform transverse load per unit length [N/m] in local y direction (start value)
     pub qy: f64,
+    /// Axial load at `node_j` end [N/m]. Defaults to `qx` (uniform).
+    pub qx_end: f64,
+    /// Transverse load at `node_j` end [N/m]. Defaults to `qy` (uniform).
+    pub qy_end: f64,
 }
 
 impl DistributedLoad {
-    /// Create a new distributed load on an element
+    /// Create a new uniform distributed load on an element.
+    ///
+    /// This is equivalent to [`Self::trapezoidal`] with `qx_end = qx` and
+    /// `qy_end = qy`.
     pub fn new(element_idx: usize, qx: f64, qy: f64) -> Self {
         Self {
             element_idx,
             qx,
             qy,
+            qx_end: qx,
+            qy_end: qy,
+        }
+    }
+
+    /// Create a trapezoidal distributed load with different start and end
+    /// intensities.
+    ///
+    /// `qx` / `qy` are the intensities at `node_i` (start); `qx_end` / `qy_end`
+    /// are the intensities at `node_j` (end). The load varies linearly along
+    /// the element.
+    pub fn trapezoidal(element_idx: usize, qx: f64, qy: f64, qx_end: f64, qy_end: f64) -> Self {
+        Self {
+            element_idx,
+            qx,
+            qy,
+            qx_end,
+            qy_end,
         }
     }
 
@@ -1247,6 +1301,8 @@ impl DistributedLoad {
             element_idx,
             qx: 0.0,
             qy,
+            qx_end: 0.0,
+            qy_end: qy,
         }
     }
 
@@ -1257,6 +1313,8 @@ impl DistributedLoad {
             element_idx,
             qx,
             qy: 0.0,
+            qx_end: qx,
+            qy_end: 0.0,
         }
     }
 }
@@ -1487,6 +1545,13 @@ pub struct BeamModel {
     /// Fixed DOFs: (node_idx, dof, value) - value is the prescribed displacement (usually 0.0)
     /// node_idx is the index in the nodes Vec (0, 1, 2, ...)
     pub fixed_dofs: Vec<(usize, usize, f64)>,
+    /// Spring supports: (node_idx, dof, stiffness)
+    /// Spring stiffness is added to the global stiffness matrix diagonal.
+    /// The DOF remains free; the spring provides finite restraint.
+    pub spring_supports: Vec<(usize, usize, f64)>,
+    /// Inclined rollers: (node_idx, nx, ny, prescribed_value)
+    /// (nx, ny) is the constrained direction (auto-normalized).
+    pub inclined_rollers: Vec<(usize, f64, f64, f64)>,
 }
 
 impl Default for BeamModel {
@@ -1505,6 +1570,8 @@ impl BeamModel {
             point_loads: Vec::new(),
             applied_moments: Vec::new(),
             fixed_dofs: Vec::new(),
+            spring_supports: Vec::new(),
+            inclined_rollers: Vec::new(),
         }
     }
 
@@ -1774,6 +1841,73 @@ impl BeamModel {
         Ok(())
     }
 
+    /// Add a spring support at a node DOF.
+    ///
+    /// The spring stiffness is added to the global stiffness matrix diagonal;
+    /// the DOF remains free and the spring provides finite restraint. The
+    /// reaction at the spring DOF is `-k * u` (restoring force).
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds, `dof` is not
+    /// 0/1/2, or `stiffness` is not finite and positive.
+    pub fn spring(&mut self, node_idx: usize, dof: Dof, stiffness: f64) -> Result<(), FemError> {
+        if node_idx >= self.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            )));
+        }
+        if !stiffness.is_finite() || stiffness <= 0.0 {
+            return Err(FemError::InvalidInput(format!(
+                "Spring stiffness must be finite and positive, got {stiffness}"
+            )));
+        }
+        self.spring_supports
+            .push((node_idx, dof.index(), stiffness));
+        Ok(())
+    }
+
+    /// Add an inclined roller at a node.
+    ///
+    /// The roller constrains displacement in the direction `(nx, ny)` (auto-
+    /// normalized). The orthogonal direction is free. A prescribed displacement
+    /// `value` (default 0.0) may be given for support settlement.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `node_idx` is out of bounds or `(nx, ny)`
+    /// is zero.
+    pub fn inclined_roller(
+        &mut self,
+        node_idx: usize,
+        nx: f64,
+        ny: f64,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if node_idx >= self.nodes.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid node index: {} (max: {})",
+                node_idx,
+                self.nodes.len().saturating_sub(1)
+            )));
+        }
+        let norm = (nx * nx + ny * ny).sqrt();
+        if norm <= 0.0 || !norm.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Inclined roller direction ({nx}, {ny}) is zero or non-finite"
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Inclined roller prescribed value must be finite, got {value}"
+            )));
+        }
+        self.inclined_rollers.push((node_idx, nx, ny, value));
+        Ok(())
+    }
+
     /// Add a distributed load on an element (in LOCAL coordinates)
     /// element_idx is the index in the elements Vec (0, 1, 2, ...)
     pub fn add_distributed_load(
@@ -1797,6 +1931,41 @@ impl BeamModel {
         }
         self.distributed_loads
             .push(DistributedLoad::new(element_idx, qx, qy));
+        Ok(())
+    }
+
+    /// Add a trapezoidal distributed load on an element (in LOCAL coordinates).
+    ///
+    /// `qx` / `qy` are the intensities at `node_i`; `qx_end` / `qy_end` at
+    /// `node_j`. The load varies linearly along the element.
+    pub fn add_trapezoidal_load(
+        &mut self,
+        element_idx: usize,
+        qx: f64,
+        qy: f64,
+        qx_end: f64,
+        qy_end: f64,
+    ) -> Result<(), FemError> {
+        if element_idx >= self.elements.len() {
+            return Err(FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.elements.len().saturating_sub(1)
+            )));
+        }
+        if !qx.is_finite() || !qy.is_finite() || !qx_end.is_finite() || !qy_end.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "Trapezoidal load must be finite, got qx={}, qy={}, qx_end={}, qy_end={}",
+                qx, qy, qx_end, qy_end
+            )));
+        }
+        self.distributed_loads.push(DistributedLoad::trapezoidal(
+            element_idx,
+            qx,
+            qy,
+            qx_end,
+            qy_end,
+        ));
         Ok(())
     }
 
@@ -2064,7 +2233,9 @@ pub(crate) fn assemble_global_load_vector(
             )));
         }
 
-        let f_local = element.released_consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
+        let f_local = element.released_consistent_nodal_load_trapezoidal(
+            node_i, node_j, dl.qx, dl.qx_end, dl.qy, dl.qy_end,
+        )?;
         let T = element.transformation_matrix(node_i, node_j);
 
         let mut f_global_elem = [0.0; 6];
@@ -2184,6 +2355,10 @@ pub struct BeamSolver {
     /// backend is created or factorisation attempted, so it is available even
     /// after a failed solve.
     reduced: Option<ReducedSystem>,
+    /// Per-node rotation (cos θ, sin θ) for inclined rollers, or None.
+    /// The rotation transforms (Ux, Uy) → (U_n, U_t) where U_n is constrained.
+    /// Displacements and reactions are transformed back to global on read.
+    node_rotations: Vec<Option<(f64, f64)>>,
 }
 
 impl BeamSolver {
@@ -2340,7 +2515,7 @@ impl BeamSolver {
             }
         }
 
-        let f_global = assemble_global_load_vector(
+        let mut f_global = assemble_global_load_vector(
             model,
             &model.nodal_forces,
             &model.distributed_loads,
@@ -2370,8 +2545,118 @@ impl BeamSolver {
             prescribed_values[idx] = Some(*value);
         }
 
-        // Store original matrix for reaction computation
+        // Inclined rollers: apply coordinate transformation to K_global and
+        // f_global so the constraint becomes a single-DOF elimination.
+        // The rotation R = [[c, s], [-s, c]] maps (Ux, Uy) → (U_n, U_t)
+        // where U_n is the constrained direction. After transformation, mark
+        // U_n as fixed. K_rot = R * K * R^T, f_rot = R * f.
+        let mut node_rotations: Vec<Option<(f64, f64)>> = vec![None; model.nodes.len()];
+
+        if !model.inclined_rollers.is_empty() {
+            k_global.compress();
+            let mut k_dense = vec![vec![0.0; n_dof]; n_dof];
+            {
+                let row_ptr = k_global.row_ptr();
+                let csr_cols = k_global.csr_cols();
+                let csr_vals = k_global.csr_vals();
+                for r in 0..n_dof {
+                    for idx in row_ptr[r]..row_ptr[r + 1] {
+                        k_dense[r][csr_cols[idx]] = csr_vals[idx];
+                    }
+                }
+            }
+
+            for &(node_idx, nx, ny, pres_val) in &model.inclined_rollers {
+                if node_idx >= model.nodes.len() {
+                    return Err(FemError::InvalidModel(format!(
+                        "Inclined roller: node index {} out of bounds (max: {})",
+                        node_idx,
+                        model.nodes.len().saturating_sub(1)
+                    )));
+                }
+                let norm = (nx * nx + ny * ny).sqrt();
+                if norm <= 0.0 || !norm.is_finite() {
+                    return Err(FemError::InvalidModel(format!(
+                        "Inclined roller at node {node_idx}: direction ({nx}, {ny}) is zero or non-finite"
+                    )));
+                }
+                let (c, s) = (nx / norm, ny / norm);
+                if node_rotations[node_idx].is_some() {
+                    return Err(FemError::InvalidModel(format!(
+                        "Inclined roller at node {node_idx}: a roller is already defined at this node"
+                    )));
+                }
+                node_rotations[node_idx] = Some((c, s));
+
+                let i = model.dof_index(node_idx, 0);
+                let j = model.dof_index(node_idx, 1);
+
+                let kii = k_dense[i][i];
+                let kij = k_dense[i][j];
+                let kjj = k_dense[j][j];
+                k_dense[i][i] = c * c * kii + 2.0 * c * s * kij + s * s * kjj;
+                k_dense[i][j] = c * s * (kjj - kii) + (c * c - s * s) * kij;
+                k_dense[j][i] = k_dense[i][j];
+                k_dense[j][j] = s * s * kii - 2.0 * c * s * kij + c * c * kjj;
+
+                for k in 0..n_dof {
+                    if k == i || k == j {
+                        continue;
+                    }
+                    let kik = k_dense[i][k];
+                    let kjk = k_dense[j][k];
+                    k_dense[i][k] = c * kik + s * kjk;
+                    k_dense[j][k] = -s * kik + c * kjk;
+                    k_dense[k][i] = k_dense[i][k];
+                    k_dense[k][j] = k_dense[j][k];
+                }
+
+                let fi = f_global[i];
+                let fj = f_global[j];
+                f_global[i] = c * fi + s * fj;
+                f_global[j] = -s * fi + c * fj;
+
+                fixed_dofs[i] = true;
+                prescribed_values[i] = Some(pres_val);
+            }
+
+            k_global = SparseMatrix::new(n_dof);
+            for r in 0..n_dof {
+                for col in 0..n_dof {
+                    if k_dense[r][col].abs() > 0.0 {
+                        k_global.add(r, col, k_dense[r][col]);
+                    }
+                }
+            }
+        }
+
+        // Store original matrix for reaction computation (BEFORE springs are
+        // added, so spring reactions are computed as -k*u via the residual).
         let k_original = k_global.clone();
+
+        // Add spring stiffness to K_global diagonal (after k_original clone).
+        for &(node_idx, dof, stiffness) in &model.spring_supports {
+            if node_idx >= model.nodes.len() {
+                return Err(FemError::InvalidModel(format!(
+                    "Spring support: node index {} out of bounds (max: {})",
+                    node_idx,
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            if dof >= 3 {
+                return Err(FemError::InvalidModel(format!(
+                    "Spring support: DOF {} invalid (must be 0, 1, or 2)",
+                    dof
+                )));
+            }
+            if !stiffness.is_finite() || stiffness <= 0.0 {
+                return Err(FemError::InvalidModel(format!(
+                    "Spring support at node {node_idx} DOF {dof}: stiffness must be finite and positive, got {stiffness}"
+                )));
+            }
+            let idx = model.dof_index(node_idx, dof);
+            k_global.add(idx, idx, stiffness);
+        }
 
         Ok(Self {
             k_global,
@@ -2385,6 +2670,7 @@ impl BeamSolver {
             solver_selection: SolverSelection::Auto,
             solver_name: None,
             reduced: None,
+            node_rotations,
         })
     }
 
@@ -2566,6 +2852,82 @@ impl BeamSolver {
         self.solver_name.as_deref()
     }
 
+    /// Transform `u_global`, `f_global`, and `k_original` back to global
+    /// coordinates after solving in the rotated frame.
+    ///
+    /// For each node with an inclined roller, the forward rotation
+    /// R = [[c, s], [-s, c]] maps (Ux, Uy) → (U_n, U_t). The inverse is
+    /// R^T = [[c, -s], [s, c]]. Vectors transform as v = R^T * v_rot; the
+    /// matrix transforms as K = R^T * K_rot * R (equivalent to the forward
+    /// formula with (c, -s)).
+    fn transform_back_to_global(&mut self) {
+        if self.node_rotations.iter().all(|r| r.is_none()) {
+            return;
+        }
+
+        for (node_idx, rotation) in self.node_rotations.iter().enumerate() {
+            if let Some((c, s)) = rotation {
+                let i = self.model.dof_index(node_idx, 0);
+                let j = self.model.dof_index(node_idx, 1);
+                let ui = self.u_global[i];
+                let uj = self.u_global[j];
+                self.u_global[i] = c * ui - s * uj;
+                self.u_global[j] = s * ui + c * uj;
+                let fi = self.f_global[i];
+                let fj = self.f_global[j];
+                self.f_global[i] = c * fi - s * fj;
+                self.f_global[j] = s * fi + c * fj;
+            }
+        }
+
+        let n = self.n_dof;
+        let mut k_dense = vec![vec![0.0; n]; n];
+        {
+            let mut k_orig = self.k_original.clone();
+            k_orig.compress();
+            let row_ptr = k_orig.row_ptr();
+            let csr_cols = k_orig.csr_cols();
+            let csr_vals = k_orig.csr_vals();
+            for r in 0..n {
+                for idx in row_ptr[r]..row_ptr[r + 1] {
+                    k_dense[r][csr_cols[idx]] = csr_vals[idx];
+                }
+            }
+        }
+        for (node_idx, rotation) in self.node_rotations.iter().enumerate() {
+            if let Some((c, s)) = rotation {
+                let i = self.model.dof_index(node_idx, 0);
+                let j = self.model.dof_index(node_idx, 1);
+                let kii = k_dense[i][i];
+                let kij = k_dense[i][j];
+                let kjj = k_dense[j][j];
+                k_dense[i][i] = c * c * kii - 2.0 * c * s * kij + s * s * kjj;
+                k_dense[i][j] = c * s * (kii - kjj) + (c * c - s * s) * kij;
+                k_dense[j][i] = k_dense[i][j];
+                k_dense[j][j] = s * s * kii + 2.0 * c * s * kij + c * c * kjj;
+                for k in 0..n {
+                    if k == i || k == j {
+                        continue;
+                    }
+                    let kik = k_dense[i][k];
+                    let kjk = k_dense[j][k];
+                    k_dense[i][k] = c * kik - s * kjk;
+                    k_dense[j][k] = s * kik + c * kjk;
+                    k_dense[k][i] = k_dense[i][k];
+                    k_dense[k][j] = k_dense[j][k];
+                }
+            }
+        }
+        self.k_original = SparseMatrix::new(n);
+        for r in 0..n {
+            for col in 0..n {
+                if k_dense[r][col].abs() > 0.0 {
+                    self.k_original.add(r, col, k_dense[r][col]);
+                }
+            }
+        }
+    }
+
     /// Factorize and expand a condensed system into the global solution.
     ///
     /// `k_ff`/`free_to_global` are the solver's retained system copied out for
@@ -2587,6 +2949,7 @@ impl BeamSolver {
             for (i, &global_idx) in constrained_dofs.iter().enumerate() {
                 self.u_global[global_idx] = constrained_values[i];
             }
+            self.transform_back_to_global();
             return Ok(());
         }
 
@@ -2603,6 +2966,7 @@ impl BeamSolver {
         for (i, &global_idx) in constrained_dofs.iter().enumerate() {
             self.u_global[global_idx] = constrained_values[i];
         }
+        self.transform_back_to_global();
         Ok(())
     }
 
@@ -2663,6 +3027,7 @@ impl BeamSolver {
             for (i, &global_idx) in constrained_dofs.iter().enumerate() {
                 self.u_global[global_idx] = constrained_values[i];
             }
+            self.transform_back_to_global();
             return Ok(());
         }
 
@@ -3134,7 +3499,9 @@ impl BeamSolver {
         // Distributed loads on this element.
         for dl in &model.distributed_loads {
             if dl.element_idx == elem_idx {
-                let f_local = element.consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
+                let f_local = element.consistent_nodal_load_trapezoidal(
+                    node_i, node_j, dl.qx, dl.qx_end, dl.qy, dl.qy_end,
+                )?;
                 for i in 0..6 {
                     f_equiv[i] += f_local[i];
                 }
@@ -3344,13 +3711,18 @@ impl BeamSolver {
         let v_i = f_end[1];
         let m_i = f_end[2];
 
-        // Uniform distributed load on this element (LOCAL), summed if repeated.
+        // Distributed load on this element (LOCAL), summed if repeated.
+        // Trapezoidal: qx/qy at start, qx_end/qy_end at end.
         let mut qx = 0.0;
         let mut qy = 0.0;
+        let mut qx_end = 0.0;
+        let mut qy_end = 0.0;
         for dl in &self.model.distributed_loads {
             if dl.element_idx == element_idx {
                 qx += dl.qx;
                 qy += dl.qy;
+                qx_end += dl.qx_end;
+                qy_end += dl.qy_end;
             }
         }
 
@@ -3370,9 +3742,16 @@ impl BeamSolver {
             }
         }
 
-        let axial = n_i - qx * x - sum_fx;
-        let shear = -v_i + qy * x + sum_fy;
-        let moment = m_i - x * v_i + 0.5 * qy * x * x - sum_moment;
+        // Trapezoidal section force recovery:
+        // N(x) = N_i - qx*x - (qx_end - qx)*x²/(2L)
+        // V(x) = -V_i + qy*x + (qy_end - qy)*x²/(2L)
+        // M(x) = M_i - x*V_i + qy*x²/2 + (qy_end - qy)*x³/(6L)
+        let dqx = qx_end - qx;
+        let dqy = qy_end - qy;
+        let axial = n_i - qx * x - dqx * x * x / (2.0 * length) - sum_fx;
+        let shear = -v_i + qy * x + dqy * x * x / (2.0 * length) + sum_fy;
+        let moment =
+            m_i - x * v_i + 0.5 * qy * x * x + dqy * x * x * x / (6.0 * length) - sum_moment;
 
         Ok(SectionForces::new(axial, shear, moment))
     }
