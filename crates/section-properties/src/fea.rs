@@ -1745,10 +1745,6 @@ impl DirectLagrangeSolver {
 
     /// Factor using the default backend: the skyline LDL^T, which is
     /// self-contained and robust.
-    ///
-    /// PARDISO is powerful but demands a fully provisioned MKL runtime;
-    /// select it explicitly via [`DirectLagrangeSolver::with_kernel`] when
-    /// the environment is known to be complete.
     pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, crate::fea::FemError> {
         Self::with_kernel(LagrangeKernel::Skyline, k, c, SolverOptions::default())
     }
