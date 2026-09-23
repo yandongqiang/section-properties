@@ -1,7 +1,7 @@
 # 2D frame analysis - architecture audit and design contract
 
 **Status:** the façade described here is **implemented** (Phase 13) in
-`src/frame.rs`; see [Implemented API](#implemented-api-phase-13) for the exact
+`crates/structural-analysis/src/frame.rs`; see [Implemented API](#implemented-api-phase-13) for the exact
 surface, and the sections below for the rationale (Phase 12) and the remaining
 design/future items. Code references were verified against commit `3c445ab`
 (the audit) and updated for the implementation.
@@ -20,7 +20,7 @@ remains authoritative for every convention reused here.
 
 ## Implemented API (Phase 13)
 
-Implemented in `src/frame.rs` and re-exported from the crate root. The façade
+Implemented in `crates/structural-analysis/src/frame.rs` and re-exported from the crate root. The façade
 delegates **all** mechanics to the existing Beam FEM core - it contains no
 element stiffness, transformation, assembly, condensation or recovery code.
 
@@ -119,13 +119,13 @@ remove/reorder APIs.
   scale invariance at `1e-6 ... 1e6`, load independence, ill-conditioning at an
   extreme coordinate scale, the probe's size/symmetry limits, and a synthetic
   reduced system for the internal-mechanism and shallow-deficiency verdicts.
-* `examples/frame_portal.rs` - end-to-end public-API usage; equilibrium
+* `crates/structural-analysis/examples/frame_portal.rs` - end-to-end public-API usage; equilibrium
   residual ~1e-9 on a 20 kN load (balanced).
 
 ## Structural mechanism diagnostics (Phase 15)
 
-Implemented in `src/fea/mechanism.rs` (the linear algebra) plus
-`FrameModel::diagnostic` / `FrameSolver::solve` in `src/frame.rs` (the
+Implemented in `crates/structural-analysis/src/mechanism.rs` (the linear algebra) plus
+`FrameModel::diagnostic` / `FrameSolver::solve` in `crates/structural-analysis/src/frame.rs` (the
 structure). An under-constrained or rank-deficient frame stops being an opaque
 `solver error: singular matrix` and is classified as follows.
 
@@ -230,7 +230,7 @@ separated from extreme conditioning in double precision.
 
 ## 1. What the existing core already provides
 
-Audited from `src/beam_fem.rs` (each item verified in the current source, not
+Audited from `crates/structural-analysis/src/beam_fem.rs` (each item verified in the current source, not
 assumed):
 
 | Contract | Current state |

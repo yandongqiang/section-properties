@@ -85,7 +85,7 @@ full oneAPI/MKL environment:
 cargo build --release --features pardiso
 ```
 
-See [`docs/PARDISO.md`](docs/PARDISO.md) for details and known limitations.
+See [`docs/PARDISO.md`](../../docs/PARDISO.md) for details and known limitations.
 
 ## Documentation
 

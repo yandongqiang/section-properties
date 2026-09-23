@@ -1,7 +1,8 @@
 # Beam FEM contract
 
 This document is the authoritative description of the **current** 2D
-Euler–Bernoulli beam finite-element implementation in `src/beam_fem.rs`
+Euler–Bernoulli beam finite-element implementation in
+`crates/structural-analysis/src/beam_fem.rs`
 (`BeamModel`, `BeamElement`, `BeamSolver`, `BeamAnalysisResult`). It records
 behaviour that is already implemented and covered by the test suite; it does
 not describe future work. If the documentation and the implementation ever

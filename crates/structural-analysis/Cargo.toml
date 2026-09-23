@@ -6,11 +6,12 @@ rust-version = "1.85"
 description = "2D structural analysis: beam and frame FEM, solver selection, mechanism diagnostics."
 license = "MIT"
 repository = "https://github.com/yandongqiang/section-properties"
+readme = "README.md"
 keywords = ["structural", "analysis", "fem", "beam", "frame"]
 categories = ["science", "mathematics"]
 
 [dependencies]
-section-properties = { path = "../section-properties" }
+section-properties = { path = "../section-properties", version = "0.4" }
 thiserror = "1.0"
 
 [features]

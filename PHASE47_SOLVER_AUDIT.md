@@ -95,7 +95,7 @@ Every entry below is backed by code evidence (capability constructor + factor/so
 ### 4.1 `SolverError` (15+ variants)
 `src/fea/solver.rs`: `InvalidInput`, `NonFiniteInput`, `DimensionMismatch`, `SingularMatrix`, `NearSingularMatrix`, `FactorizationFailed`, `SolveFailed`, `BackendUnavailable`, `BackendError`, `Unsupported`, `ConvergenceFailed`, `BackendNotAvailable`, `NotImplemented`, `NotSymmetric`, `NotFactorized`, `NotConverged`.
 
-### 4.2 `FemError::SolverError` (`src/beam_fem.rs:2988-3036`)
+### 4.2 `FemError::SolverError` (`crates/structural-analysis/src/beam_fem.rs:2988-3036`)
 ```rust
 pub enum FemError {
     SolverError { source: SolverError, message: String },
@@ -160,7 +160,7 @@ Cross-solver agreement verified at two levels:
 ## 7. P2 Observations (non-blocking)
 
 ### P2-DOC-01: Auto fallback documentation misleading
-**Location**: `src/frame.rs:534-535`, `src/frame.rs:547-549`
+**Location**: `crates/structural-analysis/src/frame.rs:534-535`, `crates/structural-analysis/src/frame.rs:547-549`
 **Claim**: "Auto may fall back to a different solver if the first choice fails" / "internal selection/fallback policy; the registry may substitute a different backend if the initial choice fails."
 **Reality**: `beam_fem.rs:solve_configured` calls `create_selected` exactly once; `factor_and_expand` has no fallback retry logic. Auto selection picks one solver; if it fails, the error propagates directly.
 **Impact**: The actual behavior is *safer* than documented (errors are never masked by retrying), but the documentation may mislead callers into expecting retry behavior that does not exist.
