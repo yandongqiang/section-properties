@@ -287,7 +287,7 @@ impl EquilibriumReport {
     /// `equilibrium_scales`). The force residuals `fx_residual` and
     /// `fy_residual` are compared against this value.
     ///
-    /// This is identical to the [`Self::tolerance`] field, exposed as a
+    /// This is identical to the `tolerance` field, exposed as a
     /// method for clarity and symmetry with [`Self::moment_tolerance`].
     pub fn force_tolerance(&self) -> f64 {
         let (f_scale, _) = equilibrium_scales(self.f_mag, self.m_mag, self.l_char);
@@ -299,7 +299,7 @@ impl EquilibriumReport {
     /// `equilibrium_scales`). The moment residual `mz_residual` is
     /// compared against this value.
     ///
-    /// This is generally **not** equal to [`Self::tolerance`] (which is the
+    /// This is generally **not** equal to `tolerance` (which is the
     /// force tolerance); using `tolerance` to threshold `mz_residual` would
     /// give a wrong verdict for structures with `l_char != 1`.
     pub fn moment_tolerance(&self) -> f64 {
