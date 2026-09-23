@@ -65,9 +65,10 @@
 //! ```
 
 use crate::beam_fem::{
-    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, EndRelease, FemError,
-    ReducedSystem,
+    AppliedMoment, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, DistributedLoad, Dof,
+    EndRelease, FemError, PointLoad, ReducedSystem,
 };
+use crate::load::{LoadCase, LoadCombination};
 use crate::mechanism::diagnose_reduced;
 use section_properties::SolverSelection;
 use section_properties::material::Material;
@@ -708,6 +709,102 @@ impl FrameModel {
         FrameSolver::new(self).with_selection(selection).solve()
     }
 
+    /// Solve the frame under a single [`LoadCase`].
+    ///
+    /// The stiffness matrix and boundary conditions come from `self`; the load
+    /// vector is assembled entirely from `case`. Any loads added directly to the
+    /// model (via [`nodal_load`](Self::nodal_load), [`member_udl`](Self::member_udl),
+    /// etc.) are **ignored** — only the load case's loads are used.
+    ///
+    /// The result's [`load_source`](FrameAnalysisResult::load_source) is
+    /// `"case:{name}"`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`solve`](Self::solve), plus [`FemError::InvalidModel`] if a load
+    /// in the case references a node or member that does not exist.
+    pub fn solve_case(&self, case: &LoadCase) -> Result<FrameAnalysisResult, FemError> {
+        self.validate()?;
+        let model = self.inner_with_loads(
+            case.nodal_forces(),
+            case.distributed_loads(),
+            case.point_loads(),
+            case.applied_moments(),
+        );
+        let mut beam = BeamSolver::from_model(&model)?;
+        if let Err(e) = beam.solve_configured() {
+            let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
+            return Err(with_structural_diagnosis(e, diagnosis));
+        }
+        Ok(FrameAnalysisResult {
+            beam,
+            model: FrameModel { inner: model },
+            load_source: Some(format!("case:{}", case.name())),
+        })
+    }
+
+    /// Solve the frame under a [`LoadCombination`].
+    ///
+    /// The right-hand side is merged: `f = Σ factor_i × f_case_i`, then
+    /// `K u = f` is solved **once**. This is mathematically equivalent to
+    /// solving each case separately and superposing the results (by linearity
+    /// of the solve), but more efficient (a single factorisation).
+    ///
+    /// The result's [`load_source`](FrameAnalysisResult::load_source) is
+    /// `"combination:{name}"`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`solve`](Self::solve), plus [`FemError::InvalidModel`] if a load
+    /// in any case references a node or member that does not exist.
+    pub fn solve_combination(
+        &self,
+        combo: &LoadCombination,
+    ) -> Result<FrameAnalysisResult, FemError> {
+        self.validate()?;
+        let mut merged = self.inner.clone();
+        merged.nodal_forces.clear();
+        merged.distributed_loads.clear();
+        merged.point_loads.clear();
+        merged.applied_moments.clear();
+        for (case, factor) in combo.terms() {
+            for &(node, dof, value) in case.nodal_forces() {
+                merged.nodal_forces.push((node, dof, factor * value));
+            }
+            for dl in case.distributed_loads() {
+                merged.distributed_loads.push(DistributedLoad::new(
+                    dl.element_idx,
+                    factor * dl.qx,
+                    factor * dl.qy,
+                ));
+            }
+            for pl in case.point_loads() {
+                merged.point_loads.push(PointLoad::new(
+                    pl.element_idx,
+                    pl.position,
+                    factor * pl.fx,
+                    factor * pl.fy,
+                    factor * pl.mz,
+                ));
+            }
+            for am in case.applied_moments() {
+                merged
+                    .applied_moments
+                    .push(AppliedMoment::new(am.node_idx, factor * am.value));
+            }
+        }
+        let mut beam = BeamSolver::from_model(&merged)?;
+        if let Err(e) = beam.solve_configured() {
+            let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
+            return Err(with_structural_diagnosis(e, diagnosis));
+        }
+        Ok(FrameAnalysisResult {
+            beam,
+            model: FrameModel { inner: merged },
+            load_source: Some(format!("combination:{}", combo.name())),
+        })
+    }
+
     /// A solver builder for this frame (configure a backend, then solve).
     pub fn solver(&self) -> FrameSolver<'_> {
         FrameSolver::new(self)
@@ -880,6 +977,26 @@ impl FrameModel {
         }
         Ok(member.0)
     }
+
+    /// Clone the inner BeamModel, replacing its four load collections with the
+    /// provided loads. Geometry, elements, constraints and end releases are
+    /// preserved. This is the bridge between [`LoadCase`] and [`BeamSolver::from_model`]:
+    /// the solver's stored model must carry the correct loads for end-force
+    /// recovery (`f_end = f_equiv − K_e u_e`).
+    fn inner_with_loads(
+        &self,
+        nodal_forces: &[(usize, usize, f64)],
+        distributed_loads: &[DistributedLoad],
+        point_loads: &[PointLoad],
+        applied_moments: &[AppliedMoment],
+    ) -> BeamModel {
+        let mut m = self.inner.clone();
+        m.nodal_forces = nodal_forces.to_vec();
+        m.distributed_loads = distributed_loads.to_vec();
+        m.point_loads = point_loads.to_vec();
+        m.applied_moments = applied_moments.to_vec();
+        m
+    }
 }
 
 /// Number of connected components of the member connectivity graph.
@@ -968,6 +1085,7 @@ impl<'a> FrameSolver<'a> {
         Ok(FrameAnalysisResult {
             beam,
             model: self.model.clone(),
+            load_source: None,
         })
     }
 }
@@ -1006,6 +1124,7 @@ fn with_structural_diagnosis(err: FemError, diagnosis: Option<StructuralDiagnost
 pub struct FrameAnalysisResult {
     beam: BeamSolver,
     model: FrameModel,
+    load_source: Option<String>,
 }
 
 impl std::fmt::Debug for FrameAnalysisResult {
@@ -1014,6 +1133,7 @@ impl std::fmt::Debug for FrameAnalysisResult {
             .field("nodes", &self.model.n_nodes())
             .field("members", &self.model.n_members())
             .field("solver", &self.beam.solver_name())
+            .field("load_source", &self.load_source)
             .finish_non_exhaustive()
     }
 }
@@ -1022,6 +1142,15 @@ impl FrameAnalysisResult {
     /// Name of the backend used by the successful solve.
     pub fn solver_name(&self) -> Option<&str> {
         self.beam.solver_name()
+    }
+
+    /// Provenance of the load that produced this result.
+    ///
+    /// `None` for a direct [`FrameModel::solve`] / [`FrameModel::solve_with`];
+    /// `"case:{name}"` for [`FrameModel::solve_case`];
+    /// `"combination:{name}"` for [`FrameModel::solve_combination`].
+    pub fn load_source(&self) -> Option<&str> {
+        self.load_source.as_deref()
     }
 
     /// Number of nodes in the solved frame.

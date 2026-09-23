@@ -31,6 +31,7 @@
 
 pub mod beam_fem;
 pub mod frame;
+pub mod load;
 pub mod mechanism;
 
 pub use crate::beam_fem::{
@@ -41,3 +42,4 @@ pub use crate::frame::{
     EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,
     StructuralDiagnostic,
 };
+pub use crate::load::{LoadCase, LoadCombination};

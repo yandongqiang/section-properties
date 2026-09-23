@@ -2004,6 +2004,160 @@ impl ReducedSystem {
 /// # Ok(())
 /// # }
 /// ```
+
+/// Assemble the global load vector from the four load collections, using
+/// `model` for geometry (node coordinates, element connectivity, DOF mapping).
+///
+/// This is the single authoritative load-assembly routine — [`BeamSolver::from_model`]
+/// calls it with the model's own loads, and the LoadCase/LoadCombination solve
+/// paths call it with externally-provided loads. No equivalent-nodal-force
+/// computation is duplicated.
+pub(crate) fn assemble_global_load_vector(
+    model: &BeamModel,
+    nodal_forces: &[(usize, usize, f64)],
+    distributed_loads: &[DistributedLoad],
+    point_loads: &[PointLoad],
+    applied_moments: &[AppliedMoment],
+) -> Result<Vec<f64>, FemError> {
+    let n_dof = model.n_dof();
+    let mut f_global = vec![0.0; n_dof];
+
+    // Nodal forces (global coordinates)
+    for (node_id, dof, value) in nodal_forces {
+        if *node_id >= model.nodes.len() {
+            return Err(FemError::InvalidModel(format!(
+                "Nodal force: node index {} out of bounds (max: {})",
+                node_id,
+                model.nodes.len().saturating_sub(1)
+            )));
+        }
+        if *dof >= 3 {
+            return Err(FemError::InvalidModel(format!(
+                "Nodal force: DOF {} invalid (must be 0, 1, or 2)",
+                dof
+            )));
+        }
+        let idx = model.dof_index(*node_id, *dof);
+        f_global[idx] += value;
+    }
+
+    // Distributed loads (local → global via consistent nodal forces)
+    for dl in distributed_loads {
+        if dl.element_idx >= model.elements.len() {
+            return Err(FemError::InvalidModel(format!(
+                "Distributed load: element index {} out of bounds (max: {})",
+                dl.element_idx,
+                model.elements.len().saturating_sub(1)
+            )));
+        }
+        let element = &model.elements[dl.element_idx];
+        let node_i = model.nodes[element.node_i].point();
+        let node_j = model.nodes[element.node_j].point();
+
+        let dx = node_j.x - node_i.x;
+        let dy = node_j.y - node_i.y;
+        let L = (dx * dx + dy * dy).sqrt();
+        if L <= 0.0 {
+            return Err(FemError::InvalidModel(format!(
+                "Distributed load: beam element has zero or negative length (nodes {} and {} at same position)",
+                element.node_i, element.node_j
+            )));
+        }
+
+        let f_local = element.released_consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
+        let T = element.transformation_matrix(node_i, node_j);
+
+        let mut f_global_elem = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                f_global_elem[i] += T[j][i] * f_local[j];
+            }
+        }
+
+        let dof_map = [
+            model.dof_index(element.node_i, 0),
+            model.dof_index(element.node_i, 1),
+            model.dof_index(element.node_i, 2),
+            model.dof_index(element.node_j, 0),
+            model.dof_index(element.node_j, 1),
+            model.dof_index(element.node_j, 2),
+        ];
+
+        for a in 0..6 {
+            f_global[dof_map[a]] += f_global_elem[a];
+        }
+    }
+
+    // Point loads (local → global via consistent nodal forces)
+    for pl in point_loads {
+        if pl.element_idx >= model.elements.len() {
+            return Err(FemError::InvalidModel(format!(
+                "Point load: element index {} out of bounds (max: {})",
+                pl.element_idx,
+                model.elements.len().saturating_sub(1)
+            )));
+        }
+        let element = &model.elements[pl.element_idx];
+        let node_i = model.nodes[element.node_i].point();
+        let node_j = model.nodes[element.node_j].point();
+
+        let dx = node_j.x - node_i.x;
+        let dy = node_j.y - node_i.y;
+        let L = (dx * dx + dy * dy).sqrt();
+        if L <= 0.0 {
+            return Err(FemError::InvalidModel(format!(
+                "Point load: beam element has zero or negative length (nodes {} and {} at same position)",
+                element.node_i, element.node_j
+            )));
+        }
+
+        let f_local = element.released_consistent_nodal_load_point(
+            node_i,
+            node_j,
+            pl.position,
+            pl.fx,
+            pl.fy,
+            pl.mz,
+        )?;
+        let T = element.transformation_matrix(node_i, node_j);
+
+        let mut f_global_elem = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                f_global_elem[i] += T[j][i] * f_local[j];
+            }
+        }
+
+        let dof_map = [
+            model.dof_index(element.node_i, 0),
+            model.dof_index(element.node_i, 1),
+            model.dof_index(element.node_i, 2),
+            model.dof_index(element.node_j, 0),
+            model.dof_index(element.node_j, 1),
+            model.dof_index(element.node_j, 2),
+        ];
+
+        for a in 0..6 {
+            f_global[dof_map[a]] += f_global_elem[a];
+        }
+    }
+
+    // Applied moments (already in global coordinates, DOF 2 = θ)
+    for am in applied_moments {
+        if am.node_idx >= model.nodes.len() {
+            return Err(FemError::InvalidModel(format!(
+                "Applied moment: node index {} out of bounds (max: {})",
+                am.node_idx,
+                model.nodes.len().saturating_sub(1)
+            )));
+        }
+        let idx = model.dof_index(am.node_idx, 2);
+        f_global[idx] += am.value;
+    }
+
+    Ok(f_global)
+}
+
 pub struct BeamSolver {
     /// Global stiffness matrix
     k_global: SparseMatrix,
@@ -2186,154 +2340,13 @@ impl BeamSolver {
             }
         }
 
-        // Build force vector
-        let mut f_global = vec![0.0; n_dof];
-        for (node_id, dof, value) in &model.nodal_forces {
-            if *node_id >= model.nodes.len() {
-                return Err(FemError::InvalidModel(format!(
-                    "Nodal force: node index {} out of bounds (max: {})",
-                    node_id,
-                    model.nodes.len().saturating_sub(1)
-                )));
-            }
-            if *dof >= 3 {
-                return Err(FemError::InvalidModel(format!(
-                    "Nodal force: DOF {} invalid (must be 0, 1, or 2)",
-                    dof
-                )));
-            }
-            let idx = model.dof_index(*node_id, *dof);
-            f_global[idx] += value;
-        }
-
-        // Assemble distributed loads
-        for dl in &model.distributed_loads {
-            if dl.element_idx >= model.elements.len() {
-                return Err(FemError::InvalidModel(format!(
-                    "Distributed load: element index {} out of bounds (max: {})",
-                    dl.element_idx,
-                    model.elements.len().saturating_sub(1)
-                )));
-            }
-            let element = &model.elements[dl.element_idx];
-            let node_i = model.nodes[element.node_i].point();
-            let node_j = model.nodes[element.node_j].point();
-
-            // Check for zero-length beam
-            let dx = node_j.x - node_i.x;
-            let dy = node_j.y - node_i.y;
-            let L = (dx * dx + dy * dy).sqrt();
-            if L <= 0.0 {
-                return Err(FemError::InvalidModel(format!(
-                    "Distributed load: beam element has zero or negative length (nodes {} and {} at same position)",
-                    element.node_i, element.node_j
-                )));
-            }
-
-            // Compute consistent nodal load in local coordinates (with releases)
-            let f_local = element.released_consistent_nodal_load(node_i, node_j, dl.qx, dl.qy)?;
-
-            // Get transformation matrix
-            let T = element.transformation_matrix(node_i, node_j);
-
-            // Transform to global coordinates: f_global_elem = T^T * f_local
-            let mut f_global_elem = [0.0; 6];
-            for i in 0..6 {
-                for j in 0..6 {
-                    f_global_elem[i] += T[j][i] * f_local[j];
-                }
-            }
-
-            // Map element DOFs to global DOFs
-            let dof_map = [
-                model.dof_index(element.node_i, 0), // u_i
-                model.dof_index(element.node_i, 1), // v_i
-                model.dof_index(element.node_i, 2), // θ_i
-                model.dof_index(element.node_j, 0), // u_j
-                model.dof_index(element.node_j, 1), // v_j
-                model.dof_index(element.node_j, 2), // θ_j
-            ];
-
-            // Assemble into global force vector
-            for a in 0..6 {
-                f_global[dof_map[a]] += f_global_elem[a];
-            }
-        }
-
-        // Assemble point loads
-        for pl in &model.point_loads {
-            if pl.element_idx >= model.elements.len() {
-                return Err(FemError::InvalidModel(format!(
-                    "Point load: element index {} out of bounds (max: {})",
-                    pl.element_idx,
-                    model.elements.len().saturating_sub(1)
-                )));
-            }
-            let element = &model.elements[pl.element_idx];
-            let node_i = model.nodes[element.node_i].point();
-            let node_j = model.nodes[element.node_j].point();
-
-            // Check for zero-length beam
-            let dx = node_j.x - node_i.x;
-            let dy = node_j.y - node_i.y;
-            let L = (dx * dx + dy * dy).sqrt();
-            if L <= 0.0 {
-                return Err(FemError::InvalidModel(format!(
-                    "Point load: beam element has zero or negative length (nodes {} and {} at same position)",
-                    element.node_i, element.node_j
-                )));
-            }
-
-            // Compute consistent nodal load in local coordinates (with releases)
-            let f_local = element.released_consistent_nodal_load_point(
-                node_i,
-                node_j,
-                pl.position,
-                pl.fx,
-                pl.fy,
-                pl.mz,
-            )?;
-
-            // Get transformation matrix
-            let T = element.transformation_matrix(node_i, node_j);
-
-            // Transform to global coordinates: f_global_elem = T^T * f_local
-            let mut f_global_elem = [0.0; 6];
-            for i in 0..6 {
-                for j in 0..6 {
-                    f_global_elem[i] += T[j][i] * f_local[j];
-                }
-            }
-
-            // Map element DOFs to global DOFs
-            let dof_map = [
-                model.dof_index(element.node_i, 0), // u_i
-                model.dof_index(element.node_i, 1), // v_i
-                model.dof_index(element.node_i, 2), // θ_i
-                model.dof_index(element.node_j, 0), // u_j
-                model.dof_index(element.node_j, 1), // v_j
-                model.dof_index(element.node_j, 2), // θ_j
-            ];
-
-            // Assemble into global force vector
-            for a in 0..6 {
-                f_global[dof_map[a]] += f_global_elem[a];
-            }
-        }
-
-        // Assemble applied moments (already in global coordinates)
-        for am in &model.applied_moments {
-            if am.node_idx >= model.nodes.len() {
-                return Err(FemError::InvalidModel(format!(
-                    "Applied moment: node index {} out of bounds (max: {})",
-                    am.node_idx,
-                    model.nodes.len().saturating_sub(1)
-                )));
-            }
-            // Applied moment is in global coordinates, DOF 2 = θ
-            let idx = model.dof_index(am.node_idx, 2);
-            f_global[idx] += am.value;
-        }
+        let f_global = assemble_global_load_vector(
+            model,
+            &model.nodal_forces,
+            &model.distributed_loads,
+            &model.point_loads,
+            &model.applied_moments,
+        )?;
 
         // Fixed DOFs and prescribed values
         let mut fixed_dofs = vec![false; n_dof];
