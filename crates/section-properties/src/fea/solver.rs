@@ -10,9 +10,6 @@ use crate::fea::solver::impls::iccg::IccgSolver;
 use crate::fea::solver::impls::skyline_ldlt::SkylineLdltSolver;
 use crate::fea::solver::impls::sparse_lu::SparseLuSolver;
 
-#[cfg(feature = "pardiso")]
-use crate::fea::solver::impls::pardiso_wrapper::PardisoSolverWrapper;
-
 pub mod impls;
 
 /// Capabilities of a linear solver
@@ -71,20 +68,6 @@ impl SolverCapabilities {
             multiple_rhs: true,
             complex: false,
             max_size: Some(3000),
-        }
-    }
-
-    /// Capabilities for PARDISO
-    #[cfg(feature = "pardiso")]
-    pub fn pardiso() -> Self {
-        Self {
-            symmetric: true,
-            spd: true,
-            symmetric_indefinite: true,
-            general: true,
-            multiple_rhs: true,
-            complex: false,
-            max_size: None,
         }
     }
 
@@ -275,8 +258,6 @@ pub enum SolverBackend {
     Dense,
     SkylineLdlt,
     SparseLu,
-    #[cfg(feature = "pardiso")]
-    Pardiso,
     Cg,
     Iccg,
 }
@@ -295,16 +276,6 @@ pub enum SolverBackend {
 /// | `sparse_lu`      | any (general)   | any                 | medium/large  | yes                   |
 /// | `cg`             | symmetric only  | SPD (assumed)       | large         | yes                   |
 /// | `iccg`           | symmetric only  | SPD (assumed)       | large         | yes                   |
-/// | `pardiso`        | any (general)   | any                 | very large    | **no** — feature-gated stub |
-///
-/// # PARDISO availability
-///
-/// `pardiso` is **not** registered by [`SolverRegistry::default()`], even when
-/// the `pardiso` feature is compiled in: the unified PARDISO wrapper is a stub
-/// whose `factor()` always returns an error. Selecting it through the default
-/// registry therefore returns [`SolverError::Unsupported`] ("unknown solver"),
-/// and auto-selection never claims it is available unless a PARDISO factory is
-/// explicitly registered on the registry.
 ///
 /// # Semantics
 ///
@@ -353,17 +324,6 @@ impl SolverSelection {
     pub fn iccg() -> Self {
         Self::Named("iccg".to_string())
     }
-    /// Select the PARDISO backend.
-    ///
-    /// **Not available through [`SolverRegistry::default()`]** — PARDISO is a
-    /// feature-gated stub that is deliberately left unregistered, so this
-    /// selection resolves only if a PARDISO factory is explicitly registered
-    /// via [`SolverRegistry::register`]. Otherwise
-    /// [`SolverRegistry::create_selected`] returns
-    /// [`SolverError::Unsupported`] rather than silently falling back.
-    pub fn pardiso() -> Self {
-        Self::Named("pardiso".to_string())
-    }
     /// Whether this is automatic selection.
     pub fn is_auto(&self) -> bool {
         matches!(self, Self::Auto)
@@ -389,7 +349,7 @@ pub enum SelectionReason {
     SymmetricPositiveDiagonal,
     /// General (possibly non-symmetric) system: sparse LU.
     GeneralSystem,
-    /// Very large system with PARDISO available.
+    /// Very large system.
     LargeSystem,
 }
 
@@ -530,9 +490,7 @@ impl SolverRegistry {
     /// 2. symmetric with a positive diagonal (necessary condition for SPD) and
     ///    within skyline's size limit → `skyline_ldlt` (it verifies definiteness
     ///    at factorization).
-    /// 3. `pardiso` **only if a PARDISO factory is actually registered**
-    ///    (never for the default registry, even with the feature enabled).
-    /// 4. otherwise → `sparse_lu` (general; handles symmetric or not).
+    /// 3. otherwise → `sparse_lu` (general; handles symmetric or not).
     ///
     /// Auto never selects `cg`/`iccg`. Unlike explicit selection, auto does not
     /// hard-reject on `max_size`: it treats the limit as a preference and still
@@ -568,17 +526,6 @@ impl SolverRegistry {
                     reason: SelectionReason::SymmetricPositiveDiagonal,
                 });
             }
-        }
-
-        // PARDISO is used only if a PARDISO factory is actually registered. It
-        // is NOT part of `SolverRegistry::default()`, so this never fires for
-        // the default registry even when the feature is compiled in.
-        #[cfg(feature = "pardiso")]
-        if self.get("pardiso").is_some() {
-            return Ok(SolverSelectionInfo {
-                solver_name: "pardiso".to_string(),
-                reason: SelectionReason::LargeSystem,
-            });
         }
 
         if self.get("sparse_lu").is_some() {
@@ -661,10 +608,6 @@ impl Default for SolverRegistry {
         registry.register(Box::new(CgSolverFactory));
         registry.register(Box::new(IccgSolverFactory));
 
-        // PARDISO is NOT registered by default - it's a stub for the unified interface.
-        // The real PARDISO implementation in solvers.rs is for augmented Lagrange systems.
-        // Users must explicitly create it if needed.
-
         registry
     }
 }
@@ -736,27 +679,6 @@ impl LinearSolverFactory for IccgSolverFactory {
     }
     fn capabilities(&self) -> SolverCapabilities {
         SolverCapabilities::iccg()
-    }
-}
-
-// PARDISO is deliberately NOT registered by `SolverRegistry::default()`: the
-// unified wrapper (`PardisoSolverWrapper`) is a stub whose `factor()` always
-// returns an error, so it is not a usable general-purpose `LinearSolver` yet.
-// The factory is kept for callers that want to register it explicitly once a
-// real implementation exists; it is therefore never constructed in-tree.
-#[cfg(feature = "pardiso")]
-#[allow(dead_code)]
-struct PardisoSolverFactory;
-#[cfg(feature = "pardiso")]
-impl LinearSolverFactory for PardisoSolverFactory {
-    fn create(&self) -> Box<dyn LinearSolver> {
-        Box::new(PardisoSolverWrapper::new())
-    }
-    fn name(&self) -> &'static str {
-        "pardiso"
-    }
-    fn capabilities(&self) -> SolverCapabilities {
-        SolverCapabilities::pardiso()
     }
 }
 

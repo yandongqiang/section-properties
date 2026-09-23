@@ -3,7 +3,7 @@
 //! Provides triangular mesh generation (ear clipping, Delaunay) and
 //! linear elastic FEM solver for section analysis.
 
-pub mod fem;
+pub(crate) mod fem;
 pub mod fem_analysis;
 pub mod triangulation;
 

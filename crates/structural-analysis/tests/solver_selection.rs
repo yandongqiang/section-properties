@@ -592,47 +592,6 @@ fn test_max_size_validation() {
 }
 
 // ===========================================================================
-// H. PARDISO is not a default registry backend
-// ===========================================================================
-
-#[test]
-fn test_pardiso_not_available_by_default() {
-    let registry = SolverRegistry::default();
-
-    // Not registered (the unified wrapper is a stub), so it is never claimed.
-    assert!(
-        !registry.list().contains(&"pardiso".to_string()),
-        "pardiso must not be registered by default"
-    );
-
-    let a = spd_tridiagonal(4);
-    let err = match registry.create_selected(&a, &SolverSelection::pardiso()) {
-        Ok(_) => panic!("pardiso must not be selectable from the default registry"),
-        Err(e) => e,
-    };
-    assert!(
-        matches!(err, SolverError::Unsupported(_)),
-        "expected Unsupported, got {:?}",
-        err
-    );
-
-    // Auto must not claim PARDISO for the default registry, even for a very
-    // large system.
-    let info = registry
-        .select(&nonsymmetric(20000), &SolverSelection::Auto)
-        .unwrap();
-    assert!(
-        info.solver_name != "pardiso",
-        "auto claimed pardiso: {:?}",
-        info
-    );
-    println!(
-        "[pardiso] not registered; auto picked '{}'",
-        info.solver_name
-    );
-}
-
-// ===========================================================================
 // I. solver_name must not remain stale after a failed solve
 // ===========================================================================
 

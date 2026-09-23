@@ -13,6 +13,3 @@ categories = ["science", "mathematics"]
 [dependencies]
 section-properties = { path = "../section-properties", version = "0.4" }
 thiserror = "1.0"
-
-[features]
-pardiso = ["section-properties/pardiso"]

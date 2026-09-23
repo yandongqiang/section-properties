@@ -3,8 +3,7 @@
 //! Tests cover:
 //! 1. auto_select() does not pick CG/ICCG for symmetric indefinite matrices
 //! 2. auto_select() does not pick CG/ICCG for non-symmetric matrices
-//! 3. PARDISO stub is not auto-selected
-//! 4. solve() before factor() returns NotFactorized
+//! 3. solve() before factor() returns NotFactorized
 //! 5. solve_many() consistency
 //! 6. DenseGaussian forced row-pivot correctness (regression for a8b535e)
 
@@ -126,27 +125,6 @@ fn test_auto_select_small_matrix_uses_dense() {
         solver.name(),
         "dense",
         "Small matrix should use dense solver"
-    );
-}
-
-#[test]
-fn test_pardiso_stub_not_auto_selected() {
-    let registry = SolverRegistry::default();
-
-    // PARDISO should not be in the registry by default
-    let names = registry.list();
-    assert!(
-        !names.contains(&"pardiso".to_string()),
-        "PARDISO stub should not be registered by default"
-    );
-
-    // Even if explicitly created, auto_select should not pick it
-    let a = make_spd(10000); // Large matrix
-    let solver = registry.auto_select(&a).expect("Should find a solver");
-    assert_ne!(
-        solver.name(),
-        "pardiso",
-        "auto_select should not pick PARDISO stub"
     );
 }
 

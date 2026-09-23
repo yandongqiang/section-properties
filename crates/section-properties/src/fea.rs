@@ -1085,7 +1085,7 @@ impl SparseMatrix {
         self.diag[i]
     }
 
-    /// Get CSR data for external solvers (PARDISO, etc.).
+    /// Get CSR data for external solvers.
     pub fn csr_data(&self) -> (&[usize], &[usize], &[f64]) {
         if !self.compressed {
             panic!("SparseMatrix::compress() must be called before csr_data");
@@ -1694,16 +1694,10 @@ pub struct DirectLagrangeSolver {
 pub enum LagrangeKernel {
     /// Skyline LDL^T of the regularised leading block (always available).
     Skyline,
-    /// Intel MKL PARDISO (requires the `pardiso` feature and MKL runtime).
-    #[cfg(feature = "pardiso")]
-    Pardiso,
 }
 
 enum LagrangeKernelInstance {
     Skyline(SkylineLdlt),
-    /// PARDISO needs &mut for its internal solve phases.
-    #[cfg(feature = "pardiso")]
-    Pardiso(std::sync::Mutex<crate::fea::solvers::pardiso::PardisoSolver>),
 }
 
 /// Options controlling the direct Lagrangian solver behavior.
@@ -1790,11 +1784,6 @@ impl DirectLagrangeSolver {
                 };
                 LagrangeKernelInstance::Skyline(m)
             }
-            #[cfg(feature = "pardiso")]
-            LagrangeKernel::Pardiso => LagrangeKernelInstance::Pardiso(std::sync::Mutex::new(
-                crate::fea::solvers::pardiso::PardisoSolver::new(k, c)
-                    .map_err(|_| crate::fea::FemError::SingularMatrix)?,
-            )),
         };
         Ok(Self {
             n: k.n,
@@ -1827,14 +1816,6 @@ impl DirectLagrangeSolver {
                     .map(|(&a, &b)| a - lambda * b)
                     .collect();
                 Ok((u, lambda))
-            }
-            #[cfg(feature = "pardiso")]
-            LagrangeKernelInstance::Pardiso(p) => {
-                // The augmented solve yields lambda as the last unknown.
-                p.lock()
-                    .unwrap()
-                    .solve_with_multiplier(f)
-                    .map_err(|e| crate::fea::FemError::ConvergenceFailed)
             }
         }
     }

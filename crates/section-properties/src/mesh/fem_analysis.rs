@@ -6,8 +6,8 @@
 
 use crate::fea::FemError;
 use crate::geometry::{Point, Polygon};
-use crate::mesh::fem::StressResult;
 use crate::material::Material;
+use crate::mesh::fem::StressResult;
 use crate::mesh::{Mesh, MeshParams, mesh_section};
 use crate::section::Section;
 use crate::section_library::CompositeSection;

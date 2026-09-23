@@ -24,7 +24,7 @@ This crate is part of the `section-properties` workspace. Structural analysis
   compound-geometry validation.
 - **Finite-element warping analysis** (`mesh`, `fea`, `plastic::warping_fem`):
   TRI3/TRI6 meshing, sparse direct and iterative solvers (sparse LU, skyline
-  LDLᵀ, CG, ICCG, optional Intel MKL PARDISO), and warping/torsion constants.
+  LDLᵀ, CG, ICCG), and warping/torsion constants.
 - **Plastic analysis** (`plastic`): section classification (EN 1993-1-1 /
   AISC 360), plastic section moduli, interaction diagrams, and torsion analysis.
 - **Cold-formed steel** (`cold_formed_analysis`): effective width method,
@@ -75,17 +75,6 @@ Requires Rust 1.85+ (edition 2024).
 cargo build
 cargo test
 ```
-
-### PARDISO backend (optional)
-
-To use the Intel MKL PARDISO direct solver, enable the feature and run within a
-full oneAPI/MKL environment:
-
-```bash
-cargo build --release --features pardiso
-```
-
-See [`docs/PARDISO.md`](../../docs/PARDISO.md) for details and known limitations.
 
 ## Documentation
 

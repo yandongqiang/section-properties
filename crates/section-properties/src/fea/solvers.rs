@@ -14,8 +14,6 @@ pub enum SolverKind {
     PcG,
     /// Incomplete-Cholesky (IC(0)) preconditioned conjugate gradient.
     Iccg,
-    /// Intel MKL PARDISO via FFI (requires the `pardiso` feature and MKL).
-    Pardiso,
 }
 
 /// Direct solver types (factor once, solve many).
@@ -23,8 +21,6 @@ pub enum SolverKind {
 pub enum DirectSolver {
     SparseLu,
     SkylineLdlt,
-    #[cfg(feature = "pardiso")]
-    Pardiso,
 }
 
 /// Iterative solver types.
@@ -38,8 +34,6 @@ pub enum IterativeSolver {
 pub enum FactoredDirectSolver {
     Lu(SparseLu),
     Ldlt(SkylineLdlt),
-    #[cfg(feature = "pardiso")]
-    Pardiso(crate::fea::solvers::pardiso::PardisoSolver),
 }
 
 impl FactoredDirectSolver {
@@ -53,15 +47,6 @@ impl FactoredDirectSolver {
                 SkylineLdlt::factor(matrix)
                     .map_err(|e| SolverError::FactorizationFailed(e.to_string()))?,
             )),
-            #[cfg(feature = "pardiso")]
-            DirectSolver::Pardiso => {
-                // PARDISO requires the constraint vector for the augmented system
-                // This is a limitation - we'll need to handle this separately
-                Err(SolverError::NotImplemented(
-                    "PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead."
-                        .to_string(),
-                ))
-            }
         }
     }
 
@@ -72,10 +57,6 @@ impl FactoredDirectSolver {
             FactoredDirectSolver::Ldlt(l) => l
                 .solve(b)
                 .map_err(|e| SolverError::SolveFailed(e.to_string())),
-            #[cfg(feature = "pardiso")]
-            FactoredDirectSolver::Pardiso(_) => Err(SolverError::NotImplemented(
-                "PARDISO solve not implemented in this context".to_string(),
-            )),
         }
     }
 }
@@ -153,7 +134,6 @@ impl SparseSolver {
         match kind {
             SolverKind::SparseLu => Ok(SparseSolver { direct: FactoredDirectSolver::factor(DirectSolver::SparseLu, matrix).map_err(|e| e.to_string())? }),
             SolverKind::SkylineLdlt => Ok(SparseSolver { direct: FactoredDirectSolver::factor(DirectSolver::SkylineLdlt, matrix).map_err(|e| e.to_string())? }),
-            SolverKind::Pardiso => Err("PARDISO factor requires constraint vector. Use DirectLagrangeSolver instead.".to_string()),
             SolverKind::PcG | SolverKind::Iccg => Err("iterative solvers (PCG, ICCG) do not support factor(). Use solve_iterative() or IterativeSolverInstance.".to_string()),
         }
     }
@@ -225,7 +205,7 @@ impl SparseSolver {
 // The input sparse matrix is converted to a dense n×n matrix for Gaussian
 // elimination with partial pivoting. Time complexity: O(n³), Space: O(n²).
 // Suitable for n up to ~2000-3000 on typical hardware.
-// For larger problems, a true sparse LU (e.g. SuiteSparse, PARDISO) should be used.
+// For larger problems, a true sparse LU (e.g. SuiteSparse) should be used.
 //
 /// Sparse LU factorisation P A = L U with true row partial pivoting.
 pub struct SparseLu {
@@ -804,377 +784,5 @@ pub fn iccg_solve(a: &SparseMatrix, b: &[f64], max_iter: usize, tol: f64) -> CgR
         iterations,
         residual: r.iter().map(|v| v * v).sum::<f64>().sqrt(),
         status: CgStatus::MaxIterations,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PARDISO (Intel MKL) optional FFI binding.
-// ---------------------------------------------------------------------------
-#[cfg(feature = "pardiso")]
-pub mod pardiso {
-    //! Direct solve via Intel MKL PARDISO (`mkl_rt`). Enable with
-    //! `--features pardiso`; requires `mkl_rt.3.dll` (or equivalent) on PATH.
-    use super::super::{CscMatrix, NEAR_ZERO_TOL_BASE, SkylineLdlt, SparseMatrix};
-    use std::os::raw::c_void;
-
-    #[cfg_attr(target_os = "windows", link(name = "mkl_rt.2", kind = "raw-dylib"))]
-    #[cfg_attr(not(target_os = "windows"), link(name = "mkl_rt.2"))]
-    unsafe extern "C" {
-        fn pardisoinit(
-            pt: *mut c_void,
-            maxfct: *const i32,
-            mnum: *const i32,
-            iparm: *mut i32,
-            msglvl: *const i32,
-            error: *mut i32,
-        );
-        fn pardiso(
-            pt: *mut c_void,
-            maxfct: *const i32,
-            mnum: *const i32,
-            mtype: *const i32,
-            phase: *const i32,
-            n: *const i32,
-            a: *const f64,
-            ia: *const i32,
-            ja: *const i32,
-            perm: *const i32,
-            nrhs: *const i32,
-            iparm: *mut i32,
-            msglvl: *const i32,
-            b: *const f64,
-            x: *mut f64,
-            error: *mut i32,
-        );
-    }
-
-    const MAXFCT: i32 = 1;
-    const MNUM: i32 = 1;
-    /// Symmetric indefinite matrix.
-    const MTYPE: i32 = -2;
-
-    /// PARDISO-backed direct solver for the augmented Lagrangian system.
-    pub struct PardisoSolver {
-        /// Leading block size (K is leading_n x leading_n)
-        leading_n: usize,
-        /// Augmented matrix size (leading_n + 1)
-        n: usize,
-        pt: Vec<u64>,
-        iparm: Vec<i32>,
-        csc: CscMatrix,
-        ia: Vec<i32>,
-        ja: Vec<i32>,
-        vals: Vec<f64>,
-        factorised: bool,
-        /// Constraint vector c for Lagrange multiplier computation.
-        c: Vec<f64>,
-        /// Scale factor for scale-invariant tolerances (max diagonal entry of leading block).
-        scale: f64,
-    }
-
-    unsafe impl Send for PardisoSolver {}
-
-    impl PardisoSolver {
-        pub fn new(k: &SparseMatrix, c: &[f64]) -> Result<Self, String> {
-            let csc = super::super::DirectLagrangeSolver::assemble_torsion_lagrange(k, c);
-            let leading_n = csc.n_rows - 1; // leading block size
-            let n = leading_n + 1; // augmented matrix size
-
-            // Compute scale from leading block K (max diagonal)
-            let mut scale = 0.0f64;
-            let mut k_compressed = k.clone();
-            k_compressed.compress();
-            for i in 0..leading_n {
-                scale = scale.max(k_compressed.matvec_diag(i).abs());
-            }
-            let scale = scale.max(1.0);
-
-            let mut s = Self {
-                leading_n,
-                n,
-                pt: vec![0u64; 64],
-                iparm: vec![0i32; 64],
-                csc,
-                ia: Vec::new(),
-                ja: Vec::new(),
-                vals: Vec::new(),
-                factorised: false,
-                c: c.to_vec(),
-                scale,
-            };
-            unsafe {
-                let mut err: i32 = 0;
-                let msglvl: i32 = 0;
-                pardisoinit(
-                    s.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT,
-                    &MNUM,
-                    s.iparm.as_mut_ptr(),
-                    &msglvl,
-                    &mut err,
-                );
-                if err != 0 {
-                    return Err(format!("pardisoinit failed: {err}"));
-                }
-                // Zero-based indexing for ia/ja arrays.
-                s.iparm[34] = 1;
-            }
-            Ok(s)
-        }
-
-        fn ensure_factorised(&mut self) -> Result<(), String> {
-            if self.factorised {
-                return Ok(());
-            }
-            self.ia = self.csc.col_ptr.iter().map(|&v| v as i32).collect();
-            self.ja = self.csc.rows.iter().map(|&v| v as i32).collect();
-            self.vals = self.csc.vals.clone();
-
-            unsafe {
-                let mut err: i32 = 0;
-                let phase: i32 = 13; // analyse + numerical factorisation
-                let n = self.n as i32;
-                let nrhs: i32 = 0;
-                let msglvl: i32 = 0;
-                let dummy_b: f64 = 0.0;
-                let mut dummy_x: f64 = 0.0;
-                pardiso(
-                    self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT,
-                    &MNUM,
-                    &MTYPE,
-                    &phase,
-                    &n,
-                    self.vals.as_ptr(),
-                    self.ia.as_ptr(),
-                    self.ja.as_ptr(),
-                    std::ptr::null(),
-                    &nrhs,
-                    self.iparm.as_mut_ptr(),
-                    &msglvl,
-                    &dummy_b,
-                    &mut dummy_x,
-                    &mut err,
-                );
-                if err != 0 {
-                    return Err(format!("pardiso factorisation failed: {err}"));
-                }
-            }
-            self.factorised = true;
-            Ok(())
-        }
-
-        /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns (u, lam).
-        pub fn solve_with_multiplier(&mut self, f: &[f64]) -> Result<(Vec<f64>, f64), String> {
-            self.ensure_factorised()?;
-            let n = self.n; // augmented matrix size
-            let mut b = f.to_vec();
-            b.push(0.0); // size becomes n
-            let mut x = vec![0.0f64; n];
-
-            unsafe {
-                let mut err: i32 = 0;
-                let phase: i32 = 33; // solve + iterative refinement
-                let nn = n as i32; // pass augmented size directly
-                let nrhs: i32 = 1;
-                let msglvl: i32 = 0;
-                pardiso(
-                    self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT,
-                    &MNUM,
-                    &MTYPE,
-                    &phase,
-                    &nn,
-                    self.vals.as_ptr(),
-                    self.ia.as_ptr(),
-                    self.ja.as_ptr(),
-                    std::ptr::null(),
-                    &nrhs,
-                    self.iparm.as_mut_ptr(),
-                    &msglvl,
-                    b.as_ptr(),
-                    x.as_mut_ptr(),
-                    &mut err,
-                );
-                if err != 0 {
-                    return Err(format!("pardiso solve failed: {err}"));
-                }
-            }
-
-            let lam = x.pop().unwrap_or(0.0);
-            Ok((x, lam))
-        }
-
-        /// Solve [K c; c^T 0] [u; lam] = [f; 0]; returns u.
-        pub fn solve_direct_lagrange(&mut self, f: &[f64]) -> Result<Vec<f64>, String> {
-            self.ensure_factorised()?;
-            let n = self.n; // augmented matrix size
-            let mut b = f.to_vec();
-            b.push(0.0); // size becomes n
-            let mut x = vec![0.0f64; n];
-
-            unsafe {
-                let mut err: i32 = 0;
-                let phase: i32 = 33; // solve + iterative refinement
-                let nn = n as i32;
-                let nrhs: i32 = 1;
-                let msglvl: i32 = 0;
-                pardiso(
-                    self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT,
-                    &MNUM,
-                    &MTYPE,
-                    &phase,
-                    &nn,
-                    self.vals.as_ptr(),
-                    self.ia.as_ptr(),
-                    self.ja.as_ptr(),
-                    std::ptr::null(),
-                    &nrhs,
-                    self.iparm.as_mut_ptr(),
-                    &msglvl,
-                    b.as_ptr(),
-                    x.as_mut_ptr(),
-                    &mut err,
-                );
-                if err != 0 {
-                    return Err(format!("pardiso solve failed: {err}"));
-                }
-            }
-
-            x.pop();
-            Ok(x)
-        }
-
-        /// Multiplier error metric |lam| / max|u| (Python's u[-1]/max|u|).
-        pub fn multiplier_error(&self, c: &[f64], f: &[f64], u: &[f64]) -> f64 {
-            // lam can be recovered from the augmented solve; approximate via
-            // residual of the constraint row is out of scope here, so mirror
-            // the skyline implementation by refactoring K once more.
-            let ldlt = match SkylineLdlt::factor(&{
-                let m = {
-                    // leading block from CSC columns 0..leading_n
-                    let leading_n = self.leading_n;
-                    let mut sm = SparseMatrix::new(leading_n);
-                    for col in 0..leading_n {
-                        for k in self.csc.col_ptr[col]..self.csc.col_ptr[col + 1] {
-                            let r = self.csc.rows[k];
-                            if r < leading_n && col < leading_n {
-                                sm.add(r, col, self.csc.vals[k]);
-                            }
-                        }
-                    }
-                    sm.compress();
-                    sm
-                };
-                m
-            }) {
-                Ok(l) => l,
-                Err(_) => return f64::INFINITY,
-            };
-            let w1 = ldlt.solve(f).unwrap_or_else(|_| vec![0.0; c.len()]);
-            let w2 = ldlt.solve(c).unwrap_or_else(|_| vec![0.0; c.len()]);
-            let mut ct_w2 = 0.0f64;
-            for (ci, wi) in c.iter().zip(w2.iter()) {
-                ct_w2 += ci * wi;
-            }
-            let mut ct_w1 = 0.0f64;
-            for (ci, wi) in c.iter().zip(w1.iter()) {
-                ct_w1 += ci * wi;
-            }
-            // Scale-invariant tolerance for Lagrange multiplier
-            let near_zero_tol = NEAR_ZERO_TOL_BASE * self.scale.max(1.0);
-            // u = w1 - lambda*w2 with constraint c^T u = 0 gives
-            // lambda = (c^T w1) / (c^T w2) = ct_w1 / ct_w2.
-            let lambda = if ct_w2.abs() > near_zero_tol {
-                ct_w1 / ct_w2
-            } else {
-                0.0
-            };
-            let max_u = u.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-            if max_u > 0.0 {
-                lambda.abs() / max_u
-            } else {
-                f64::INFINITY
-            }
-        }
-    }
-
-    impl Drop for PardisoSolver {
-        fn drop(&mut self) {
-            if !self.factorised {
-                return;
-            }
-            unsafe {
-                let mut err: i32 = 0;
-                let phase: i32 = -1; // release memory
-                let n = self.n as i32;
-                let nrhs: i32 = 0;
-                let msglvl: i32 = 0;
-                let dummy: f64 = 0.0;
-                let mut x_dummy: f64 = 0.0;
-                pardiso(
-                    self.pt.as_mut_ptr() as *mut c_void,
-                    &MAXFCT,
-                    &MNUM,
-                    &MTYPE,
-                    &phase,
-                    &n,
-                    self.vals.as_ptr(),
-                    self.ia.as_ptr(),
-                    self.ja.as_ptr(),
-                    std::ptr::null(),
-                    &nrhs,
-                    self.iparm.as_mut_ptr(),
-                    &msglvl,
-                    &dummy,
-                    &mut x_dummy,
-                    &mut err,
-                );
-            }
-        }
-    }
-}
-#[cfg(all(feature = "pardiso", test))]
-mod pardiso_tests {
-    use super::pardiso::PardisoSolver;
-    use crate::fea::SparseMatrix;
-
-    #[test]
-    fn pardiso_laplacian_smoke() {
-        // Requires mkl_rt.3.dll on PATH at runtime.
-        let n = 20;
-        let mut k = SparseMatrix::new(n);
-        for i in 0..n {
-            k.add(i, i, 2.0);
-            if i + 1 < n {
-                k.add(i, i + 1, -1.0);
-                k.add(i + 1, i, -1.0);
-            }
-        }
-        let c: Vec<f64> = vec![1.0; n];
-        let f: Vec<f64> = (0..n).map(|i| (i as f64) * 0.05).collect();
-
-        let mut s = PardisoSolver::new(&k, &c).expect("pardiso init");
-        let u = s.solve_direct_lagrange(&f).expect("pardiso solve");
-        assert_eq!(u.len(), n);
-        // residual check
-        let mut kmat = SparseMatrix::new(n);
-        for i in 0..n {
-            kmat.add(i, i, 2.0);
-            if i + 1 < n {
-                kmat.add(i, i + 1, -1.0);
-                kmat.add(i + 1, i, -1.0);
-            }
-        }
-        kmat.compress();
-        let prod = kmat.matvec(&u);
-        for i in 0..n {
-            assert!(
-                (prod[i] - f[i] + c[i]).abs() < 1e-6 || (prod[i] - f[i]).abs() < 1e-6,
-                "row {} residual too large",
-                i
-            );
-        }
     }
 }

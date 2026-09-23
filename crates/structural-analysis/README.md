@@ -52,17 +52,6 @@ cargo build
 cargo test
 ```
 
-### PARDISO backend (optional)
-
-To use the Intel MKL PARDISO direct solver, enable the feature and run within a
-full oneAPI/MKL environment:
-
-```bash
-cargo build --release --features pardiso
-```
-
-See [`docs/PARDISO.md`](../../docs/PARDISO.md) for details and known limitations.
-
 ## Documentation
 
 Generate API docs with:
