@@ -209,23 +209,6 @@ impl SolverError {
     }
 }
 
-/// Trait for a factored solver that can solve multiple RHS
-pub trait FactoredSolver: Send + Sync {
-    /// Solve for a single RHS
-    fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, SolverError>;
-
-    /// Solve for multiple RHS efficiently
-    fn solve_many(&self, rhs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, SolverError> {
-        rhs.iter().map(|rhs| self.solve(rhs)).collect()
-    }
-
-    /// Get solver capabilities
-    fn capabilities(&self) -> SolverCapabilities;
-
-    /// Get solver name
-    fn name(&self) -> &'static str;
-}
-
 /// Trait for linear solvers that can factorize and solve
 pub trait LinearSolver: Send + Sync {
     /// Get solver name
@@ -244,22 +227,6 @@ pub trait LinearSolver: Send + Sync {
     fn solve_many(&self, rhs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, SolverError> {
         rhs.iter().map(|rhs| self.solve(rhs)).collect()
     }
-}
-
-/// Combined trait for solvers that support both factor+solve and Lagrange systems
-pub trait LinearSolverWithConstraints: LinearSolver {
-    /// Solve a Lagrange system [K C^T; C 0] [u; lambda] = [f; 0]
-    fn solve_lagrange(&self, c: &[f64], f: &[f64]) -> Result<(Vec<f64>, f64), SolverError>;
-}
-
-/// Solver backend type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SolverBackend {
-    Dense,
-    SkylineLdlt,
-    SparseLu,
-    Cg,
-    Iccg,
 }
 
 /// How a linear solver is chosen for a system.

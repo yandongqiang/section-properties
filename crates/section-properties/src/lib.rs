@@ -93,10 +93,8 @@ pub use crate::composite::{
     ElasticComposite,
 };
 pub use crate::fea::{
-    FemError, LagrangeKernel, SkylineLdlt, solver, solver::FactoredSolver, solver::LinearSolver,
-    solver::SelectionReason, solver::SolverBackend, solver::SolverCapabilities,
-    solver::SolverError, solver::SolverRegistry, solver::SolverSelection,
-    solver::SolverSelectionInfo, solvers,
+    FemError, solver, solver::SelectionReason, solver::SolverCapabilities, solver::SolverError,
+    solver::SolverRegistry, solver::SolverSelection,
 };
 /// Alias for the interactive HTML viewer export.
 pub use crate::io::to_interactive_html as to_html;
