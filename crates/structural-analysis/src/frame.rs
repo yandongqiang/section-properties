@@ -860,12 +860,13 @@ impl FrameModel {
     /// in the case references a node or member that does not exist.
     pub fn solve_case(&self, case: &LoadCase) -> Result<FrameAnalysisResult, FemError> {
         self.validate()?;
-        let model = self.inner_with_loads(
+        let mut model = self.inner_with_loads(
             case.nodal_forces(),
             case.distributed_loads(),
             case.point_loads(),
             case.applied_moments(),
         );
+        Self::apply_prescribed_displacements(&mut model, case.prescribed_displacements())?;
         let mut beam = BeamSolver::from_model(&model)?;
         if let Err(e) = beam.solve_configured() {
             let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
@@ -897,6 +898,16 @@ impl FrameModel {
         combo: &LoadCombination,
     ) -> Result<FrameAnalysisResult, FemError> {
         self.validate()?;
+        for (case, _) in combo.terms() {
+            if case.has_prescribed_displacements() {
+                return Err(FemError::InvalidInput(format!(
+                    "load case '{}' in combination '{}' contains prescribed displacements; \
+                     LoadCombination does not support prescribed displacement combination",
+                    case.name(),
+                    combo.name()
+                )));
+            }
+        }
         let mut merged = self.inner.clone();
         merged.nodal_forces.clear();
         merged.distributed_loads.clear();
@@ -1246,6 +1257,45 @@ impl FrameModel {
         m.applied_moments = applied_moments.to_vec();
         m
     }
+
+    /// Apply a load case's prescribed displacements to a BeamModel, overriding
+    /// existing constraints or adding new ones.
+    fn apply_prescribed_displacements(
+        model: &mut BeamModel,
+        prescribed: &[(usize, usize, f64)],
+    ) -> Result<(), FemError> {
+        for &(node_idx, dof, value) in prescribed {
+            model.try_override_dof(node_idx, dof, value)?;
+        }
+        Ok(())
+    }
+
+    /// Check that all prescribed displacements in a load case target DOFs that
+    /// are already constrained in the model.  Returns `Err` if any prescribed
+    /// DOF is currently free (which would change `K_ff` and invalidate a cached
+    /// factorisation).
+    fn check_prescribed_compatible(
+        &self,
+        prescribed: &[(usize, usize, f64)],
+    ) -> Result<(), FemError> {
+        let constrained: std::collections::HashSet<(usize, usize)> = self
+            .inner
+            .fixed_dofs
+            .iter()
+            .map(|&(n, d, _)| (n, d))
+            .collect();
+        for &(node_idx, dof, _) in prescribed {
+            if !constrained.contains(&(node_idx, dof)) {
+                return Err(FemError::InvalidInput(format!(
+                    "prescribed displacement at node {node_idx} DOF {dof} constrains a \
+                     previously free DOF; this changes K_ff and cannot reuse a cached \
+                     factorisation — use FrameModel::solve_case instead of \
+                     PreparedFrameAnalysis::solve_case"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Number of connected components of the member connectivity graph.
@@ -1410,6 +1460,40 @@ impl FrameAnalysisResult {
     /// Number of members in the solved frame.
     pub fn n_members(&self) -> usize {
         self.model.n_members()
+    }
+
+    pub(crate) fn support_dofs(&self) -> Vec<(usize, Dof)> {
+        let model = &self.model.inner;
+        let mut support_dofs = Vec::with_capacity(
+            model.fixed_dofs.len() + model.spring_supports.len() + 2 * model.inclined_rollers.len(),
+        );
+
+        support_dofs.extend(
+            model
+                .fixed_dofs
+                .iter()
+                .filter_map(|entry| Dof::try_from(entry.1).ok().map(|dof| (entry.0, dof))),
+        );
+        support_dofs.extend(
+            model
+                .spring_supports
+                .iter()
+                .filter_map(|entry| Dof::try_from(entry.1).ok().map(|dof| (entry.0, dof))),
+        );
+        for &(node, nx, ny, _) in &model.inclined_rollers {
+            if nx == 0.0 {
+                support_dofs.push((node, Dof::Uy));
+            } else if ny == 0.0 {
+                support_dofs.push((node, Dof::Ux));
+            } else {
+                support_dofs.push((node, Dof::Ux));
+                support_dofs.push((node, Dof::Uy));
+            }
+        }
+
+        support_dofs.sort_unstable_by_key(|(node, dof)| (*node, dof.index()));
+        support_dofs.dedup();
+        support_dofs
     }
 
     /// Full global displacement vector, laid out `[ux, uy, rz]` per node.
@@ -1641,12 +1725,15 @@ impl<'a> PreparedFrameAnalysis<'a> {
     /// member that does not exist.  [`FemError::SolverError`] if the
     /// back-substitution fails.
     pub fn solve_case(&self, case: &LoadCase) -> Result<FrameAnalysisResult, FemError> {
-        let model = self.model.inner_with_loads(
+        self.model
+            .check_prescribed_compatible(case.prescribed_displacements())?;
+        let mut model = self.model.inner_with_loads(
             case.nodal_forces(),
             case.distributed_loads(),
             case.point_loads(),
             case.applied_moments(),
         );
+        FrameModel::apply_prescribed_displacements(&mut model, case.prescribed_displacements())?;
         let mut beam = BeamSolver::from_model(&model)?;
         beam.set_solver(self.solver_selection.clone());
 
@@ -1693,6 +1780,16 @@ impl<'a> PreparedFrameAnalysis<'a> {
         &self,
         combo: &LoadCombination,
     ) -> Result<FrameAnalysisResult, FemError> {
+        for (case, _) in combo.terms() {
+            if case.has_prescribed_displacements() {
+                return Err(FemError::InvalidInput(format!(
+                    "load case '{}' in combination '{}' contains prescribed displacements; \
+                     LoadCombination does not support prescribed displacement combination",
+                    case.name(),
+                    combo.name()
+                )));
+            }
+        }
         let mut merged = self.model.inner.clone();
         merged.nodal_forces.clear();
         merged.distributed_loads.clear();

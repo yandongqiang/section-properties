@@ -9,7 +9,7 @@
 //! Both types reuse the existing load types ([`DistributedLoad`],
 //! [`PointLoad`], [`AppliedMoment`]) — no new load types are introduced.
 
-use crate::beam_fem::{AppliedMoment, DistributedLoad, FemError, PointLoad};
+use crate::beam_fem::{AppliedMoment, DistributedLoad, Dof, FemError, PointLoad};
 use crate::frame::{FrameModel, MemberHandle, NodeHandle};
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,7 @@ pub struct LoadCase {
     distributed_loads: Vec<DistributedLoad>,
     point_loads: Vec<PointLoad>,
     applied_moments: Vec<AppliedMoment>,
+    prescribed_displacements: Vec<(usize, usize, f64)>,
 }
 
 impl LoadCase {
@@ -64,6 +65,7 @@ impl LoadCase {
             distributed_loads: Vec::new(),
             point_loads: Vec::new(),
             applied_moments: Vec::new(),
+            prescribed_displacements: Vec::new(),
         }
     }
 
@@ -72,12 +74,13 @@ impl LoadCase {
         &self.name
     }
 
-    /// `true` if the case contains no loads.
+    /// `true` if the case contains no loads and no prescribed displacements.
     pub fn is_empty(&self) -> bool {
         self.nodal_forces.is_empty()
             && self.distributed_loads.is_empty()
             && self.point_loads.is_empty()
             && self.applied_moments.is_empty()
+            && self.prescribed_displacements.is_empty()
     }
 
     /// Apply a **global** nodal force `(fx, fy)` at `node`.
@@ -255,6 +258,64 @@ impl LoadCase {
         Ok(())
     }
 
+    /// Prescribe a non-zero displacement `value` at `(node, dof)`.
+    ///
+    /// This is a **support settlement** or **prescribed displacement** boundary
+    /// condition, not an external force.  The constrained DOF is removed from
+    /// the free system via static condensation; the reduced RHS is corrected
+    /// by `f_f -= K_fc · u_c` (see [`FrameModel::solve_case`]).
+    ///
+    /// # Units
+    ///
+    /// `value` is in the same units as the DOF: metres for `Ux`/`Uy`,
+    /// radians for `Rz`.
+    ///
+    /// # Sign convention
+    ///
+    /// Positive `value` is in the positive global direction of the DOF
+    /// (rightward for `Ux`, upward for `Uy`, counter-clockwise for `Rz`).
+    ///
+    /// # Interaction with model supports
+    ///
+    /// At solve time the prescribed displacement **overrides** any existing
+    /// constraint on the same DOF (e.g. from [`FrameModel::fix`] or
+    /// [`FrameModel::pin`]).  If the DOF is not already constrained, a new
+    /// constraint is added — this changes the constrained DOF set and
+    /// therefore `K_ff`; the factorisation in `PreparedFrameAnalysis` is
+    /// not reused in that case (an error is returned).
+    ///
+    /// # Interaction with [`LoadCombination`]
+    ///
+    /// Load combinations do **not** support prescribed displacements.  If any
+    /// case in a combination has prescribed displacements, [`solve_combination`]
+    /// returns [`FemError::InvalidInput`].
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `value` is non-finite.
+    ///
+    /// [`solve_combination`]: FrameModel::solve_combination
+    pub fn prescribed_displacement(
+        &mut self,
+        node: NodeHandle,
+        dof: Dof,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "prescribed displacement must be finite, got {value}"
+            )));
+        }
+        self.prescribed_displacements
+            .push((node.index(), dof.index(), value));
+        Ok(())
+    }
+
+    /// `true` if this case contains any prescribed displacements.
+    pub fn has_prescribed_displacements(&self) -> bool {
+        !self.prescribed_displacements.is_empty()
+    }
+
     /// Read access to the raw nodal forces (for assembly by the solver path).
     pub(crate) fn nodal_forces(&self) -> &[(usize, usize, f64)] {
         &self.nodal_forces
@@ -273,6 +334,11 @@ impl LoadCase {
     /// Read access to the raw applied moments.
     pub(crate) fn applied_moments(&self) -> &[AppliedMoment] {
         &self.applied_moments
+    }
+
+    /// Read access to the raw prescribed displacements `(node_idx, dof_idx, value)`.
+    pub(crate) fn prescribed_displacements(&self) -> &[(usize, usize, f64)] {
+        &self.prescribed_displacements
     }
 }
 
