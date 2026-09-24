@@ -3471,11 +3471,20 @@ impl BeamSolver {
     /// `f_end = f_equiv - K_local · u_local`, ordered
     /// `[N_i, V_i, M_i, N_j, V_j, M_j]`.
     ///
+    /// This is the single-element recovery used by
+    /// [`BeamAnalysisResult::element_end_forces`] and
+    /// [`FrameAnalysisResult::member_end_forces`]. It is O(1) in the number of
+    /// elements (it scans only the loads on this element, not all elements).
+    ///
     /// # Errors
     ///
+    /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds.
     /// Propagates errors from [`Self::element_local_displacement`] and
     /// [`Self::element_equivalent_nodal_forces`].
-    fn element_on_node_end_forces_local(&self, element_idx: usize) -> Result<[f64; 6], FemError> {
+    pub fn element_on_node_end_forces_local(
+        &self,
+        element_idx: usize,
+    ) -> Result<[f64; 6], FemError> {
         let element = self.model.elements.get(element_idx).ok_or_else(|| {
             FemError::InvalidInput(format!(
                 "Invalid element index: {} (max: {})",
@@ -3610,6 +3619,40 @@ impl BeamSolver {
         }
 
         Ok(results)
+    }
+
+    /// Element-on-node end forces in GLOBAL coordinates for a single element:
+    /// `f_global = Tᵀ · f_local`, ordered `[Fx_i, Fy_i, Mz_i, Fx_j, Fy_j, Mz_j]`.
+    ///
+    /// This is the single-element version of [`Self::element_end_forces_global`],
+    /// used by [`FrameAnalysisResult::member_end_forces_global`]. It is O(1) in
+    /// the number of elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds.
+    pub fn element_on_node_end_forces_global(
+        &self,
+        element_idx: usize,
+    ) -> Result<[f64; 6], FemError> {
+        let local = self.element_on_node_end_forces_local(element_idx)?;
+        let element = self.model.elements.get(element_idx).ok_or_else(|| {
+            FemError::InvalidInput(format!(
+                "Invalid element index: {} (max: {})",
+                element_idx,
+                self.model.elements.len().saturating_sub(1)
+            ))
+        })?;
+        let node_i = self.model.nodes[element.node_i].point();
+        let node_j = self.model.nodes[element.node_j].point();
+        let T = element.transformation_matrix(node_i, node_j);
+        let mut f_global = [0.0; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                f_global[i] += T[j][i] * local[j];
+            }
+        }
+        Ok(f_global)
     }
 
     /// Compute the internal section forces `N`, `V`, `M` at normalized position

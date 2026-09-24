@@ -1271,10 +1271,7 @@ impl FrameAnalysisResult {
     /// [`FemError::InvalidMember`] if the handle is not valid for this frame.
     pub fn member_end_forces(&self, member: MemberHandle) -> Result<[f64; 6], FemError> {
         let i = self.check_member(member)?;
-        let all = self.beam.element_end_forces()?;
-        all.get(i)
-            .copied()
-            .ok_or_else(|| FemError::InvalidMember(format!("member handle {} is out of range", i)))
+        self.beam.element_on_node_end_forces_local(i)
     }
 
     /// Member end forces transformed to **global** axes
@@ -1285,10 +1282,7 @@ impl FrameAnalysisResult {
     /// [`FemError::InvalidMember`] if the handle is not valid for this frame.
     pub fn member_end_forces_global(&self, member: MemberHandle) -> Result<[f64; 6], FemError> {
         let i = self.check_member(member)?;
-        let all = self.beam.element_end_forces_global()?;
-        all.get(i)
-            .copied()
-            .ok_or_else(|| FemError::InvalidMember(format!("member handle {} is out of range", i)))
+        self.beam.element_on_node_end_forces_global(i)
     }
 
     /// Section internal forces `N`, `V`, `M` (LOCAL) at `(member, xi)`.
