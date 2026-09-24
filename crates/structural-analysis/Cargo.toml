@@ -1,6 +1,7 @@
 [package]
 name = "structural-analysis"
 version = "0.1.0"
+authors = ["yandongqiang <yandongqiang@gmail.com>"]
 edition = "2024"
 rust-version = "1.85"
 description = "2D structural analysis: beam and frame FEM, solver selection, mechanism diagnostics."
@@ -11,6 +12,7 @@ documentation = "https://docs.rs/structural-analysis"
 readme = "README.md"
 keywords = ["structural", "analysis", "fem", "beam", "frame"]
 categories = ["science", "mathematics"]
+publish = false
 
 [dependencies]
 section-properties = { path = "../section-properties", version = "0.4" }

@@ -1,6 +1,7 @@
 [package]
 name = "section-properties"
 version = "0.4.0"
+authors = ["yandongqiang <yandongqiang@gmail.com>"]
 edition = "2024"
 rust-version = "1.85"
 description = "Structural cross-section properties: geometric/principal moments, section moduli, warping/torsion FEM, plastic, cold-formed, and fire analysis."
