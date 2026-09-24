@@ -1025,13 +1025,20 @@ impl BeamElement {
         result
     }
 
+    /// Compute the consistent nodal load vector for a uniform distributed load
+    /// (6 DOF) in LOCAL coordinates.
     ///
-    /// Local DOF ordering: [u_i, v_i, θ_i, u_j, v_j, θ_j]
+    /// This is a convenience wrapper around
+    /// [`Self::consistent_nodal_load_trapezoidal`] with `qx_end = qx` and
+    /// `qy_end = qy`.
+    ///
+    /// Local DOF ordering: `[u_i, v_i, θ_i, u_j, v_j, θ_j]`
+    ///
     /// Sign convention:
-    /// - qx > 0: tensile axial load (pulling beam in +x direction)
-    /// - qy > 0: upward transverse load (in +y direction)
+    /// - `qx > 0`: tensile axial load (pulling beam in +x direction)
+    /// - `qy > 0`: upward transverse load (in +y direction)
     ///
-    /// Returns a 6-element vector in local coordinates
+    /// Returns a 6-element vector in local coordinates.
     pub fn consistent_nodal_load(
         &self,
         node_i: Point,
@@ -1186,22 +1193,30 @@ impl BeamElement {
     }
 }
 
-/// Beam node with 3 DOF: [u, v, θ]
+/// Beam node with 3 DOF: `[u, v, θ]`.
+///
+/// The `id` field is the node's index in the [`BeamModel::nodes`] vector and
+/// determines its global DOF mapping: `dof(node, d) = 3*id + d`.
 #[derive(Debug, Clone, Copy)]
 pub struct BeamNode {
-    /// Node index
+    /// Node index (position in the model's node list)
     pub id: usize,
-    /// X coordinate
+    /// X coordinate `m`
     pub x: f64,
-    /// Y coordinate
+    /// Y coordinate `m`
     pub y: f64,
 }
 
 impl BeamNode {
+    /// Create a new beam node at `(x, y)` with the given `id`.
+    ///
+    /// The `id` should match the node's intended position in the model's node
+    /// list (0, 1, 2, …).
     pub fn new(id: usize, x: f64, y: f64) -> Self {
         Self { id, x, y }
     }
 
+    /// Return the node's coordinates as a [`Point`].
     pub fn point(&self) -> Point {
         Point::new(self.x, self.y)
     }
@@ -1408,6 +1423,9 @@ pub struct AppliedMoment {
 }
 
 impl AppliedMoment {
+    /// Create a new applied moment at `node_idx`.
+    ///
+    /// `value > 0` is counter-clockwise (positive `θ` direction).
     pub fn new(node_idx: usize, value: f64) -> Self {
         Self { node_idx, value }
     }
@@ -1561,6 +1579,7 @@ impl Default for BeamModel {
 }
 
 impl BeamModel {
+    /// Create an empty beam model with no nodes, elements, or loads.
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -1575,10 +1594,19 @@ impl BeamModel {
         }
     }
 
+    /// Add a node to the model.
+    ///
+    /// The node's `id` field should match its position in the node list
+    /// (0, 1, 2, …) for the DOF mapping `dof(node, d) = 3*id + d` to be
+    /// consistent.
     pub fn add_node(&mut self, node: BeamNode) {
         self.nodes.push(node);
     }
 
+    /// Add a beam element (member) to the model.
+    ///
+    /// The element references nodes by index. Element indices are assigned
+    /// sequentially (0, 1, 2, …) in the order they are added.
     pub fn add_element(&mut self, element: BeamElement) {
         self.elements.push(element);
     }
@@ -2132,48 +2160,6 @@ impl ReducedSystem {
     }
 }
 
-/// Beam FEM solver using the unified LinearSolver abstraction.
-///
-/// # Complete workflow
-///
-/// ```rust
-/// use structural_analysis::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof};
-/// use section_properties::material::Material;
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // 1. model: unit cantilever (E = A = I = 1, L = 1)
-/// let mut model = BeamModel::new();
-/// model.add_node(BeamNode::new(0, 0.0, 0.0));
-/// model.add_node(BeamNode::new(1, 1.0, 0.0));
-/// model.add_element(BeamElement::new(
-///     0,
-///     1,
-///     Material::new(1.0, 0.3, 1.0, "unit"),
-///     BeamSection::new(1.0, 1.0),
-/// )?);
-///
-/// // 2. boundary condition: clamp node 0 (typed DOF API)
-/// model.try_fix_node_with_values(0, 0.0, 0.0, 0.0)?;
-///
-/// // 3. load: global transverse force at the tip
-/// model.add_nodal_force(1, 1, -100.0);
-///
-/// // 4. solve
-/// let mut solver = BeamSolver::from_model(&model)?;
-/// solver.solve_configured()?;
-///
-/// // 5. post-process: typed displacement and reaction access
-/// let uy = solver.displacement_dof(1, Dof::Uy)?; // -P L^3 / 3EI
-/// let rz = solver.displacement_dof(1, Dof::Rz)?; // -P L^2 / 2EI
-/// let ry = solver.reaction_dof(0, Dof::Uy)?; // +P
-///
-/// assert!((uy + 100.0 / 3.0).abs() < 1e-9);
-/// assert!((rz + 50.0).abs() < 1e-9);
-/// assert!((ry - 100.0).abs() < 1e-9);
-/// # Ok(())
-/// # }
-/// ```
-
 /// Assemble the global load vector from the four load collections, using
 /// `model` for geometry (node coordinates, element connectivity, DOF mapping).
 ///
@@ -2329,6 +2315,58 @@ pub(crate) fn assemble_global_load_vector(
     Ok(f_global)
 }
 
+/// Beam FEM solver using the unified `LinearSolver` abstraction.
+///
+/// Owns a snapshot of the model (cloned at construction), the assembled global
+/// stiffness matrix, the global load vector, and the displacement solution.
+/// Boundary conditions are enforced by static condensation — no penalty
+/// parameters are used.
+///
+/// # Solver selection
+///
+/// The backend is chosen via [`SolverSelection`] (default: `Auto`). Use
+/// [`Self::set_solver`] to override before calling [`Self::solve_configured`],
+/// or pass a custom solver to [`Self::solve`].
+///
+/// # Complete workflow
+///
+/// ```rust
+/// use structural_analysis::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof};
+/// use section_properties::material::Material;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 1. model: unit cantilever (E = A = I = 1, L = 1)
+/// let mut model = BeamModel::new();
+/// model.add_node(BeamNode::new(0, 0.0, 0.0));
+/// model.add_node(BeamNode::new(1, 1.0, 0.0));
+/// model.add_element(BeamElement::new(
+///     0,
+///     1,
+///     Material::new(1.0, 0.3, 1.0, "unit"),
+///     BeamSection::new(1.0, 1.0),
+/// )?);
+///
+/// // 2. boundary condition: clamp node 0 (typed DOF API)
+/// model.try_fix_node_with_values(0, 0.0, 0.0, 0.0)?;
+///
+/// // 3. load: global transverse force at the tip
+/// model.add_nodal_force(1, 1, -100.0);
+///
+/// // 4. solve
+/// let mut solver = BeamSolver::from_model(&model)?;
+/// solver.solve_configured()?;
+///
+/// // 5. post-process: typed displacement and reaction access
+/// let uy = solver.displacement_dof(1, Dof::Uy)?; // -P L^3 / 3EI
+/// let rz = solver.displacement_dof(1, Dof::Rz)?; // -P L^2 / 2EI
+/// let ry = solver.reaction_dof(0, Dof::Uy)?; // +P
+///
+/// assert!((uy + 100.0 / 3.0).abs() < 1e-9);
+/// assert!((rz + 50.0).abs() < 1e-9);
+/// assert!((ry - 100.0).abs() < 1e-9);
+/// # Ok(())
+/// # }
+/// ```
 pub struct BeamSolver {
     /// Global stiffness matrix
     k_global: SparseMatrix,
@@ -2362,7 +2400,16 @@ pub struct BeamSolver {
 }
 
 impl BeamSolver {
-    /// Create a new BeamSolver from a BeamModel
+    /// Create a new `BeamSolver` from a `BeamModel`.
+    ///
+    /// Clones the model, assembles the global stiffness matrix, and applies
+    /// boundary conditions (static condensation). The model can be mutated
+    /// after this call without affecting the solver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FemError::InvalidModel`] if the model has no nodes, or if any
+    /// element references a node index that is out of bounds.
     pub fn from_model(model: &BeamModel) -> Result<Self, FemError> {
         let n_dof = model.n_dof();
         if n_dof == 0 {
@@ -3921,11 +3968,31 @@ impl BeamSolver {
     }
 }
 
-/// FemError for beam FEM
+/// Errors returned by beam and frame FEM operations.
+///
+/// Variants fall into three groups:
+///
+/// - **Model/validation** — [`InvalidModel`](Self::InvalidModel),
+///   [`InvalidNode`](Self::InvalidNode), [`InvalidMember`](Self::InvalidMember),
+///   [`ZeroLengthMember`](Self::ZeroLengthMember),
+///   [`DuplicateMember`](Self::DuplicateMember),
+///   [`OrphanNode`](Self::OrphanNode),
+///   [`DisconnectedStructure`](Self::DisconnectedStructure):
+///   the model is structurally invalid and cannot be solved.
+/// - **Input** — [`InvalidInput`](Self::InvalidInput): a parameter value is
+///   non-finite or out of the valid range.
+/// - **Solver** — [`SolverError`](Self::SolverError): the linear solver
+///   failed (singular matrix, non-convergence, etc.). Use
+///   [`Self::solver_error`] to extract the structured [`SolverError`].
+/// - **Constraint conflict** —
+///   [`ConflictingPrescribedDisplacement`](Self::ConflictingPrescribedDisplacement):
+///   the same DOF was given two different prescribed values.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum FemError {
+    /// The model is structurally invalid (e.g. no nodes, bad connectivity).
     #[error("Invalid model: {0}")]
     InvalidModel(String),
+    /// The linear solver failed.
     #[error("Solver error: {message}")]
     SolverError {
         /// The structured solver error that caused the failure.
@@ -3933,29 +4000,41 @@ pub enum FemError {
         /// Human-readable message, potentially including structural diagnosis.
         message: String,
     },
+    /// A parameter value is invalid (non-finite, out of range, etc.).
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     // ---- frame-level structural diagnostics (see `crate::frame`) ----------
+    /// A [`NodeHandle`](crate::frame::NodeHandle) does not refer to a valid node.
     #[error("Invalid node: {0}")]
     InvalidNode(String),
+    /// A [`MemberHandle`](crate::frame::MemberHandle) does not refer to a valid member.
     #[error("Invalid member: {0}")]
     InvalidMember(String),
+    /// A member has zero length (both endpoints coincide).
     #[error("Zero-length member: {0}")]
     ZeroLengthMember(String),
+    /// A duplicate member connects the same node pair as an existing one.
     #[error("Duplicate member: {0}")]
     DuplicateMember(String),
+    /// A node is not connected to any member.
     #[error("Orphan node: {0}")]
     OrphanNode(String),
+    /// The structure has multiple disconnected components.
     #[error("Disconnected structure: {0}")]
     DisconnectedStructure(String),
+    /// The same DOF was prescribed two different displacement values.
     #[error(
         "Conflicting prescribed displacement at node {node_idx}, DOF {dof}: \
              first value {first_value}, conflicting value {conflicting_value}"
     )]
     ConflictingPrescribedDisplacement {
+        /// Node index of the conflicting DOF.
         node_idx: usize,
+        /// DOF index (0 = ux, 1 = uy, 2 = rz).
         dof: usize,
+        /// The first prescribed value.
         first_value: f64,
+        /// The conflicting prescribed value.
         conflicting_value: f64,
     },
 }
@@ -3979,7 +4058,9 @@ impl From<SolverError> for FemError {
     }
 }
 
-/// High-level API for beam analysis
+/// Closed-form analytical solutions for simple beam configurations.
+///
+/// Provided for verification and quick estimates — not used by the FEM solver.
 pub struct BeamAnalysis;
 
 impl BeamAnalysis {

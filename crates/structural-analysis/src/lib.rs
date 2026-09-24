@@ -3,10 +3,66 @@
 //! 2D structural analysis: beam and frame finite element analysis,
 //! solver selection, and mechanism diagnostics.
 //!
-//! Depends on [`section-properties`](section_properties) for cross-section
-//! properties, materials, and numerical infrastructure.
+//! ## Purpose
 //!
-//! # Quick start — frame analysis
+//! Provides linear static analysis of 2D Euler–Bernoulli beam and frame
+//! structures. Built on top of [`section-properties`](section_properties) for
+//! cross-section properties, materials, and numerical infrastructure (sparse
+//! matrix assembly, linear solvers).
+//!
+//! ## Current scope
+//!
+//! - **Elements**: 2D Euler–Bernoulli beam/frame element (3 DOF per node:
+//!   `ux`, `uy`, `rz`)
+//! - **Analysis**: linear static
+//! - **Supports**: fixed, pinned, roller (x/y), inclined roller, spring,
+//!   arbitrary DOF restraint
+//! - **End releases**: hinge (rotation release) at either or both member ends
+//! - **Loads**: nodal forces, nodal moments, uniform distributed loads,
+//!   trapezoidal distributed loads, member point loads, applied moments
+//! - **Load cases & combinations**: named load cases with linear combination
+//!   factors
+//! - **Results**: displacements, reactions, member end forces (local & global),
+//!   section forces `N(x)`, `V(x)`, `M(x)`, force diagrams
+//! - **Diagnostics**: mechanism detection, rigid-body mode classification,
+//!   ill-conditioning reporting
+//! - **Solvers**: dense Gaussian, skyline LDLᵀ, sparse LU, CG, ICCG (via
+//!   `section-properties`)
+//!
+//! **Not supported** (and not claimed): truss elements, plate/shell/solid
+//! elements, nonlinear analysis, dynamic analysis, buckling, design code
+//! combinations, envelope generation.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! section-properties          ← cross-section properties, materials, solvers
+//!         ↑
+//!         │
+//! structural-analysis         ← structural model, elements, loads, solve
+//! ```
+//!
+//! `structural-analysis` depends on `section-properties` (one-way). The solver
+//! infrastructure (`LinearSolver`, `SparseMatrix`, etc.) lives in
+//! `section-properties::fea`; this crate provides the structural model and
+//! delegates the linear algebra.
+//!
+//! ## Basic workflow
+//!
+//! ```text
+//! create model → add nodes → add members → define supports
+//!              → apply loads → solve → inspect results
+//! ```
+//!
+//! Two API levels are available:
+//!
+//! - **`BeamModel` / `BeamSolver`** — lower-level API with raw node/element
+//!   indices. See [`beam_fem`].
+//! - **`FrameModel`** — higher-level façade with typed `NodeHandle` /
+//!   `MemberHandle`, support vocabulary, load cases, and equilibrium
+//!   reporting. See [`frame`].
+//!
+//! ## Quick start — frame analysis
 //!
 //! ```rust
 //! use structural_analysis::{FrameModel, BeamSection, Dof};
@@ -28,6 +84,36 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Conventions
+//!
+//! - **Global DOF**: `[ux, uy, rz]` per node; `rz` is counter-clockwise
+//!   positive. Index mapping: `dof(node, d) = 3*node + d`.
+//! - **Nodal loads**: in **global** coordinates.
+//! - **Member loads** (distributed, point): in the member's **local**
+//!   coordinate system (local x from `node_i` to `node_j`, local y
+//!   transverse).
+//! - **Applied moments**: in **global** coordinates (counter-clockwise
+//!   positive).
+//! - **Reactions**: `R = K_original · u - f_global` (global).
+//! - **Member end forces**: `f_end = f_equiv - K_e · u_e` (element-on-node,
+//!   local axes by default; global variant available).
+//! - **Section forces**: `N` (tension positive), `V` (dM/dx), `M` (sagging
+//!   positive). See [`beam_fem::SectionForces`].
+//! - **Springs**: `reaction = -k · displacement`; stiffness added to the
+//!   global diagonal, DOF remains free.
+//! - **Inclined rollers**: `(nx, ny)` is the constrained direction
+//!   (auto-normalized); the orthogonal direction is free.
+//! - **End releases**: remove the moment transfer between member end and node;
+//!   the node's rotational DOF is **not** removed from the global system.
+//!
+//! ## Limitations
+//!
+//! - Only 2D (planar) analysis.
+//! - Only Euler–Bernoulli beam kinematics (no shear deformation).
+//! - Parallel members between the same node pair are rejected.
+//! - A single connected structural system is required.
+//! - `publish = false` — this crate is workspace-only, not on crates.io.
 
 pub mod beam_fem;
 pub mod frame;

@@ -530,6 +530,11 @@ impl FrameModel {
         self.inner.add_element(element);
         Ok(MemberHandle(self.inner.elements.len() - 1))
     }
+    /// Fix a node: restrain all three DOFs (`ux`, `uy`, `rz`) to zero.
+    ///
+    /// This models a fully built-in (encastré) support.
+    ///
+    /// # Errors
     ///
     /// [`FemError::InvalidNode`] if the handle is not valid.
     /// [`FemError::ConflictingPrescribedDisplacement`] if any of the node's
