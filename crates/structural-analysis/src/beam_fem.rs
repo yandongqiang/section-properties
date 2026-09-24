@@ -3129,6 +3129,64 @@ impl BeamSolver {
         Ok(())
     }
 
+    /// Solve using a **pre-factored** linear solver whose factorisation was
+    /// produced by an earlier call to `solver.factor(&K_ff)` on a
+    /// bit-identical condensed stiffness matrix.
+    ///
+    /// This is the factorisation-reuse path: `apply_boundary_conditions` still
+    /// runs (it reduces the load vector and re-extracts `K_ff`), but the
+    /// expensive `factor()` step is skipped — only `solve()` (back-substitution)
+    /// is called.
+    ///
+    /// # Correctness contract
+    ///
+    /// The caller guarantees that `factored` was factored with a `K_ff` that is
+    /// bit-identical to the one `apply_boundary_conditions` will extract from
+    /// this solver's `k_global`.  This holds when the model geometry, elements,
+    /// supports, springs, releases and inclined rollers are unchanged — only the
+    /// load vector may differ.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::SolverError`] if the back-substitution fails.
+    pub(crate) fn solve_pre_factored(
+        &mut self,
+        factored: &dyn LinearSolver,
+    ) -> Result<(), FemError> {
+        self.solver_name = None;
+        let (f_reduced, constrained_dofs, constrained_values) = self.apply_boundary_conditions();
+
+        let n_free = self.reduced.as_ref().map_or(0, |r| r.k_ff().n);
+        if n_free == 0 {
+            self.u_global = vec![0.0; self.n_dof];
+            for (i, &global_idx) in constrained_dofs.iter().enumerate() {
+                self.u_global[global_idx] = constrained_values[i];
+            }
+            self.transform_back_to_global();
+            return Ok(());
+        }
+
+        let free_to_global = self
+            .reduced
+            .as_ref()
+            .expect("apply_boundary_conditions retains the condensed system")
+            .free_to_global()
+            .to_vec();
+
+        let u_free = factored.solve(&f_reduced).map_err(FemError::from)?;
+
+        self.u_global = vec![0.0; self.n_dof];
+        for (free_idx, &global_idx) in free_to_global.iter().enumerate() {
+            self.u_global[global_idx] = u_free[free_idx];
+        }
+        for (i, &global_idx) in constrained_dofs.iter().enumerate() {
+            self.u_global[global_idx] = constrained_values[i];
+        }
+        self.transform_back_to_global();
+        self.solver_name = Some(factored.name().to_string());
+        Ok(())
+    }
+
     /// Displacement of a global DOF at a node (raw-index accessor).
     ///
     /// `dof` is a raw index in the **global** system: `0 = ux`, `1 = uy`,

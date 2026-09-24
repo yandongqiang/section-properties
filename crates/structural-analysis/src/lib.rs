@@ -131,7 +131,7 @@ pub use crate::beam_fem::{
 };
 pub use crate::frame::{
     EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,
-    StructuralDiagnostic,
+    PreparedFrameAnalysis, StructuralDiagnostic,
 };
 pub use crate::load::{LoadCase, LoadCombination};
 pub use crate::postprocessing::{Envelope, EnvelopeSample};

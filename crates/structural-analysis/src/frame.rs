@@ -71,6 +71,7 @@ use crate::beam_fem::{
 use crate::load::{LoadCase, LoadCombination};
 use crate::mechanism::diagnose_reduced;
 use section_properties::SolverSelection;
+use section_properties::fea::solver::{LinearSolver, SolverRegistry};
 use section_properties::material::Material;
 
 use std::collections::VecDeque;
@@ -873,6 +874,118 @@ impl FrameModel {
         FrameSolver::new(self)
     }
 
+    /// Prepare a factorised analysis context for multi-load-case solving.
+    ///
+    /// The stiffness matrix is assembled, boundary conditions are condensed,
+    /// and the reduced system `K_ff` is **factored once**.  The returned
+    /// [`PreparedFrameAnalysis`] can then solve any number of [`LoadCase`]s
+    /// or [`LoadCombination`]s without re-factorising.
+    ///
+    /// # Performance
+    ///
+    /// For `N` load cases, `prepare()` + `N × solve_case()` performs
+    /// `1` factorisation + `N` back-substitutions, versus `N` factorisations
+    /// for `N` individual `solve_case()` calls.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::solve`]: model validation plus factorisation failure
+    /// (with structural diagnosis attached).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use structural_analysis::{FrameModel, LoadCase, BeamSection, Dof};
+    /// use section_properties::Material;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut frame = FrameModel::new();
+    /// let a = frame.add_node(0.0, 0.0)?;
+    /// let b = frame.add_node(4.0, 0.0)?;
+    /// frame.add_member(a, b, Material::new(200e9, 0.3, 7850.0, "Steel"),
+    ///                   BeamSection::new(5e-3, 2e-5))?;
+    /// frame.fix(a)?;
+    /// frame.fix(b)?;
+    ///
+    /// let mut dead = LoadCase::new("dead");
+    /// dead.nodal_load(b, 0.0, -1000.0)?;
+    /// let mut live = LoadCase::new("live");
+    /// live.nodal_load(b, 0.0, -500.0)?;
+    ///
+    /// let prepared = frame.prepare()?;
+    /// let results = prepared.solve_cases(&[dead, live])?;
+    /// assert_eq!(results.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn prepare(&self) -> Result<PreparedFrameAnalysis<'_>, FemError> {
+        self.prepare_with(SolverSelection::Auto)
+    }
+
+    /// Prepare with an explicit solver backend selection.
+    ///
+    /// Like [`Self::prepare`] but uses `selection` instead of
+    /// [`SolverSelection::Auto`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare`], plus [`FemError::SolverError`] if the
+    /// requested backend cannot handle the condensed matrix.
+    pub fn prepare_with(
+        &self,
+        selection: SolverSelection,
+    ) -> Result<PreparedFrameAnalysis<'_>, FemError> {
+        self.validate()?;
+        let mut beam = BeamSolver::from_model(&self.inner)?;
+        beam.set_solver(selection.clone());
+
+        // Condense boundary conditions and factor — the single expensive step
+        // we want to reuse across load cases.
+        let reduced = beam.condense();
+        let n_free = reduced.k_ff().n;
+
+        if n_free == 0 {
+            return Ok(PreparedFrameAnalysis {
+                model: self,
+                factored: None,
+                solver_name: None,
+                solver_selection: selection,
+            });
+        }
+
+        let k_ff = reduced.k_ff().clone();
+        let registry = SolverRegistry::default();
+        let mut solver = registry
+            .create_selected(&k_ff, &selection)
+            .map_err(FemError::from)?;
+        let name = solver.name().to_string();
+
+        solver.factor(&k_ff).map_err(|e| {
+            let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
+            with_structural_diagnosis(FemError::from(e), diagnosis)
+        })?;
+
+        Ok(PreparedFrameAnalysis {
+            model: self,
+            factored: Some(solver),
+            solver_name: Some(name),
+            solver_selection: selection,
+        })
+    }
+
+    /// Solve multiple load cases with a single factorisation.
+    ///
+    /// Convenience for `self.prepare()?.solve_cases(cases)`.  See
+    /// [`PreparedFrameAnalysis::solve_cases`] for details.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare`] plus per-case load validation.
+    pub fn solve_cases(&self, cases: &[LoadCase]) -> Result<Vec<FrameAnalysisResult>, FemError> {
+        let prepared = self.prepare()?;
+        prepared.solve_cases(cases)
+    }
+
     /// Validate the structural model.
     ///
     /// Checks, in order:
@@ -1391,6 +1504,180 @@ impl FrameAnalysisResult {
             )));
         }
         Ok(member.index())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PreparedFrameAnalysis — factorisation reuse for multi-load-case solving
+// ---------------------------------------------------------------------------
+
+/// A frame analysis context with a **pre-factored** stiffness matrix.
+///
+/// Created by [`FrameModel::prepare`] or [`FrameModel::prepare_with`].  The
+/// stiffness matrix `K` is assembled, boundary conditions are condensed, and
+/// the reduced system `K_ff` is factored **once** at construction.  After that,
+/// any number of [`LoadCase`]s or [`LoadCombination`]s can be solved with only
+/// a back-substitution per case — no re-factorisation.
+///
+/// # Correctness contract
+///
+/// The factorisation is valid only for the model geometry, elements, supports,
+/// springs, releases and inclined rollers that were present at `prepare()`
+/// time.  Mutating the [`FrameModel`] after preparing invalidates the
+/// factorisation; the caller is responsible for not doing this.
+///
+/// # Lifetime
+///
+/// Borrows the [`FrameModel`] that created it.  The returned
+/// [`FrameAnalysisResult`]s are owned (they clone the model), so they outlive
+/// the prepared analysis.
+pub struct PreparedFrameAnalysis<'a> {
+    model: &'a FrameModel,
+    factored: Option<Box<dyn LinearSolver>>,
+    solver_name: Option<String>,
+    solver_selection: SolverSelection,
+}
+
+impl std::fmt::Debug for PreparedFrameAnalysis<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedFrameAnalysis")
+            .field("nodes", &self.model.n_nodes())
+            .field("members", &self.model.n_members())
+            .field("solver", &self.solver_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> PreparedFrameAnalysis<'a> {
+    /// Name of the factored solver backend.
+    pub fn solver_name(&self) -> Option<&str> {
+        self.solver_name.as_deref()
+    }
+
+    /// Solve a single [`LoadCase`] using the pre-factored stiffness matrix.
+    ///
+    /// The load vector is assembled from `case`, reduced, and solved via
+    /// back-substitution only — no re-factorisation.
+    ///
+    /// The result's [`load_source`](FrameAnalysisResult::load_source) is
+    /// `"case:{name}"`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidModel`] if a load in the case references a node or
+    /// member that does not exist.  [`FemError::SolverError`] if the
+    /// back-substitution fails.
+    pub fn solve_case(&self, case: &LoadCase) -> Result<FrameAnalysisResult, FemError> {
+        let model = self.model.inner_with_loads(
+            case.nodal_forces(),
+            case.distributed_loads(),
+            case.point_loads(),
+            case.applied_moments(),
+        );
+        let mut beam = BeamSolver::from_model(&model)?;
+        beam.set_solver(self.solver_selection.clone());
+
+        self.solve_beam(&mut beam)?;
+
+        Ok(FrameAnalysisResult {
+            beam,
+            model: FrameModel { inner: model },
+            load_source: Some(format!("case:{}", case.name())),
+        })
+    }
+
+    /// Solve multiple [`LoadCase`]s using the pre-factored stiffness matrix.
+    ///
+    /// The stiffness matrix is factored once (at `prepare()` time); each case
+    /// requires only load assembly + back-substitution.  Results are returned
+    /// in the same order as `cases`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::solve_case`].
+    pub fn solve_cases(&self, cases: &[LoadCase]) -> Result<Vec<FrameAnalysisResult>, FemError> {
+        let mut results = Vec::with_capacity(cases.len());
+        for case in cases {
+            results.push(self.solve_case(case)?);
+        }
+        Ok(results)
+    }
+
+    /// Solve a [`LoadCombination`] using the pre-factored stiffness matrix.
+    ///
+    /// The right-hand side is merged: `f = Σ factor_i × f_case_i`, then
+    /// a single back-substitution is performed.
+    ///
+    /// The result's [`load_source`](FrameAnalysisResult::load_source) is
+    /// `"combination:{name}"`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidModel`] if a load in any case references a node or
+    /// member that does not exist.  [`FemError::SolverError`] if the
+    /// back-substitution fails.
+    pub fn solve_combination(
+        &self,
+        combo: &LoadCombination,
+    ) -> Result<FrameAnalysisResult, FemError> {
+        let mut merged = self.model.inner.clone();
+        merged.nodal_forces.clear();
+        merged.distributed_loads.clear();
+        merged.point_loads.clear();
+        merged.applied_moments.clear();
+        for (case, factor) in combo.terms() {
+            for &(node, dof, value) in case.nodal_forces() {
+                merged.nodal_forces.push((node, dof, factor * value));
+            }
+            for dl in case.distributed_loads() {
+                merged.distributed_loads.push(DistributedLoad::trapezoidal(
+                    dl.element_idx,
+                    factor * dl.qx,
+                    factor * dl.qy,
+                    factor * dl.qx_end,
+                    factor * dl.qy_end,
+                ));
+            }
+            for pl in case.point_loads() {
+                merged.point_loads.push(PointLoad::new(
+                    pl.element_idx,
+                    pl.position,
+                    factor * pl.fx,
+                    factor * pl.fy,
+                    factor * pl.mz,
+                ));
+            }
+            for am in case.applied_moments() {
+                merged
+                    .applied_moments
+                    .push(AppliedMoment::new(am.node_idx, factor * am.value));
+            }
+        }
+        let mut beam = BeamSolver::from_model(&merged)?;
+        beam.set_solver(self.solver_selection.clone());
+
+        self.solve_beam(&mut beam)?;
+
+        Ok(FrameAnalysisResult {
+            beam,
+            model: FrameModel { inner: merged },
+            load_source: Some(format!("combination:{}", combo.name())),
+        })
+    }
+
+    /// Solve a `BeamSolver` using the pre-factored matrix, or fall back to
+    /// `solve_configured` if no factorisation was stored (all-DOF-constrained
+    /// case).
+    fn solve_beam(&self, beam: &mut BeamSolver) -> Result<(), FemError> {
+        match self.factored.as_ref() {
+            Some(factored) => {
+                beam.solve_pre_factored(&**factored)?;
+            }
+            None => {
+                beam.solve_configured()?;
+            }
+        }
+        Ok(())
     }
 }
 
