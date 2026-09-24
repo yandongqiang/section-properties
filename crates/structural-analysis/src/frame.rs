@@ -1307,7 +1307,7 @@ impl FrameAnalysisResult {
     /// along every member.
     ///
     /// Delegates to [`BeamSolver::sample_beam_forces`]. The `element_index` in
-    /// each [`BeamForceSample`] is the member index (Frame members and Beam
+    /// each [`crate::beam_fem::BeamForceSample`] is the member index (Frame members and Beam
     /// elements are the same objects). The `x` coordinate is beam arclength
     /// from the start of member 0, accumulated in model order — for inclined
     /// members this is physical distance, not a projected coordinate.
@@ -1325,7 +1325,7 @@ impl FrameAnalysisResult {
     /// Whole-frame force diagram (sampled, no interpolation).
     ///
     /// Delegates to [`BeamSolver::beam_force_diagram`]. The returned
-    /// [`BeamForceDiagram`] is pure data — no plotting or rendering is
+    /// [`crate::beam_fem::BeamForceDiagram`] is pure data — no plotting or rendering is
     /// performed.
     ///
     /// # Errors

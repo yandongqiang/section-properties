@@ -459,7 +459,7 @@ impl<'a> BeamAnalysisResult<'a> {
     /// See [`crate::frame::EquilibriumReport`].
     ///
     /// This is the beam-level equivalent of
-    /// [`FrameAnalysisResult::equilibrium`]; both share the same computation.
+    /// [`crate::frame::FrameAnalysisResult::equilibrium`]; both share the same computation.
     pub fn equilibrium(&self) -> crate::frame::EquilibriumReport {
         let reactions = self.solver.reactions();
         crate::frame::compute_equilibrium(&self.solver.model, &reactions)
@@ -3509,14 +3509,14 @@ impl BeamSolver {
     ///
     /// This is the single-element recovery used by
     /// [`BeamAnalysisResult::element_end_forces`] and
-    /// [`FrameAnalysisResult::member_end_forces`]. It is O(1) in the number of
+    /// [`crate::frame::FrameAnalysisResult::member_end_forces`]. It is O(1) in the number of
     /// elements (it scans only the loads on this element, not all elements).
     ///
     /// # Errors
     ///
     /// Returns [`FemError::InvalidInput`] if `element_idx` is out of bounds.
-    /// Propagates errors from [`Self::element_local_displacement`] and
-    /// [`Self::element_equivalent_nodal_forces`].
+    /// Propagates errors from `Self::element_local_displacement` and
+    /// `Self::element_equivalent_nodal_forces`.
     pub fn element_on_node_end_forces_local(
         &self,
         element_idx: usize,
@@ -3661,7 +3661,7 @@ impl BeamSolver {
     /// `f_global = Tᵀ · f_local`, ordered `[Fx_i, Fy_i, Mz_i, Fx_j, Fy_j, Mz_j]`.
     ///
     /// This is the single-element version of [`Self::element_end_forces_global`],
-    /// used by [`FrameAnalysisResult::member_end_forces_global`]. It is O(1) in
+    /// used by [`crate::frame::FrameAnalysisResult::member_end_forces_global`]. It is O(1) in
     /// the number of elements.
     ///
     /// # Errors
