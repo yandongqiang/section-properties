@@ -2443,10 +2443,14 @@ impl BeamSolver {
             }
         }
         for dl in &model.distributed_loads {
-            if !dl.qx.is_finite() || !dl.qy.is_finite() {
+            if !dl.qx.is_finite()
+                || !dl.qy.is_finite()
+                || !dl.qx_end.is_finite()
+                || !dl.qy_end.is_finite()
+            {
                 return Err(FemError::InvalidModel(format!(
-                    "Distributed load on element {} is non-finite: qx = {}, qy = {}",
-                    dl.element_idx, dl.qx, dl.qy
+                    "Distributed load on element {} is non-finite: qx = {}, qy = {}, qx_end = {}, qy_end = {}",
+                    dl.element_idx, dl.qx, dl.qy, dl.qx_end, dl.qy_end
                 )));
             }
         }

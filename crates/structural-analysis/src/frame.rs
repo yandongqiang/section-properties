@@ -828,10 +828,12 @@ impl FrameModel {
                 merged.nodal_forces.push((node, dof, factor * value));
             }
             for dl in case.distributed_loads() {
-                merged.distributed_loads.push(DistributedLoad::new(
+                merged.distributed_loads.push(DistributedLoad::trapezoidal(
                     dl.element_idx,
                     factor * dl.qx,
                     factor * dl.qy,
+                    factor * dl.qx_end,
+                    factor * dl.qy_end,
                 ));
             }
             for pl in case.point_loads() {
@@ -1352,12 +1354,18 @@ impl FrameAnalysisResult {
             let (dx, dy) = (pj.x - pi.x, pj.y - pi.y);
             let len = (dx * dx + dy * dy).sqrt();
             let (c, s) = (dx / len, dy / len);
-            let (lfx, lfy) = (dl.qx * len, dl.qy * len);
+            let lfx = 0.5 * (dl.qx + dl.qx_end) * len;
+            let lfy = 0.5 * (dl.qy + dl.qy_end) * len;
             let (gx, gy) = (c * lfx - s * lfy, s * lfx + c * lfy);
-            let (xm, ym) = (pi.x + 0.5 * dx, pi.y + 0.5 * dy);
+            let qy_sum = dl.qy + dl.qy_end;
+            let centroid_y = if qy_sum.abs() > 1e-30 {
+                (dl.qy + 2.0 * dl.qy_end) / (3.0 * qy_sum) * len
+            } else {
+                0.5 * len
+            };
             applied_fx += gx;
             applied_fy += gy;
-            applied_mz += xm * gy - ym * gx;
+            applied_mz += lfx * (s * pi.x - c * pi.y) + lfy * (c * pi.x + s * pi.y + centroid_y);
             applied_f_mag += gx.abs() + gy.abs();
         }
         for pl in &m.point_loads {

@@ -187,8 +187,8 @@ fn trapezoidal_section_forces_satisfy_equilibrium() -> Result<(), FemError> {
 
         let x = xi * l;
         let v_expected = -v_i + q_start * x + (q_end - q_start) * x * x / (2.0 * l);
-        let m_expected = m_i - x * v_i + q_start * x * x / 2.0
-            + (q_end - q_start) * x * x * x / (6.0 * l);
+        let m_expected =
+            m_i - x * v_i + q_start * x * x / 2.0 + (q_end - q_start) * x * x * x / (6.0 * l);
 
         assert_close(s.shear, v_expected, 1e-3, 1e-6, "V(xi) equilibrium");
         assert_close(s.moment, m_expected, 1e-2, 1e-6, "M(xi) equilibrium");
@@ -255,7 +255,8 @@ fn trapezoidal_validation() -> Result<(), FemError> {
         "NaN qx rejected"
     );
     assert!(
-        f.member_trapezoidal(m, 0.0, 0.0, f64::INFINITY, 0.0).is_err(),
+        f.member_trapezoidal(m, 0.0, 0.0, f64::INFINITY, 0.0)
+            .is_err(),
         "infinite qx_end rejected"
     );
     assert!(
@@ -349,5 +350,89 @@ fn trapezoidal_superposition() -> Result<(), FemError> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn trapezoidal_load_in_combination_preserves_variation() -> Result<(), FemError> {
+    let l = 6.0;
+    let q_start = -3000.0;
+    let q_end = -1000.0;
+
+    let mut frame = FrameModel::new();
+    let n0 = frame.add_node(0.0, 0.0)?;
+    let n1 = frame.add_node(l, 0.0)?;
+    let m = frame.add_member(n0, n1, steel(), sec())?;
+    frame.fix(n0)?;
+    frame.fix(n1)?;
+
+    let mut case = LoadCase::new("trap");
+    case.member_trapezoidal(m, 0.0, q_start, 0.0, q_end)?;
+
+    let mut combo = LoadCombination::new("1.0*trap");
+    combo.add_case(&case, 1.0)?;
+    let r_combo = frame.solve_combination(&combo)?;
+
+    let mut frame_direct = FrameModel::new();
+    let n0d = frame_direct.add_node(0.0, 0.0)?;
+    let n1d = frame_direct.add_node(l, 0.0)?;
+    let md = frame_direct.add_member(n0d, n1d, steel(), sec())?;
+    frame_direct.fix(n0d)?;
+    frame_direct.fix(n1d)?;
+    frame_direct.member_trapezoidal(md, 0.0, q_start, 0.0, q_end)?;
+    let r_direct = frame_direct.solve()?;
+
+    for &xi in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let s_combo = r_combo.section_forces(m, xi)?;
+        let s_direct = r_direct.section_forces(md, xi)?;
+        assert_close(
+            s_combo.axial,
+            s_direct.axial,
+            1e-6,
+            1e-9,
+            "combo vs direct axial",
+        );
+        assert_close(
+            s_combo.shear,
+            s_direct.shear,
+            1e-6,
+            1e-9,
+            "combo vs direct shear",
+        );
+        assert_close(
+            s_combo.moment,
+            s_direct.moment,
+            1e-6,
+            1e-9,
+            "combo vs direct moment",
+        );
+    }
+
+    let eq = r_combo.equilibrium();
+    assert!(
+        eq.is_balanced(),
+        "equilibrium should be balanced for trapezoidal in combination: {eq:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn trapezoidal_load_equilibrium_balanced() -> Result<(), FemError> {
+    let l = 5.0;
+
+    let mut frame = FrameModel::new();
+    let n0 = frame.add_node(0.0, 0.0)?;
+    let n1 = frame.add_node(l, 0.0)?;
+    let m = frame.add_member(n0, n1, steel(), sec())?;
+    frame.fix(n0)?;
+    frame.fix(n1)?;
+
+    frame.member_trapezoidal(m, 0.0, -4000.0, 0.0, -1000.0)?;
+    let result = frame.solve()?;
+    let eq = result.equilibrium();
+    assert!(
+        eq.is_balanced(),
+        "equilibrium should be balanced for trapezoidal load: {eq:?}"
+    );
     Ok(())
 }
