@@ -18,7 +18,8 @@ solvers).
 ## Current scope
 
 - **Elements**: 2D Euler–Bernoulli beam/frame element (3 DOF per node:
-  `ux`, `uy`, `rz`)
+  `ux`, `uy`, `rz`) and 2D pin-jointed truss element (2 DOF per node:
+  `ux`, `uy`)
 - **Analysis**: linear static
 - **Supports**: fixed, pinned, roller (x/y), inclined roller, spring,
   arbitrary DOF restraint
@@ -34,7 +35,7 @@ solvers).
 - **Solvers**: dense Gaussian, skyline LDLᵀ, sparse LU, CG, ICCG (via
   `section-properties`)
 
-**Not supported**: truss elements, plate/shell/solid elements, nonlinear
+**Not supported**: plate/shell/solid elements, nonlinear
 analysis, dynamic analysis, buckling, design code combinations, envelope
 generation.
 
@@ -314,4 +315,5 @@ cargo run --example beam_rotated_mixed_loading
 cargo run --example frame_portal
 cargo run --example frame_load_combination
 cargo run --example frame_advanced_supports
+cargo run --example truss_basic
 ```

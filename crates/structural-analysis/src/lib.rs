@@ -13,7 +13,8 @@
 //! ## Current scope
 //!
 //! - **Elements**: 2D Euler–Bernoulli beam/frame element (3 DOF per node:
-//!   `ux`, `uy`, `rz`)
+//!   `ux`, `uy`, `rz`) and 2D pin-jointed truss element (2 DOF per node:
+//!   `ux`, `uy`)
 //! - **Analysis**: linear static
 //! - **Supports**: fixed, pinned, roller (x/y), inclined roller, spring,
 //!   arbitrary DOF restraint
@@ -29,8 +30,8 @@
 //! - **Solvers**: dense Gaussian, skyline LDLᵀ, sparse LU, CG, ICCG (via
 //!   `section-properties`)
 //!
-//! **Not supported** (and not claimed): truss elements, plate/shell/solid
-//! elements, nonlinear analysis, dynamic analysis, buckling, design code
+//! **Not supported** (and not claimed): plate/shell/solid elements,
+//! nonlinear analysis, dynamic analysis, buckling, design code
 //! combinations, envelope generation.
 //!
 //! ## Architecture
@@ -61,6 +62,8 @@
 //! - **`FrameModel`** — higher-level façade with typed `NodeHandle` /
 //!   `MemberHandle`, support vocabulary, load cases, and equilibrium
 //!   reporting. See [`frame`].
+//! - **`TrussModel`** — 2D truss analysis with pin-jointed elements (axial
+//!   only, 2 DOF per node). See [`truss`].
 //!
 //! ## Quick start — frame analysis
 //!
@@ -119,6 +122,7 @@ pub mod beam_fem;
 pub mod frame;
 pub mod load;
 pub mod mechanism;
+pub mod truss;
 
 pub use crate::beam_fem::{
     BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, EndRelease,
@@ -129,3 +133,6 @@ pub use crate::frame::{
     StructuralDiagnostic,
 };
 pub use crate::load::{LoadCase, LoadCombination};
+pub use crate::truss::{
+    TrussAnalysisResult, TrussDof, TrussElement, TrussModel, TrussNode, TrussSolver,
+};
