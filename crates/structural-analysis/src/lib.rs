@@ -134,7 +134,7 @@ pub use crate::frame::{
     PreparedFrameAnalysis, StructuralDiagnostic,
 };
 pub use crate::load::{LoadCase, LoadCombination};
-pub use crate::postprocessing::{Envelope, EnvelopeSample};
+pub use crate::postprocessing::{Envelope, EnvelopeSample, Extremum, NodeEnvelopeSample};
 pub use crate::truss::{
     TrussAnalysisResult, TrussDof, TrussElement, TrussEquilibriumReport, TrussModel, TrussNode,
     TrussSolver,
