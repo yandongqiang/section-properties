@@ -1303,6 +1303,63 @@ impl FrameAnalysisResult {
         self.beam.element_section_forces(i, xi)
     }
 
+    /// Sample section forces `N`, `V`, `M` (LOCAL) at `n_per_member` points
+    /// along every member.
+    ///
+    /// Delegates to [`BeamSolver::sample_beam_forces`]. The `element_index` in
+    /// each [`BeamForceSample`] is the member index (Frame members and Beam
+    /// elements are the same objects). The `x` coordinate is beam arclength
+    /// from the start of member 0, accumulated in model order — for inclined
+    /// members this is physical distance, not a projected coordinate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `n_per_member < 2`.
+    pub fn sample_forces(
+        &self,
+        n_per_member: usize,
+    ) -> Result<Vec<crate::beam_fem::BeamForceSample>, FemError> {
+        self.beam.sample_beam_forces(n_per_member)
+    }
+
+    /// Whole-frame force diagram (sampled, no interpolation).
+    ///
+    /// Delegates to [`BeamSolver::beam_force_diagram`]. The returned
+    /// [`BeamForceDiagram`] is pure data — no plotting or rendering is
+    /// performed.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `n_per_member < 2`.
+    pub fn diagram(
+        &self,
+        n_per_member: usize,
+    ) -> Result<crate::beam_fem::BeamForceDiagram, FemError> {
+        self.beam.beam_force_diagram(n_per_member)
+    }
+
+    /// Coordinates of a node, or `None` if the handle is out of range.
+    pub fn node_position(&self, node: NodeHandle) -> Option<section_properties::geometry::Point> {
+        self.model.inner.nodes.get(node.index()).map(|n| n.point())
+    }
+
+    /// End-node handles of a member, or `None` if out of range.
+    pub fn member_nodes(&self, member: MemberHandle) -> Option<(NodeHandle, NodeHandle)> {
+        let el = self.model.inner.elements.get(member.index())?;
+        Some((
+            NodeHandle::from_index(el.node_i),
+            NodeHandle::from_index(el.node_j),
+        ))
+    }
+
+    /// Length of a member, or `None` if the handle is out of range.
+    pub fn member_length(&self, member: MemberHandle) -> Option<f64> {
+        let (ni, nj) = self.member_nodes(member)?;
+        let pi = self.node_position(ni)?;
+        let pj = self.node_position(nj)?;
+        Some(((pj.x - pi.x).powi(2) + (pj.y - pi.y).powi(2)).sqrt())
+    }
+
     /// Global equilibrium check about the origin `(0, 0)`.
     ///
     /// Combines support reactions, global nodal loads and moments, and the
@@ -1310,127 +1367,8 @@ impl FrameAnalysisResult {
     /// member-local axes and applied at their true global locations).
     /// See [`EquilibriumReport`].
     pub fn equilibrium(&self) -> EquilibriumReport {
-        let m = &self.model.inner;
-        let mut applied_fx = 0.0;
-        let mut applied_fy = 0.0;
-        let mut applied_mz = 0.0;
-        // Absolute per-term magnitudes (not resultants): a load pair that cancels
-        // in the sum must still contribute to the equilibrium scale.
-        let mut applied_f_mag = 0.0;
-        let mut applied_m_mag = 0.0;
-
-        // Global nodal loads and moments.
-        for (node, dof, v) in &m.nodal_forces {
-            let p = m.nodes[*node].point();
-            match *dof {
-                0 => {
-                    applied_fx += v;
-                    applied_mz += -p.y * v;
-                    applied_f_mag += v.abs();
-                }
-                1 => {
-                    applied_fy += v;
-                    applied_mz += p.x * v;
-                    applied_f_mag += v.abs();
-                }
-                _ => {
-                    applied_mz += v;
-                    applied_m_mag += v.abs();
-                }
-            }
-        }
-        for am in &m.applied_moments {
-            applied_mz += am.value;
-            applied_m_mag += am.value.abs();
-        }
-
-        // Member load resultants, rotated from local to global.
-        for (elem_idx, dl) in m.distributed_loads.iter().enumerate() {
-            let _ = elem_idx;
-            let Some((pi, pj)) = member_points(m, dl.element_idx) else {
-                continue;
-            };
-            let (dx, dy) = (pj.x - pi.x, pj.y - pi.y);
-            let len = (dx * dx + dy * dy).sqrt();
-            let (c, s) = (dx / len, dy / len);
-            let lfx = 0.5 * (dl.qx + dl.qx_end) * len;
-            let lfy = 0.5 * (dl.qy + dl.qy_end) * len;
-            let (gx, gy) = (c * lfx - s * lfy, s * lfx + c * lfy);
-            let qy_sum = dl.qy + dl.qy_end;
-            let centroid_y = if qy_sum.abs() > 1e-30 {
-                (dl.qy + 2.0 * dl.qy_end) / (3.0 * qy_sum) * len
-            } else {
-                0.5 * len
-            };
-            applied_fx += gx;
-            applied_fy += gy;
-            applied_mz += lfx * (s * pi.x - c * pi.y) + lfy * (c * pi.x + s * pi.y + centroid_y);
-            applied_f_mag += gx.abs() + gy.abs();
-        }
-        for pl in &m.point_loads {
-            let Some((pi, _)) = member_points(m, pl.element_idx) else {
-                continue;
-            };
-            let el = &m.elements[pl.element_idx];
-            let pj = m.nodes[el.node_j].point();
-            let (dx, dy) = (pj.x - pi.x, pj.y - pi.y);
-            let len = (dx * dx + dy * dy).sqrt();
-            let (c, s) = (dx / len, dy / len);
-            let (gx, gy) = (c * pl.fx - s * pl.fy, s * pl.fx + c * pl.fy);
-            let (xp, yp) = (pi.x + pl.position * dx, pi.y + pl.position * dy);
-            applied_fx += gx;
-            applied_fy += gy;
-            applied_mz += xp * gy - yp * gx + pl.mz;
-            applied_f_mag += gx.abs() + gy.abs();
-            applied_m_mag += pl.mz.abs();
-        }
-
-        // Support reactions, per node.
         let reactions = self.beam.reactions();
-        let mut reaction_fx = 0.0;
-        let mut reaction_fy = 0.0;
-        let mut reaction_mz = 0.0;
-        let mut reaction_f_mag = 0.0;
-        let mut reaction_m_mag = 0.0;
-        for (idx, node) in m.nodes.iter().enumerate() {
-            let p = node.point();
-            let rx = reactions.get(3 * idx).copied().unwrap_or(0.0);
-            let ry = reactions.get(3 * idx + 1).copied().unwrap_or(0.0);
-            let rz = reactions.get(3 * idx + 2).copied().unwrap_or(0.0);
-            reaction_fx += rx;
-            reaction_fy += ry;
-            reaction_mz += p.x * ry - p.y * rx + rz;
-            reaction_f_mag += rx.abs() + ry.abs();
-            reaction_m_mag += rz.abs();
-        }
-
-        // Characteristic length of the structure: the largest absolute nodal
-        // coordinate. Positive for any solvable model (a zero-length member is
-        // rejected). It is what makes the moment scale `Σ|F|·l_char` reflect the
-        // structure rather than a constant.
-        let l_char = characteristic_length(m);
-        let f_mag = applied_f_mag + reaction_f_mag;
-        let m_mag = applied_m_mag + reaction_m_mag;
-        let cond_rel_floor = EQUILIBRIUM_COND_FACTOR * max_element_slenderness_sq(m) * f64::EPSILON;
-        let rel = EQUILIBRIUM_REL_TOL.max(cond_rel_floor);
-        let (f_scale, _m_scale) = equilibrium_scales(f_mag, m_mag, l_char);
-
-        EquilibriumReport {
-            fx_residual: applied_fx + reaction_fx,
-            fy_residual: applied_fy + reaction_fy,
-            mz_residual: applied_mz + reaction_mz,
-            applied_fx,
-            applied_fy,
-            applied_mz,
-            reaction_fx,
-            reaction_fy,
-            reaction_mz,
-            tolerance: rel * f_scale,
-            f_mag,
-            m_mag,
-            l_char,
-            cond_rel_floor,
-        }
+        compute_equilibrium(&self.model.inner, &reactions)
     }
 
     fn check_node(&self, node: NodeHandle) -> Result<(), FemError> {
@@ -1453,6 +1391,124 @@ impl FrameAnalysisResult {
             )));
         }
         Ok(member.index())
+    }
+}
+
+/// Compute global equilibrium from a [`BeamModel`] and a reaction vector.
+///
+/// Shared by [`FrameAnalysisResult::equilibrium`] and
+/// [`BeamAnalysisResult::equilibrium`]. The `reactions` slice is laid out
+/// `[Rx, Ry, Mz]` per node (3 DOF/node).
+pub(crate) fn compute_equilibrium(m: &BeamModel, reactions: &[f64]) -> EquilibriumReport {
+    let mut applied_fx = 0.0;
+    let mut applied_fy = 0.0;
+    let mut applied_mz = 0.0;
+    let mut applied_f_mag = 0.0;
+    let mut applied_m_mag = 0.0;
+
+    for (node, dof, v) in &m.nodal_forces {
+        let p = m.nodes[*node].point();
+        match *dof {
+            0 => {
+                applied_fx += v;
+                applied_mz += -p.y * v;
+                applied_f_mag += v.abs();
+            }
+            1 => {
+                applied_fy += v;
+                applied_mz += p.x * v;
+                applied_f_mag += v.abs();
+            }
+            _ => {
+                applied_mz += v;
+                applied_m_mag += v.abs();
+            }
+        }
+    }
+    for am in &m.applied_moments {
+        applied_mz += am.value;
+        applied_m_mag += am.value.abs();
+    }
+
+    for (elem_idx, dl) in m.distributed_loads.iter().enumerate() {
+        let _ = elem_idx;
+        let Some((pi, pj)) = member_points(m, dl.element_idx) else {
+            continue;
+        };
+        let (dx, dy) = (pj.x - pi.x, pj.y - pi.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        let (c, s) = (dx / len, dy / len);
+        let lfx = 0.5 * (dl.qx + dl.qx_end) * len;
+        let lfy = 0.5 * (dl.qy + dl.qy_end) * len;
+        let (gx, gy) = (c * lfx - s * lfy, s * lfx + c * lfy);
+        let qy_sum = dl.qy + dl.qy_end;
+        let centroid_y = if qy_sum.abs() > 1e-30 {
+            (dl.qy + 2.0 * dl.qy_end) / (3.0 * qy_sum) * len
+        } else {
+            0.5 * len
+        };
+        applied_fx += gx;
+        applied_fy += gy;
+        applied_mz += lfx * (s * pi.x - c * pi.y) + lfy * (c * pi.x + s * pi.y + centroid_y);
+        applied_f_mag += gx.abs() + gy.abs();
+    }
+    for pl in &m.point_loads {
+        let Some((pi, _)) = member_points(m, pl.element_idx) else {
+            continue;
+        };
+        let el = &m.elements[pl.element_idx];
+        let pj = m.nodes[el.node_j].point();
+        let (dx, dy) = (pj.x - pi.x, pj.y - pi.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        let (c, s) = (dx / len, dy / len);
+        let (gx, gy) = (c * pl.fx - s * pl.fy, s * pl.fx + c * pl.fy);
+        let (xp, yp) = (pi.x + pl.position * dx, pi.y + pl.position * dy);
+        applied_fx += gx;
+        applied_fy += gy;
+        applied_mz += xp * gy - yp * gx + pl.mz;
+        applied_f_mag += gx.abs() + gy.abs();
+        applied_m_mag += pl.mz.abs();
+    }
+
+    let mut reaction_fx = 0.0;
+    let mut reaction_fy = 0.0;
+    let mut reaction_mz = 0.0;
+    let mut reaction_f_mag = 0.0;
+    let mut reaction_m_mag = 0.0;
+    for (idx, node) in m.nodes.iter().enumerate() {
+        let p = node.point();
+        let rx = reactions.get(3 * idx).copied().unwrap_or(0.0);
+        let ry = reactions.get(3 * idx + 1).copied().unwrap_or(0.0);
+        let rz = reactions.get(3 * idx + 2).copied().unwrap_or(0.0);
+        reaction_fx += rx;
+        reaction_fy += ry;
+        reaction_mz += p.x * ry - p.y * rx + rz;
+        reaction_f_mag += rx.abs() + ry.abs();
+        reaction_m_mag += rz.abs();
+    }
+
+    let l_char = characteristic_length(m);
+    let f_mag = applied_f_mag + reaction_f_mag;
+    let m_mag = applied_m_mag + reaction_m_mag;
+    let cond_rel_floor = EQUILIBRIUM_COND_FACTOR * max_element_slenderness_sq(m) * f64::EPSILON;
+    let rel = EQUILIBRIUM_REL_TOL.max(cond_rel_floor);
+    let (f_scale, _m_scale) = equilibrium_scales(f_mag, m_mag, l_char);
+
+    EquilibriumReport {
+        fx_residual: applied_fx + reaction_fx,
+        fy_residual: applied_fy + reaction_fy,
+        mz_residual: applied_mz + reaction_mz,
+        applied_fx,
+        applied_fy,
+        applied_mz,
+        reaction_fx,
+        reaction_fy,
+        reaction_mz,
+        tolerance: rel * f_scale,
+        f_mag,
+        m_mag,
+        l_char,
+        cond_rel_floor,
     }
 }
 

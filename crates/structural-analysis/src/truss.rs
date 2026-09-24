@@ -757,7 +757,8 @@ impl TrussSolver {
 // Analysis result
 // ---------------------------------------------------------------------------
 
-/// Result of a truss analysis: displacements, reactions, and axial forces.
+/// Result of a truss analysis: displacements, reactions, axial forces, and
+/// geometry snapshot for post-processing.
 #[derive(Debug, Clone)]
 pub struct TrussAnalysisResult {
     /// Full displacement vector `[ux, uy]` per node.
@@ -768,6 +769,12 @@ pub struct TrussAnalysisResult {
     pub axial_forces: Vec<f64>,
     /// Name of the solver backend used.
     pub solver_name: Option<String>,
+    /// Node coordinates `(x, y)`, same order as the model.
+    pub node_coords: Vec<(f64, f64)>,
+    /// Element connectivity `(node_i, node_j)`, same order as the model.
+    pub element_nodes: Vec<(usize, usize)>,
+    /// Nodal forces `(node_idx, dof, value)` that were applied.
+    pub nodal_forces: Vec<(usize, usize, f64)>,
     n_nodes: usize,
     n_elements: usize,
 }
@@ -787,6 +794,129 @@ impl TrussAnalysisResult {
     pub fn solver_name(&self) -> Option<&str> {
         self.solver_name.as_deref()
     }
+
+    /// Coordinates of a node `(x, y)`, or `None` if out of range.
+    pub fn node_position(&self, node_index: usize) -> Option<(f64, f64)> {
+        self.node_coords.get(node_index).copied()
+    }
+
+    /// End-node indices `(node_i, node_j)` of an element, or `None` if out
+    /// of range.
+    pub fn element_endpoints(&self, element_index: usize) -> Option<(usize, usize)> {
+        self.element_nodes.get(element_index).copied()
+    }
+
+    /// Global equilibrium check: `ΣFx`, `ΣFy`, `ΣMz` about the origin.
+    ///
+    /// Combines applied nodal forces and support reactions. Truss elements
+    /// carry only axial force, so there are no member-level distributed or
+    /// point loads to include.
+    ///
+    /// Returns a [`TrussEquilibriumReport`] with force residuals and a
+    /// balanced verdict. Moment equilibrium (`ΣMz`) uses the node coordinates
+    /// stored in the result snapshot.
+    pub fn equilibrium(&self) -> TrussEquilibriumReport {
+        let mut applied_fx = 0.0;
+        let mut applied_fy = 0.0;
+        let mut applied_mz = 0.0;
+        let mut applied_f_mag = 0.0;
+
+        for &(node, dof, v) in &self.nodal_forces {
+            let (x, y) = self.node_coords.get(node).copied().unwrap_or((0.0, 0.0));
+            match dof {
+                0 => {
+                    applied_fx += v;
+                    applied_mz += -y * v;
+                    applied_f_mag += v.abs();
+                }
+                1 => {
+                    applied_fy += v;
+                    applied_mz += x * v;
+                    applied_f_mag += v.abs();
+                }
+                _ => {}
+            }
+        }
+
+        let mut reaction_fx = 0.0;
+        let mut reaction_fy = 0.0;
+        let mut reaction_mz = 0.0;
+        let mut reaction_f_mag = 0.0;
+        for (idx, &(x, y)) in self.node_coords.iter().enumerate() {
+            let rx = self.reactions.get(2 * idx).copied().unwrap_or(0.0);
+            let ry = self.reactions.get(2 * idx + 1).copied().unwrap_or(0.0);
+            reaction_fx += rx;
+            reaction_fy += ry;
+            reaction_mz += x * ry - y * rx;
+            reaction_f_mag += rx.abs() + ry.abs();
+        }
+
+        let f_mag = applied_f_mag + reaction_f_mag;
+        let l_char: f64 = self
+            .node_coords
+            .iter()
+            .map(|&(x, y)| x.abs().max(y.abs()))
+            .fold(0.0_f64, f64::max);
+        let rel = 1e-6;
+        let f_scale = if l_char > 0.0 { f_mag } else { f_mag };
+
+        TrussEquilibriumReport {
+            fx_residual: applied_fx + reaction_fx,
+            fy_residual: applied_fy + reaction_fy,
+            mz_residual: applied_mz + reaction_mz,
+            applied_fx,
+            applied_fy,
+            applied_mz,
+            reaction_fx,
+            reaction_fy,
+            reaction_mz,
+            tolerance: rel * f_scale,
+        }
+    }
+}
+
+/// Equilibrium report for a truss analysis.
+///
+/// Truss nodes have 2 DOF (`ux`, `uy`), so there are no reaction moments.
+/// Moment equilibrium is checked about the global origin using node
+/// coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrussEquilibriumReport {
+    /// Residual of `ΣFx` (applied + reaction).
+    pub fx_residual: f64,
+    /// Residual of `ΣFy` (applied + reaction).
+    pub fy_residual: f64,
+    /// Residual of `ΣMz` about the origin (applied + reaction).
+    pub mz_residual: f64,
+    /// Total applied horizontal load.
+    pub applied_fx: f64,
+    /// Total applied vertical load.
+    pub applied_fy: f64,
+    /// Total applied moment about the origin.
+    pub applied_mz: f64,
+    /// Sum of support reaction forces in X.
+    pub reaction_fx: f64,
+    /// Sum of support reaction forces in Y.
+    pub reaction_fy: f64,
+    /// Sum of reaction moments about the origin.
+    pub reaction_mz: f64,
+    /// Force tolerance: `1e-6 * Σ|F|`.
+    pub tolerance: f64,
+}
+
+impl TrussEquilibriumReport {
+    /// Whether all three residuals are within relative tolerance.
+    pub fn is_balanced(&self) -> bool {
+        let rel = 1e-6;
+        self.fx_residual.abs() <= self.tolerance
+            && self.fy_residual.abs() <= self.tolerance
+            && self.mz_residual.abs() <= self.tolerance.max(rel * self.tolerance)
+    }
+
+    /// Force tolerance used by [`Self::is_balanced`].
+    pub fn force_tolerance(&self) -> f64 {
+        self.tolerance
+    }
 }
 
 impl TrussSolver {
@@ -801,6 +931,14 @@ impl TrussSolver {
             reactions: self.reactions(),
             axial_forces: self.axial_forces()?,
             solver_name: self.solver_name.clone(),
+            node_coords: self.model.nodes.iter().map(|n| (n.x, n.y)).collect(),
+            element_nodes: self
+                .model
+                .elements
+                .iter()
+                .map(|e| (e.node_i, e.node_j))
+                .collect(),
+            nodal_forces: self.model.nodal_forces.clone(),
             n_nodes: self.model.nodes.len(),
             n_elements: self.model.elements.len(),
         })

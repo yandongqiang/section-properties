@@ -24,15 +24,15 @@
 //! - **Load cases & combinations**: named load cases with linear combination
 //!   factors
 //! - **Results**: displacements, reactions, member end forces (local & global),
-//!   section forces `N(x)`, `V(x)`, `M(x)`, force diagrams
+//!   section forces `N(x)`, `V(x)`, `M(x)`, force diagrams, multi-case envelopes
 //! - **Diagnostics**: mechanism detection, rigid-body mode classification,
-//!   ill-conditioning reporting
+//!   ill-conditioning reporting, equilibrium verification (frame/beam/truss)
 //! - **Solvers**: dense Gaussian, skyline LDLᵀ, sparse LU, CG, ICCG (via
 //!   `section-properties`)
 //!
 //! **Not supported** (and not claimed): plate/shell/solid elements,
 //! nonlinear analysis, dynamic analysis, buckling, design code
-//! combinations, envelope generation.
+//! combinations.
 //!
 //! ## Architecture
 //!
@@ -122,6 +122,7 @@ pub mod beam_fem;
 pub mod frame;
 pub mod load;
 pub mod mechanism;
+pub mod postprocessing;
 pub mod truss;
 
 pub use crate::beam_fem::{
@@ -133,6 +134,8 @@ pub use crate::frame::{
     StructuralDiagnostic,
 };
 pub use crate::load::{LoadCase, LoadCombination};
+pub use crate::postprocessing::{Envelope, EnvelopeSample};
 pub use crate::truss::{
-    TrussAnalysisResult, TrussDof, TrussElement, TrussModel, TrussNode, TrussSolver,
+    TrussAnalysisResult, TrussDof, TrussElement, TrussEquilibriumReport, TrussModel, TrussNode,
+    TrussSolver,
 };

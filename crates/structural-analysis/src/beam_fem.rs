@@ -440,6 +440,30 @@ impl<'a> BeamAnalysisResult<'a> {
     pub fn diagram(&self, n_per_element: usize) -> Result<BeamForceDiagram, FemError> {
         self.solver.beam_force_diagram(n_per_element)
     }
+
+    /// Coordinates of a node, or `None` if the index is out of range.
+    pub fn node_position(&self, node_index: usize) -> Option<section_properties::geometry::Point> {
+        self.solver.node_position(node_index)
+    }
+
+    /// End-node indices of an element, or `None` if out of range.
+    pub fn element_nodes(&self, element_index: usize) -> Option<(usize, usize)> {
+        self.solver.element_nodes(element_index)
+    }
+
+    /// Global equilibrium check about the origin `(0, 0)`.
+    ///
+    /// Combines support reactions, global nodal loads and moments, and the
+    /// global resultants of member distributed and point loads (transformed from
+    /// member-local axes and applied at their true global locations).
+    /// See [`crate::frame::EquilibriumReport`].
+    ///
+    /// This is the beam-level equivalent of
+    /// [`FrameAnalysisResult::equilibrium`]; both share the same computation.
+    pub fn equilibrium(&self) -> crate::frame::EquilibriumReport {
+        let reactions = self.solver.reactions();
+        crate::frame::compute_equilibrium(&self.solver.model, &reactions)
+    }
 }
 
 /// Member end-release specification for a [`BeamElement`].
@@ -3214,6 +3238,18 @@ impl BeamSolver {
     /// `0.0`.
     pub fn displacements(&self) -> &[f64] {
         &self.u_global
+    }
+
+    /// Coordinates of a node, or `None` if the index is out of range.
+    pub fn node_position(&self, node_index: usize) -> Option<section_properties::geometry::Point> {
+        self.model.nodes.get(node_index).map(|n| n.point())
+    }
+
+    /// End-node indices `(node_i, node_j)` of an element, or `None` if out
+    /// of range.
+    pub fn element_nodes(&self, element_index: usize) -> Option<(usize, usize)> {
+        let el = self.model.elements.get(element_index)?;
+        Some((el.node_i, el.node_j))
     }
 
     /// Compute the global external support reactions.
