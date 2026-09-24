@@ -169,7 +169,18 @@ fn compare_vecs(rust_vec: &[f64], py_vec: &[f64], label: &str) {
     );
 }
 
+fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
 fn test_section(section_name: &str) {
+    let ws = workspace_root();
+    let py_global_path = ws.join(format!("python_global_{}.json", section_name));
     let tmp_out = format!(
         "{}/tmp_rust_on_py_tri6_{}.json",
         std::env::temp_dir().to_string_lossy(),
@@ -177,7 +188,7 @@ fn test_section(section_name: &str) {
     );
 
     section_properties::plastic::warping_fem::run_fem_on_python_tri6_mesh(
-        &format!("python_global_{}.json", section_name),
+        py_global_path.to_str().unwrap(),
         section_name,
         &tmp_out,
     )
@@ -185,7 +196,7 @@ fn test_section(section_name: &str) {
 
     println!("\n=== {} ===", section_name);
     let rust_data = load_json(&tmp_out);
-    let py_data = load_json(&format!("python_global_{}.json", section_name));
+    let py_data = load_json(py_global_path.to_str().unwrap());
 
     let rust_n = rust_data["n_dof"].as_u64().unwrap() as usize;
     let py_n = py_data["n_dof"].as_u64().unwrap() as usize;
