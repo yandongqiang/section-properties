@@ -724,6 +724,79 @@ impl FrameModel {
         self.inner.add_point_load(i, xi, fx, fy, mz)
     }
 
+    /// Create a [`LoadCase`] containing self-weight (body-force) loads for all
+    /// members.
+    ///
+    /// For each member the equivalent line load `w = ρ · A · g` is computed in
+    /// global coordinates, transformed to the member's local axes, and stored
+    /// as a [`DistributedLoad`].  The stiffness matrix is **not** modified —
+    /// self-weight enters the RHS only.
+    ///
+    /// # Units
+    ///
+    /// The library does not perform unit conversion; the user must ensure
+    /// consistent units.  With SI inputs (`density` in kg/m³, `area` in m²,
+    /// `gx`/`gy` in m/s²) the resulting line load is in N/m.
+    ///
+    /// # Gravity convention
+    ///
+    /// `gx` and `gy` are the components of the gravitational acceleration
+    /// vector in **global** coordinates.  For standard downward gravity on
+    /// Earth use `gx = 0.0, gy = -9.81`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `gx` or `gy` is non-finite, or if any
+    /// member has non-finite or negative density, or non-finite or
+    /// non-positive area.
+    pub fn self_weight(&self, gx: f64, gy: f64) -> Result<LoadCase, FemError> {
+        let loads = self.self_weight_distributed_loads(gx, gy)?;
+        let mut case = LoadCase::new("self_weight");
+        for dl in loads {
+            case.member_udl(MemberHandle::from_index(dl.element_idx), dl.qx, dl.qy)?;
+        }
+        Ok(case)
+    }
+
+    /// Compute the equivalent distributed loads for self-weight of all
+    /// members, expressed in each member's **local** axes.
+    ///
+    /// This is the shared backend for [`Self::self_weight`] and
+    /// [`LoadCase::add_self_weight`].
+    pub(crate) fn self_weight_distributed_loads(
+        &self,
+        gx: f64,
+        gy: f64,
+    ) -> Result<Vec<DistributedLoad>, FemError> {
+        if !gx.is_finite() || !gy.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "gravity acceleration must be finite, got gx = {gx}, gy = {gy}"
+            )));
+        }
+        let mut loads = Vec::with_capacity(self.inner.elements.len());
+        for (idx, element) in self.inner.elements.iter().enumerate() {
+            let density = element.material.density;
+            let area = element.section.area;
+            if !density.is_finite() || density < 0.0 {
+                return Err(FemError::InvalidInput(format!(
+                    "member {idx}: density must be finite and non-negative, got {density}"
+                )));
+            }
+            if !area.is_finite() || area <= 0.0 {
+                return Err(FemError::InvalidInput(format!(
+                    "member {idx}: cross-section area must be finite and positive, got {area}"
+                )));
+            }
+            let w_gx = density * area * gx;
+            let w_gy = density * area * gy;
+            let ni = self.inner.nodes[element.node_i].point();
+            let nj = self.inner.nodes[element.node_j].point();
+            let (qx, qy) = element.to_local_force(ni, nj, w_gx, w_gy);
+            loads.push(DistributedLoad::new(idx, qx, qy));
+        }
+        Ok(loads)
+    }
+
     /// Solve with automatic solver selection.
     ///
     /// Equivalent to `self.solve_with(SolverSelection::Auto)`. The registry

@@ -10,7 +10,7 @@
 //! [`PointLoad`], [`AppliedMoment`]) — no new load types are introduced.
 
 use crate::beam_fem::{AppliedMoment, DistributedLoad, FemError, PointLoad};
-use crate::frame::{MemberHandle, NodeHandle};
+use crate::frame::{FrameModel, MemberHandle, NodeHandle};
 
 // ---------------------------------------------------------------------------
 // LoadCase
@@ -189,6 +189,69 @@ impl LoadCase {
         }
         self.point_loads
             .push(PointLoad::new(member.index(), xi, fx, fy, mz));
+        Ok(())
+    }
+
+    /// Add self-weight (body-force) loads for all members of a [`FrameModel`].
+    ///
+    /// For each member the equivalent line load `w = ρ · A · g` is computed in
+    /// global coordinates, transformed to the member's local axes, and added
+    /// as a [`DistributedLoad`].  This is a **load source** — it modifies only
+    /// this `LoadCase`'s RHS, not the stiffness matrix.
+    ///
+    /// Repeated calls accumulate.  Self-weight added to one `LoadCase` does
+    /// not appear in other load cases — there is no cross-case contamination.
+    ///
+    /// # Units
+    ///
+    /// The library does not perform unit conversion; the user must ensure
+    /// consistent units.  With SI inputs (`density` in kg/m³, `area` in m²,
+    /// `gx`/`gy` in m/s²) the resulting line load is in N/m.
+    ///
+    /// # Gravity convention
+    ///
+    /// `gx` and `gy` are the components of the gravitational acceleration
+    /// vector in **global** coordinates.  For standard downward gravity on
+    /// Earth use `gx = 0.0, gy = -9.81`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use structural_analysis::{FrameModel, LoadCase, BeamSection, Dof};
+    /// # use section_properties::Material;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut frame = FrameModel::new();
+    /// let a = frame.add_node(0.0, 0.0)?;
+    /// let b = frame.add_node(6.0, 0.0)?;
+    /// frame.add_member(a, b, Material::new(200e9, 0.3, 7850.0, "Steel"),
+    ///                   BeamSection::new(5e-3, 2e-5))?;
+    /// frame.fix(a)?;
+    /// frame.fix(b)?;
+    ///
+    /// let mut dead = LoadCase::new("dead");
+    /// dead.add_self_weight(&frame, 0.0, -9.81)?;
+    ///
+    /// let result = frame.solve_case(&dead)?;
+    /// assert!(result.equilibrium().is_balanced());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `gx` or `gy` is non-finite, or if any
+    /// member has non-finite or negative density, or non-finite or
+    /// non-positive area.
+    pub fn add_self_weight(
+        &mut self,
+        model: &FrameModel,
+        gx: f64,
+        gy: f64,
+    ) -> Result<(), FemError> {
+        let loads = model.self_weight_distributed_loads(gx, gy)?;
+        for dl in loads {
+            self.distributed_loads.push(dl);
+        }
         Ok(())
     }
 
