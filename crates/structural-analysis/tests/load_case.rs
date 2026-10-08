@@ -4,7 +4,8 @@
 
 use section_properties::material::Material;
 use structural_analysis::{
-    BeamSection, Dof, FemError, FrameModel, LoadCase, LoadCombination, MemberHandle, NodeHandle,
+    BeamSection, Dof, FemError, FrameModel, LoadCase, LoadCombination, LoadSource, MemberHandle,
+    NodeHandle,
 };
 
 fn steel() -> Material {
@@ -124,7 +125,13 @@ fn test_loadcase_provenance() {
     let mut case = LoadCase::new("dead");
     case.nodal_load(b, 0.0, -1000.0).unwrap();
     let result = frame.solve_case(&case).unwrap();
-    assert_eq!(result.load_source(), Some("case:dead"));
+    assert_eq!(
+        result.load_source(),
+        &LoadSource::LoadCase {
+            name: "dead".to_string(),
+            has_prescribed_displacements: false,
+        }
+    );
 }
 
 // §2 — Two independent LoadCases solve independently
@@ -606,7 +613,16 @@ fn test_combination_provenance() {
     let mut combo = LoadCombination::new("1.4P");
     combo.add_case(&case, 1.4).unwrap();
     let result = frame.solve_combination(&combo).unwrap();
-    assert_eq!(result.load_source(), Some("combination:1.4P"));
+    assert_eq!(
+        result.load_source(),
+        &LoadSource::LoadCombination {
+            name: "1.4P".to_string(),
+            terms: vec![structural_analysis::LoadCombinationTerm {
+                case_name: "P".to_string(),
+                factor: 1.4,
+            }],
+        }
+    );
 }
 
 #[test]
@@ -615,7 +631,7 @@ fn test_direct_solve_no_provenance() {
     let mut f = frame.clone();
     f.nodal_load(b, 0.0, -1000.0).unwrap();
     let result = f.solve().unwrap();
-    assert_eq!(result.load_source(), None);
+    assert_eq!(result.load_source(), &LoadSource::ModelLoads);
 }
 
 #[test]

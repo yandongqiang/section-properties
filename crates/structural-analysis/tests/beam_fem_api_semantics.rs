@@ -17,7 +17,9 @@
 
 use section_properties::SolverSelection;
 use section_properties::material::Material;
-use structural_analysis::beam_fem::{BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver};
+use structural_analysis::beam_fem::{
+    BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, FemError,
+};
 
 const DIRECT: [&str; 3] = ["dense", "skyline_ldlt", "sparse_lu"];
 const L: f64 = 1.0;
@@ -835,4 +837,31 @@ fn test_legacy_add_nodal_force_panics_on_invalid_node() {
 fn test_legacy_fix_node_panics_on_invalid_node() {
     let mut m = beam(1);
     m.fix_node(9);
+}
+
+#[test]
+fn test_overlapping_supports_are_rejected_at_beam_layer() {
+    let mut spring_model = beam(1);
+    spring_model.fix_node(0);
+    spring_model.spring(1, Dof::Uy, 1.0e6).unwrap();
+    spring_model.try_override(1, Dof::Uy, -0.001).unwrap();
+    match BeamSolver::from_model(&spring_model)
+        .err()
+        .expect("invalid model")
+    {
+        FemError::InvalidModel(message) => assert!(message.contains("spring support")),
+        other => panic!("expected InvalidModel, got {other:?}"),
+    }
+
+    let mut roller_model = beam(1);
+    roller_model.fix_node(0);
+    roller_model.inclined_roller(1, 1.0, 1.0, 0.0).unwrap();
+    roller_model.fix_dof(1, 1, 0.0);
+    match BeamSolver::from_model(&roller_model)
+        .err()
+        .expect("invalid model")
+    {
+        FemError::InvalidModel(message) => assert!(message.contains("inclined roller")),
+        other => panic!("expected InvalidModel, got {other:?}"),
+    }
 }

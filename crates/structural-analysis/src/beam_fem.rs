@@ -258,8 +258,8 @@ pub struct BeamNodalDisplacement {
 /// ([`BeamSolver::element_end_forces`]) and from a section internal force
 /// ([`SectionForces`]).
 ///
-/// Only constrained DOFs contribute a reaction; unconstrained DOFs are
-/// reported as exactly `0.0` (see [`BeamAnalysisResult::reaction`]). Signs are
+/// At a constrained DOF this is the support reaction. At a spring DOF it is
+/// `-k·u`; at a free DOF it is the round-off residual of `K·u - f`. Signs are
 /// such that, at global equilibrium, `Σ reactions + Σ applied loads = 0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BeamReaction {
@@ -308,8 +308,7 @@ pub struct BeamReaction {
 #[derive(Clone)]
 pub struct BeamAnalysisResult<'a> {
     solver: &'a BeamSolver,
-    /// Global reaction snapshot, length `n_dof`, with unconstrained DOFs set
-    /// to exactly zero.
+    /// Global reaction snapshot `R = K_original · u - f_global`, length `n_dof`.
     reactions: Vec<f64>,
 }
 
@@ -368,12 +367,12 @@ impl<'a> BeamAnalysisResult<'a> {
         })
     }
 
-    /// Support reaction (GLOBAL) at `node_index`.
+    /// Reaction (GLOBAL) at `node_index`, using the same convention as
+    /// [`BeamSolver::reactions`].
     ///
-    /// Only constrained DOFs carry a value; unconstrained DOFs are reported as
-    /// exactly `0.0` (the raw residual `K·u - f` at a free DOF is numerical
-    /// round-off and is not a physical support reaction). At a node that is not
-    /// a support, all three components are therefore `0.0`.
+    /// At a constrained DOF this is the support reaction. At a spring DOF it is
+    /// the physical spring force `-k·u`. At a free DOF it is the round-off
+    /// residual of the equilibrium equation, not a physical reaction.
     ///
     /// # Errors
     ///
@@ -461,8 +460,7 @@ impl<'a> BeamAnalysisResult<'a> {
     /// This is the beam-level equivalent of
     /// [`crate::frame::FrameAnalysisResult::equilibrium`]; both share the same computation.
     pub fn equilibrium(&self) -> crate::frame::EquilibriumReport {
-        let reactions = self.solver.reactions();
-        crate::frame::compute_equilibrium(&self.solver.model, &reactions)
+        crate::frame::compute_equilibrium(&self.solver.model, &self.reactions)
     }
 }
 
@@ -1960,6 +1958,34 @@ impl BeamModel {
         Ok(())
     }
 
+    pub(crate) fn validate_support_combinations(&self) -> Result<(), FemError> {
+        let fixed: std::collections::HashSet<(usize, usize)> = self
+            .fixed_dofs
+            .iter()
+            .map(|&(node, dof, _)| (node, dof))
+            .collect();
+        for &(node, dof, _) in &self.spring_supports {
+            if fixed.contains(&(node, dof)) {
+                return Err(FemError::InvalidModel(format!(
+                    "spring support at node {node} DOF {dof} overlaps a prescribed constraint"
+                )));
+            }
+            if dof < 2 && self.inclined_rollers.iter().any(|&(n, _, _, _)| n == node) {
+                return Err(FemError::InvalidModel(format!(
+                    "spring support at node {node} DOF {dof} overlaps an inclined roller"
+                )));
+            }
+        }
+        for &(node, _, _, _) in &self.inclined_rollers {
+            if self.fixed_dofs.iter().any(|&(n, d, _)| n == node && d < 2) {
+                return Err(FemError::InvalidModel(format!(
+                    "inclined roller at node {node} overlaps a prescribed translation constraint"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Add a distributed load on an element (in LOCAL coordinates)
     /// element_idx is the index in the elements Vec (0, 1, 2, ...)
     pub fn add_distributed_load(
@@ -2439,6 +2465,7 @@ impl BeamSolver {
         if n_dof == 0 {
             return Err(FemError::InvalidModel("Model has no nodes".to_string()));
         }
+        model.validate_support_combinations()?;
 
         // Validate element node indices
         for (elem_idx, element) in model.elements.iter().enumerate() {
@@ -3329,7 +3356,7 @@ impl BeamSolver {
     /// returns the raw algebraic quantity `K·0 - f = -f` — **not** physical
     /// support reactions. Check [`Self::solver_name`] (`Some(..)` only after a
     /// successful solve), or use [`Self::results`], whose reaction snapshot
-    /// sets free DOFs to exactly `0.0`.
+    /// uses the same convention.
     pub fn reactions(&self) -> Vec<f64> {
         // R = K_original * u - f_global
         let mut reactions = vec![0.0; self.n_dof];
@@ -3385,11 +3412,8 @@ impl BeamSolver {
             )));
         }
         let idx = self.model.dof_index(node_idx, dof);
-        if idx < self.reactions().len() {
-            Ok(self.reactions()[idx])
-        } else {
-            Ok(0.0)
-        }
+        let reactions = self.reactions();
+        Ok(reactions.get(idx).copied().unwrap_or(0.0))
     }
 
     /// Typed counterpart of [`Self::reaction`]: **global** support reaction of
@@ -3400,9 +3424,9 @@ impl BeamSolver {
     /// - `Dof::Rz` → rotational reaction about Z (counter-clockwise positive).
     ///
     /// Delegates to the same [`Self::reactions`] vector, so the value is
-    /// exactly what [`Self::reaction`] returns for the corresponding raw index;
-    /// only a single reaction evaluation is performed. At a free DOF the value
-    /// is numerically zero.
+    /// exactly what [`Self::reaction`] returns for the corresponding raw index.
+    /// At a free DOF the value is the equilibrium round-off residual; at a
+    /// spring DOF it is the physical spring force `-k·u`.
     ///
     /// # Errors
     ///
@@ -4088,19 +4112,13 @@ impl BeamSolver {
     /// Build a unified, read-only [`BeamAnalysisResult`] view of this solver.
     ///
     /// This does **not** run the solver: it is a cheap, infallible view over the
-    /// current displacement state, so call [`Self::solve`] first. The reaction
-    /// vector is snapshotted once here (masking unconstrained DOFs to exactly
-    /// zero); everything else is delegated lazily to the solver.
+    /// current displacement state. The reaction
+    /// vector is snapshotted once here; everything else is delegated lazily to
+    /// the solver.
     pub fn results(&self) -> BeamAnalysisResult<'_> {
-        let mut reactions = self.reactions();
-        for (i, reaction) in reactions.iter_mut().enumerate() {
-            if !self.fixed_dofs[i] {
-                *reaction = 0.0;
-            }
-        }
         BeamAnalysisResult {
             solver: self,
-            reactions,
+            reactions: self.reactions(),
         }
     }
 }

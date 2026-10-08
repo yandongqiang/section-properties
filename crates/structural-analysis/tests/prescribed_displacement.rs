@@ -341,3 +341,39 @@ fn j_prepared_analysis_rejects_new_constraint() {
         "direct solve_case should succeed for new constraint"
     );
 }
+
+#[test]
+fn k_prescribed_displacement_rejects_spring_support() {
+    let (mut frame, [_a, b]) = make_cantilever();
+    frame.spring(b, Dof::Uy, 1.0e6).unwrap();
+
+    let mut case = LoadCase::new("spring_conflict");
+    case.prescribed_displacement(b, Dof::Uy, -0.001).unwrap();
+
+    match frame.solve_case(&case).unwrap_err() {
+        FemError::InvalidInput(message) => assert!(message.contains("spring support"), "{message}"),
+        other => panic!("expected spring conflict, got {other:?}"),
+    }
+
+    let prepared = frame.prepare().unwrap();
+    match prepared.solve_case(&case).unwrap_err() {
+        FemError::InvalidInput(message) => assert!(message.contains("spring support"), "{message}"),
+        other => panic!("expected spring conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn l_prescribed_displacement_rejects_inclined_roller() {
+    let (mut frame, [_a, b]) = make_cantilever();
+    frame.inclined_roller(b, 1.0, 1.0, 0.0).unwrap();
+
+    let mut case = LoadCase::new("roller_conflict");
+    case.prescribed_displacement(b, Dof::Uy, -0.001).unwrap();
+
+    match frame.solve_case(&case).unwrap_err() {
+        FemError::InvalidInput(message) => {
+            assert!(message.contains("inclined roller"), "{message}")
+        }
+        other => panic!("expected roller conflict, got {other:?}"),
+    }
+}

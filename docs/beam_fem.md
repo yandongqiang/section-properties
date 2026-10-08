@@ -272,22 +272,19 @@ typed-ID redesign would be a breaking change with no numerical benefit.
   displacement vector and the reaction vector; they return exactly what
   `displacement(node, 0/1/2)` and `reaction(node, 0/1/2)` return, and
   `Err(FemError::InvalidInput)` for an out-of-bounds node.
-- `BeamAnalysisResult::displacement(node)` / `reaction(node)` remain the
-  struct-based accessors (`BeamNodalDisplacement`, `BeamReaction`). One
-  documented difference: `BeamAnalysisResult::reaction` reports **exactly 0.0**
-  at free DOFs (the raw residual there is round-off, not a physical support
-  reaction), whereas `BeamSolver::reactions()` returns the raw `K·u - f`
-  residual (~1e-13). The snapshot is produced by `BeamSolver::results()`, which
-  recomputes the reactions and zeroes every unconstrained DOF. No new result
-  structs were added; the existing ones are generated from the same vectors.
+- `BeamAnalysisResult::displacement(node)` / `reaction(node)` are the
+  struct-based accessors (`BeamNodalDisplacement`, `BeamReaction`). They use the
+  same reaction convention as `BeamSolver::reactions()`: `K·u - f`, snapshotted
+  once by `BeamSolver::results()`. A constrained DOF carries the support
+  reaction, a spring DOF carries `-k·u`, and a free DOF carries the equilibrium
+  round-off residual (not a physical reaction).
 - Reading results before a successful solve: the displacement vector is
   initialised to zero, so displacement access returns `0.0`; reactions evaluated
   before a solve are `K·0 - f` and are **not** physical support reactions.
   `BeamSolver::solver_name()` is `Some(..)` only after a successful solve.
 - The legacy raw-index `displacement(node, dof)` / `reaction(node, dof)` are
-  unchanged and kept for compatibility. Beware that a raw `dof >= 3` in those
-  APIs aliases into the following node (`dof_index = 3*node + dof`); the typed
-  `Dof` API makes that impossible.
+  unchanged and kept for compatibility. A raw `dof >= 3` is rejected with
+  `FemError::InvalidInput`; use the typed `Dof` API.
 
 ## Notes
 

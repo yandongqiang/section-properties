@@ -281,8 +281,12 @@ impl LoadCase {
     /// constraint on the same DOF (e.g. from [`FrameModel::fix`] or
     /// [`FrameModel::pin`]).  If the DOF is not already constrained, a new
     /// constraint is added — this changes the constrained DOF set and
-    /// therefore `K_ff`; the factorisation in `PreparedFrameAnalysis` is
-    /// not reused in that case (an error is returned).
+    /// therefore `K_ff`; the factorisation in
+    /// [`PreparedFrameAnalysis`](crate::frame::PreparedFrameAnalysis) is not
+    /// reused in that case (an error is returned). A prescription that
+    /// targets a spring or inclined roller is rejected because those supports
+    /// have their own stiffness/rotated constraint basis; prescribe the
+    /// inclined displacement through the roller API instead.
     ///
     /// # Interaction with [`LoadCombination`]
     ///
@@ -339,6 +343,76 @@ impl LoadCase {
     /// Read access to the raw prescribed displacements `(node_idx, dof_idx, value)`.
     pub(crate) fn prescribed_displacements(&self) -> &[(usize, usize, f64)] {
         &self.prescribed_displacements
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoadSource
+// ---------------------------------------------------------------------------
+
+/// One term of a solved [`LoadCombination`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadCombinationTerm {
+    /// Name of the contributing load case.
+    pub case_name: String,
+    /// Factor applied to that case.
+    pub factor: f64,
+}
+
+/// Typed provenance of the load that produced an analysis result.
+///
+/// This replaces the previous `Option<String>` label so that model-resident
+/// loads, a single load case, and a load combination are unambiguous. A
+/// combination also carries its terms, so a result remains self-describing
+/// without an external name lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadSource {
+    /// Loads stored directly on the model (`FrameModel::solve`).
+    ModelLoads,
+    /// A single named [`LoadCase`].
+    LoadCase {
+        /// Case name supplied by the caller.
+        name: String,
+        /// Whether the case prescribes any displacement.
+        has_prescribed_displacements: bool,
+    },
+    /// A named [`LoadCombination`] and its scaled terms.
+    LoadCombination {
+        /// Combination name supplied by the caller.
+        name: String,
+        /// Terms actually combined, in insertion order.
+        terms: Vec<LoadCombinationTerm>,
+    },
+}
+
+impl LoadSource {
+    /// Case or combination name, or `None` for model-resident loads.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::ModelLoads => None,
+            Self::LoadCase { name, .. } | Self::LoadCombination { name, .. } => Some(name),
+        }
+    }
+
+    /// Whether this source prescribes any displacement.
+    pub fn has_prescribed_displacements(&self) -> bool {
+        matches!(
+            self,
+            Self::LoadCase {
+                has_prescribed_displacements: true,
+                ..
+            }
+        )
+    }
+}
+
+impl std::fmt::Display for LoadSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModelLoads => f.write_str("model loads"),
+            Self::LoadCase { name, .. } => write!(f, "case:{name}"),
+            Self::LoadCombination { name, .. } => write!(f, "combination:{name}"),
+        }
     }
 }
 

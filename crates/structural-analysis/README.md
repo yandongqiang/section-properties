@@ -30,14 +30,15 @@ solvers).
   factors
 - **Results**: displacements, reactions, member end forces (local & global),
   section forces `N(x)`, `V(x)`, `M(x)`, force diagrams
+- **Post-processing**: multi-case member, displacement and support-reaction
+  envelopes with typed governing load sources
 - **Diagnostics**: mechanism detection, rigid-body mode classification,
   ill-conditioning reporting
 - **Solvers**: dense Gaussian, skyline LDLᵀ, sparse LU, CG, ICCG (via
   `section-properties`)
 
 **Not supported**: plate/shell/solid elements, nonlinear
-analysis, dynamic analysis, buckling, design code combinations, envelope
-generation.
+analysis, dynamic analysis, buckling, design code combinations.
 
 ## Relationship with `section-properties`
 
@@ -159,8 +160,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 |---------|-----|------------------|
 | Fixed (encastré) | `frame.fix(node)` | ux, uy, rz |
 | Pinned | `frame.pin(node)` | ux, uy |
-| Roller (free in x) | `frame.roller_x(node)` | uy, rz |
-| Roller (free in y) | `frame.roller_y(node)` | ux, rz |
+| Roller (free in y) | `frame.roller_x(node)` | ux |
+| Roller (free in x) | `frame.roller_y(node)` | uy |
 | Arbitrary restraint | `frame.restrain(node, dof, value)` | specified DOF |
 | Spring | `frame.spring(node, dof, k)` | none (adds stiffness) |
 | Inclined roller | `frame.inclined_roller(node, nx, ny, value)` | along (nx, ny) |

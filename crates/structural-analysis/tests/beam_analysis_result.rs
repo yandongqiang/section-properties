@@ -110,14 +110,13 @@ fn test_result_reactions_cantilever_tip_force() {
     assert_close(r0.fy, p, 1e-9, "R0 fy");
     assert_close(r0.mz, p * l, 1e-9, "R0 mz");
 
-    // Free node carries no support reaction (exactly zero, not a residual).
-    let r1 = r.reaction(1).unwrap();
-    assert_eq!(r1.fx, 0.0);
-    assert_eq!(r1.fy, 0.0);
-    assert_eq!(r1.mz, 0.0);
-
-    // Consistency with the raw solver reaction at constrained DOFs.
+    // Free DOFs report the raw round-off residual, matching BeamSolver::reactions.
     let raw = solver.reactions();
+    let r1 = r.reaction(1).unwrap();
+    assert_close(r1.fx, raw[3], 1e-12, "R1 fx == raw");
+    assert_close(r1.fy, raw[4], 1e-12, "R1 fy == raw");
+    assert_close(r1.mz, raw[5], 1e-12, "R1 mz == raw");
+
     assert_close(r0.fy, raw[1], 1e-12, "R0 fy == solver.reactions()[1]");
     assert_close(r0.mz, raw[2], 1e-12, "R0 mz == solver.reactions()[2]");
 }
@@ -228,15 +227,16 @@ fn test_result_multi_element_reactions() {
     assert_eq!(r.n_nodes(), 4);
     assert_eq!(r.n_elements(), 3);
 
-    // Only the constrained node reports a reaction.
     let r0 = r.reaction(0).unwrap();
     assert_close(r0.fy, p, 1e-9, "Ry");
     assert_close(r0.mz, p * 6.0, 1e-9, "Rz");
+
+    // Free nodes report the raw equilibrium residual, which is round-off only.
     for n in 1..4 {
         let rn = r.reaction(n).unwrap();
-        assert_eq!(rn.fx, 0.0, "node {} fx", n);
-        assert_eq!(rn.fy, 0.0, "node {} fy", n);
-        assert_eq!(rn.mz, 0.0, "node {} mz", n);
+        assert_close(rn.fx, 0.0, 1e-9, &format!("node {n} fx"));
+        assert_close(rn.fy, 0.0, 1e-9, &format!("node {n} fy"));
+        assert_close(rn.mz, 0.0, 1e-9, &format!("node {n} mz"));
     }
 
     // Global equilibrium with the applied tip force.

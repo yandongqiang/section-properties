@@ -6,7 +6,7 @@
 
 use section_properties::Material;
 use structural_analysis::{
-    BeamSection, Dof, FrameModel, LoadCase, LoadCombination, MemberHandle, NodeHandle,
+    BeamSection, Dof, FrameModel, LoadCase, LoadCombination, LoadSource, MemberHandle, NodeHandle,
 };
 
 const E: f64 = 200e9;
@@ -167,9 +167,16 @@ fn solve_cases_preserves_order() -> Result<(), Box<dyn std::error::Error>> {
     let results = prepared.solve_cases(&[dead.clone(), live.clone(), wind.clone()])?;
 
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0].load_source(), Some("case:dead"));
-    assert_eq!(results[1].load_source(), Some("case:live"));
-    assert_eq!(results[2].load_source(), Some("case:wind"));
+    assert_eq!(results[0].load_source().name(), Some("dead"));
+    assert_eq!(results[1].load_source().name(), Some("live"));
+    assert_eq!(results[2].load_source().name(), Some("wind"));
+    assert!(matches!(
+        results[0].load_source(),
+        LoadSource::LoadCase {
+            has_prescribed_displacements: false,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -210,7 +217,7 @@ fn load_combination_equivalence() -> Result<(), Box<dyn std::error::Error>> {
     let r_prep = prepared.solve_combination(&combo)?;
 
     assert_results_match(&r_indiv, &r_prep, "combination");
-    assert_eq!(r_prep.load_source(), Some("combination:ULS"));
+    assert_eq!(r_prep.load_source().name(), Some("ULS"));
     Ok(())
 }
 

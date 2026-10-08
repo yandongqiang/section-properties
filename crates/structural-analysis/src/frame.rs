@@ -68,7 +68,7 @@ use crate::beam_fem::{
     AppliedMoment, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, DistributedLoad, Dof,
     EndRelease, FemError, PointLoad, ReducedSystem,
 };
-use crate::load::{LoadCase, LoadCombination};
+use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource};
 use crate::mechanism::diagnose_reduced;
 use section_properties::SolverSelection;
 use section_properties::fea::solver::{LinearSolver, SolverRegistry};
@@ -320,6 +320,10 @@ impl EquilibriumReport {
 /// Wraps the existing [`BeamModel`] and delegates all mechanics to it; supports
 /// arbitrary planar connectivity (not just a straight beam), per-DOF
 /// constraints and prescribed displacements.
+///
+/// Support constructors record their request immediately; overlapping fixed
+/// DOFs, springs and inclined rollers are rejected by [`Self::validate`] when
+/// the model is solved, prepared or diagnosed.
 #[derive(Debug, Clone)]
 pub struct FrameModel {
     inner: BeamModel,
@@ -852,7 +856,7 @@ impl FrameModel {
     /// etc.) are **ignored** — only the load case's loads are used.
     ///
     /// The result's [`load_source`](FrameAnalysisResult::load_source) is
-    /// `"case:{name}"`.
+    /// `LoadSource::LoadCase`.
     ///
     /// # Errors
     ///
@@ -872,10 +876,12 @@ impl FrameModel {
             let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
             return Err(with_structural_diagnosis(e, diagnosis));
         }
+        let reactions = beam.reactions();
         Ok(FrameAnalysisResult {
             beam,
             model: FrameModel { inner: model },
-            load_source: Some(format!("case:{}", case.name())),
+            reactions,
+            load_source: load_case_source(case),
         })
     }
 
@@ -887,7 +893,7 @@ impl FrameModel {
     /// of the solve), but more efficient (a single factorisation).
     ///
     /// The result's [`load_source`](FrameAnalysisResult::load_source) is
-    /// `"combination:{name}"`.
+    /// `LoadSource::LoadCombination` and records every scaled term.
     ///
     /// # Errors
     ///
@@ -946,10 +952,12 @@ impl FrameModel {
             let diagnosis = beam.reduced_system().map(|rs| self.classify(rs));
             return Err(with_structural_diagnosis(e, diagnosis));
         }
+        let reactions = beam.reactions();
         Ok(FrameAnalysisResult {
             beam,
             model: FrameModel { inner: merged },
-            load_source: Some(format!("combination:{}", combo.name())),
+            reactions,
+            load_source: load_combination_source(combo),
         })
     }
 
@@ -1076,7 +1084,8 @@ impl FrameModel {
     ///
     /// 1. the model is not empty (at least one node and one member);
     /// 2. no **orphan nodes** - every node is used by at least one member;
-    /// 3. the members form a **single connected component**.
+    /// 3. the members form a **single connected component**;
+    /// 4. fixed DOFs, springs and inclined rollers do not overlap.
     ///
     /// Per-element checks (zero length, duplicate connectivity, invalid
     /// material/section) are enforced when the member is added.
@@ -1118,6 +1127,9 @@ impl FrameModel {
                  structural system is required"
             )));
         }
+
+        inner.validate_support_combinations()?;
+
         Ok(())
     }
 
@@ -1258,12 +1270,44 @@ impl FrameModel {
         m
     }
 
+    /// Reject prescribed displacements that conflict with a model spring or an
+    /// inclined roller, whose stiffness/constraint basis is not compatible with
+    /// a per-case displacement prescription.
+    fn check_prescribed_supports(
+        model: &BeamModel,
+        prescribed: &[(usize, usize, f64)],
+    ) -> Result<(), FemError> {
+        for &(node_idx, dof, _) in prescribed {
+            if model
+                .spring_supports
+                .iter()
+                .any(|&(node, spring_dof, _)| node == node_idx && spring_dof == dof)
+            {
+                return Err(FemError::InvalidInput(format!(
+                    "prescribed displacement at node {node_idx} DOF {dof} conflicts with a spring support"
+                )));
+            }
+            if dof != Dof::Rz.index()
+                && model
+                    .inclined_rollers
+                    .iter()
+                    .any(|&(node, _, _, _)| node == node_idx)
+            {
+                return Err(FemError::InvalidInput(format!(
+                    "prescribed displacement at node {node_idx} DOF {dof} conflicts with an inclined roller; use the roller prescribed value instead"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Apply a load case's prescribed displacements to a BeamModel, overriding
     /// existing constraints or adding new ones.
     fn apply_prescribed_displacements(
         model: &mut BeamModel,
         prescribed: &[(usize, usize, f64)],
     ) -> Result<(), FemError> {
+        Self::check_prescribed_supports(model, prescribed)?;
         for &(node_idx, dof, value) in prescribed {
             model.try_override_dof(node_idx, dof, value)?;
         }
@@ -1278,6 +1322,7 @@ impl FrameModel {
         &self,
         prescribed: &[(usize, usize, f64)],
     ) -> Result<(), FemError> {
+        Self::check_prescribed_supports(&self.inner, prescribed)?;
         let constrained: std::collections::HashSet<(usize, usize)> = self
             .inner
             .fixed_dofs
@@ -1295,6 +1340,27 @@ impl FrameModel {
             }
         }
         Ok(())
+    }
+}
+
+fn load_case_source(case: &LoadCase) -> LoadSource {
+    LoadSource::LoadCase {
+        name: case.name().to_string(),
+        has_prescribed_displacements: case.has_prescribed_displacements(),
+    }
+}
+
+fn load_combination_source(combo: &LoadCombination) -> LoadSource {
+    LoadSource::LoadCombination {
+        name: combo.name().to_string(),
+        terms: combo
+            .terms()
+            .iter()
+            .map(|(case, factor)| LoadCombinationTerm {
+                case_name: case.name().to_string(),
+                factor: *factor,
+            })
+            .collect(),
     }
 }
 
@@ -1381,10 +1447,12 @@ impl<'a> FrameSolver<'a> {
             let diagnosis = beam.reduced_system().map(|rs| self.model.classify(rs));
             return Err(with_structural_diagnosis(e, diagnosis));
         }
+        let reactions = beam.reactions();
         Ok(FrameAnalysisResult {
             beam,
             model: self.model.clone(),
-            load_source: None,
+            reactions,
+            load_source: LoadSource::ModelLoads,
         })
     }
 }
@@ -1418,12 +1486,13 @@ fn with_structural_diagnosis(err: FemError, diagnosis: Option<StructuralDiagnost
 /// Solved frame: frame-level access to displacements, reactions, member end
 /// forces and global equilibrium.
 ///
-/// All values come from the existing [`BeamSolver`]; nothing is recomputed with
-/// a second formulation.
+/// The result owns its displacement-bearing solver, model snapshot and the
+/// global reaction vector. Nothing is recomputed with a second formulation.
 pub struct FrameAnalysisResult {
     beam: BeamSolver,
     model: FrameModel,
-    load_source: Option<String>,
+    reactions: Vec<f64>,
+    load_source: LoadSource,
 }
 
 impl std::fmt::Debug for FrameAnalysisResult {
@@ -1443,13 +1512,9 @@ impl FrameAnalysisResult {
         self.beam.solver_name()
     }
 
-    /// Provenance of the load that produced this result.
-    ///
-    /// `None` for a direct [`FrameModel::solve`] / [`FrameModel::solve_with`];
-    /// `"case:{name}"` for [`FrameModel::solve_case`];
-    /// `"combination:{name}"` for [`FrameModel::solve_combination`].
-    pub fn load_source(&self) -> Option<&str> {
-        self.load_source.as_deref()
+    /// Typed provenance of the load that produced this result.
+    pub fn load_source(&self) -> &LoadSource {
+        &self.load_source
     }
 
     /// Number of nodes in the solved frame.
@@ -1501,9 +1566,14 @@ impl FrameAnalysisResult {
         self.beam.displacements()
     }
 
-    /// Global support reactions, laid out `[Rx, Ry, Mz]` per node.
-    pub fn reactions(&self) -> Vec<f64> {
-        self.beam.reactions()
+    /// Global reaction vector `R = K_original · u - f_global`, laid out
+    /// `[Rx, Ry, Mz]` per node.
+    ///
+    /// At a constrained DOF this is the support reaction. At a spring DOF it is
+    /// the physical spring force `-k·u`. At a free DOF it is the round-off
+    /// residual of the equilibrium equation, not a physical reaction.
+    pub fn reactions(&self) -> &[f64] {
+        &self.reactions
     }
 
     /// Displacement of a DOF at a node (global).
@@ -1516,17 +1586,18 @@ impl FrameAnalysisResult {
         self.beam.displacement_dof(node.index(), dof)
     }
 
-    /// Support reaction of a DOF at a node (global).
+    /// Reaction of a DOF at a node (global), from the owned result snapshot.
     ///
-    /// Free DOFs report the raw (round-off) residual, exactly as
-    /// [`BeamSolver::reaction_dof`] does.
+    /// At a constrained DOF this is the support reaction, at a spring DOF it is
+    /// `-k·u`, and at a free DOF it is the round-off residual of the
+    /// equilibrium equation.
     ///
     /// # Errors
     ///
     /// [`FemError::InvalidNode`] if the handle is not valid for this frame.
     pub fn reaction(&self, node: NodeHandle, dof: Dof) -> Result<f64, FemError> {
         self.check_node(node)?;
-        self.beam.reaction_dof(node.index(), dof)
+        Ok(self.reactions[node.index() * 3 + dof.index()])
     }
 
     /// Member end forces in **local** axes:
@@ -1637,8 +1708,7 @@ impl FrameAnalysisResult {
     /// member-local axes and applied at their true global locations).
     /// See [`EquilibriumReport`].
     pub fn equilibrium(&self) -> EquilibriumReport {
-        let reactions = self.beam.reactions();
-        compute_equilibrium(&self.model.inner, &reactions)
+        compute_equilibrium(&self.model.inner, &self.reactions)
     }
 
     fn check_node(&self, node: NodeHandle) -> Result<(), FemError> {
@@ -1717,7 +1787,7 @@ impl<'a> PreparedFrameAnalysis<'a> {
     /// back-substitution only — no re-factorisation.
     ///
     /// The result's [`load_source`](FrameAnalysisResult::load_source) is
-    /// `"case:{name}"`.
+    /// `LoadSource::LoadCase`.
     ///
     /// # Errors
     ///
@@ -1739,10 +1809,12 @@ impl<'a> PreparedFrameAnalysis<'a> {
 
         self.solve_beam(&mut beam)?;
 
+        let reactions = beam.reactions();
         Ok(FrameAnalysisResult {
             beam,
             model: FrameModel { inner: model },
-            load_source: Some(format!("case:{}", case.name())),
+            reactions,
+            load_source: load_case_source(case),
         })
     }
 
@@ -1769,7 +1841,7 @@ impl<'a> PreparedFrameAnalysis<'a> {
     /// a single back-substitution is performed.
     ///
     /// The result's [`load_source`](FrameAnalysisResult::load_source) is
-    /// `"combination:{name}"`.
+    /// `LoadSource::LoadCombination` and records every scaled term.
     ///
     /// # Errors
     ///
@@ -1828,10 +1900,12 @@ impl<'a> PreparedFrameAnalysis<'a> {
 
         self.solve_beam(&mut beam)?;
 
+        let reactions = beam.reactions();
         Ok(FrameAnalysisResult {
             beam,
             model: FrameModel { inner: merged },
-            load_source: Some(format!("combination:{}", combo.name())),
+            reactions,
+            load_source: load_combination_source(combo),
         })
     }
 

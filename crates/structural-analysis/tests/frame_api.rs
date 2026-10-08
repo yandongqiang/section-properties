@@ -399,7 +399,7 @@ fn test8_solver_cross_validation() -> Result<(), FemError> {
         let r = f.solve_with(SolverSelection::named(name))?;
         assert_eq!(r.solver_name(), Some(name));
         let u = r.displacements().to_vec();
-        let reac = r.reactions();
+        let reac = r.reactions().to_vec();
         assert!(
             r.equilibrium().is_balanced(),
             "{name}: {:?}",
@@ -1041,5 +1041,45 @@ fn lifecycle_incomplete_model_errors_and_recovers() -> Result<(), FemError> {
     assert_eq!(r.n_members(), 1);
     assert!(r.equilibrium().is_balanced(), "{:?}", r.equilibrium());
     println!("  lifecycle: empty / member-less / unrestrained models fail cleanly, then recover");
+    Ok(())
+}
+
+#[test]
+fn model_spring_constraint_conflict_is_rejected() -> Result<(), FemError> {
+    let mut f = FrameModel::new();
+    let a = f.add_node(0.0, 0.0)?;
+    let b = f.add_node(4.0, 0.0)?;
+    f.add_member(a, b, steel(), sec())?;
+    f.fix(a)?;
+    f.spring(b, Dof::Uy, 1.0e6)?;
+    f.restrain(b, Dof::Uy, -0.001)?;
+
+    match f
+        .solve()
+        .expect_err("spring/constraint overlap must not solve")
+    {
+        FemError::InvalidModel(message) => assert!(message.contains("spring support")),
+        other => panic!("expected InvalidModel, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn model_inclined_roller_constraint_conflict_is_rejected() -> Result<(), FemError> {
+    let mut f = FrameModel::new();
+    let a = f.add_node(0.0, 0.0)?;
+    let b = f.add_node(4.0, 0.0)?;
+    f.add_member(a, b, steel(), sec())?;
+    f.fix(a)?;
+    f.inclined_roller(b, 1.0, 1.0, 0.0)?;
+    f.roller_y(b)?;
+
+    match f
+        .solve()
+        .expect_err("roller/constraint overlap must not solve")
+    {
+        FemError::InvalidModel(message) => assert!(message.contains("inclined roller")),
+        other => panic!("expected InvalidModel, got {other:?}"),
+    }
     Ok(())
 }

@@ -1,14 +1,9 @@
-//! Post-processing data: envelope and derived results.
+//! Post-processing data: envelopes and derived results.
 //!
-//! This module contains types that aggregate or transform already-computed
-//! [`crate::frame::FrameAnalysisResult`] data. They do **not** call solver
-//! methods or re-assemble stiffness matrices — they are pure consumers of
-//! analysis results.
+//! This module aggregates already-computed [`FrameAnalysisResult`] data. It
+//! never re-assembles a stiffness matrix and never mutates analysis state.
 //!
 //! # Layer
-//!
-//! These types sit between *Analysis Result* (Layer B) and *Visualization*
-//! (Layer D):
 //!
 //! ```text
 //! Analysis Result → Post-processing Data → Visualization
@@ -16,61 +11,73 @@
 
 use crate::FemError;
 use crate::beam_fem::{Dof, SectionForces};
-use crate::frame::{FrameAnalysisResult, NodeHandle};
+use crate::frame::{FrameAnalysisResult, MemberHandle};
+use crate::load::LoadSource;
 
-// ---------------------------------------------------------------------------
-// Envelope
-// ---------------------------------------------------------------------------
+/// Governing-source indices for the three section-force components. Every
+/// index refers to [`Envelope::sources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionForceSources {
+    /// Source index governing `N`.
+    pub axial: Option<usize>,
+    /// Source index governing `V`.
+    pub shear: Option<usize>,
+    /// Source index governing `M`.
+    pub moment: Option<usize>,
+}
+
+impl SectionForceSources {
+    fn none() -> Self {
+        Self {
+            axial: None,
+            shear: None,
+            moment: None,
+        }
+    }
+}
 
 /// One sampled point of a force envelope across multiple load cases.
 ///
 /// `min` and `max` track the minimum and maximum of each section-force
-/// component (`N`, `V`, `M`) **independently** over all input results.
-/// They are not an absolute-value envelope: `min` may be negative and
-/// `max` may be positive, reflecting the true range.
-///
-/// # Coordinates
-///
-/// - [`member_index`](Self::member_index): member index in the model.
-/// - [`xi`](Self::xi): member-local normalized coordinate in `[0, 1]`
-///   (`xi = 0` at the member's start node, `xi = 1` at the end node).
+/// component independently. They are not absolute-value envelopes. Ties keep
+/// the first input result; each component records its own source index.
 ///
 /// # Sampling limitation
 ///
-/// Envelope values are evaluated at the requested sampling locations and
-/// do **not** guarantee capture of unsampled interior extrema. For members
-/// with distributed loads, the true maximum moment may occur between
-/// sample points. Increase `n_per_member` to improve coverage.
+/// Values are evaluated only at the requested `xi` locations. Interior extrema
+/// between samples can be missed; increase the envelope sample count when
+/// distributed loads can peak between them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EnvelopeSample {
     /// Member index in model order.
     pub member_index: usize,
-    /// Member-local normalized coordinate, `0` at start, `1` at end.
+    /// Member-local normalized coordinate in `[0, 1]`.
     pub xi: f64,
     /// Minimum section forces observed at this point.
     pub min: SectionForces,
     /// Maximum section forces observed at this point.
     pub max: SectionForces,
+    /// Source indices governing the three `min` components.
+    pub min_sources: SectionForceSources,
+    /// Source indices governing the three `max` components.
+    pub max_sources: SectionForceSources,
 }
 
-/// Min/max extreme value with governing load source.
+/// Signed min/max of one scalar quantity with governing source indices.
 ///
-/// Tracks the minimum and maximum of a single scalar quantity (a displacement
-/// or reaction component) across multiple analysis results, together with the
-/// `load_source` of the result that produced each extreme.
-///
-/// `min` and `max` are tracked **independently** — this is not an
-/// absolute-value envelope. `min` may be negative and `max` may be positive.
+/// Ties keep the first input result. An unpopulated reaction DOF keeps the
+/// sentinels `min = +∞`, `max = -∞` and `None` sources; use
+/// [`is_populated`](Self::is_populated) before reading the values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Extremum {
     /// Minimum value observed.
     pub min: f64,
-    /// `load_source` of the result that produced `min`.
-    pub min_source: Option<String>,
+    /// Index into [`Envelope::sources`] governing `min`.
+    pub min_source: Option<usize>,
     /// Maximum value observed.
     pub max: f64,
-    /// `load_source` of the result that produced `max`.
-    pub max_source: Option<String>,
+    /// Index into [`Envelope::sources`] governing `max`.
+    pub max_source: Option<usize>,
 }
 
 impl Extremum {
@@ -83,89 +90,98 @@ impl Extremum {
         }
     }
 
-    fn update(&mut self, value: f64, source: Option<&str>) {
+    fn update(&mut self, value: f64, source: usize) {
         if value < self.min {
             self.min = value;
-            self.min_source = source.map(|s| s.to_string());
+            self.min_source = Some(source);
         }
         if value > self.max {
             self.max = value;
-            self.max_source = source.map(|s| s.to_string());
+            self.max_source = Some(source);
         }
+    }
+
+    /// `true` when at least one result contributed to this DOF.
+    pub fn is_populated(&self) -> bool {
+        self.min_source.is_some() || self.max_source.is_some()
     }
 }
 
-/// Per-node displacement or reaction envelope across multiple load cases.
-///
-/// Each DOF (`ux`, `uy`, `rz`) has an independent [`Extremum`] tracking the
-/// minimum and maximum value and the governing load source.
+/// Per-node displacement envelope across multiple load cases.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NodeEnvelopeSample {
+pub struct NodeDisplacementSample {
     /// Node index in model order.
     pub node_index: usize,
-    /// Envelope for the horizontal displacement / reaction.
+    /// Horizontal displacement envelope.
     pub ux: Extremum,
-    /// Envelope for the vertical displacement / reaction.
+    /// Vertical displacement envelope.
     pub uy: Extremum,
-    /// Envelope for the rotation / moment reaction.
+    /// Rotation envelope.
     pub rz: Extremum,
 }
 
-/// Multi-case force envelope: min/max `N`, `V`, `M` per member per sample.
+/// Per-node support reaction envelope across multiple load cases.
 ///
-/// Constructed from a slice of already-solved [`FrameAnalysisResult`]s via
-/// [`Envelope::from_frame_results`]. The envelope is a pure data snapshot:
-/// it owns all its data, implements `Clone`, and does not hold solver or
-/// model references.
+/// Only DOFs that carry a physical support reaction are populated. Free-DOF
+/// round-off residuals are never sampled. For an oblique roller, both global
+/// translational components are populated because they are the global
+/// components of the single resultant along the constraint direction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeReactionSample {
+    /// Node index in model order.
+    pub node_index: usize,
+    /// Horizontal reaction envelope.
+    pub rx: Extremum,
+    /// Vertical reaction envelope.
+    pub ry: Extremum,
+    /// Moment reaction envelope.
+    pub mz: Extremum,
+}
+
+/// Multi-case envelope over frame results.
 ///
-/// # Semantics
+/// The envelope owns a snapshot of every input result's typed [`LoadSource`].
+/// Every governing-source field is an index into [`sources`](Self::sources),
+/// so duplicate case names remain unambiguous.
 ///
-/// - `min` = minimum over all input results (per component, independently).
-/// - `max` = maximum over all input results (per component, independently).
-/// - These are **not** absolute-value envelopes. If case A gives `M = -100`
-///   and case B gives `M = +40`, then `min.moment = -100` and
-///   `max.moment = +40`.
-///
-/// # Sampling
-///
-/// Each member is sampled at `n_per_member` evenly spaced `xi` points
-/// (including `xi = 0` and `xi = 1`). The sampling is **fixed**, not
-/// event-aware: it does not add extra points at load discontinuities.
-/// Interior extrema between sample points may be missed.
+/// Displacements at a DOF prescribed by a load case are an echo of that
+/// boundary condition, not a computed serviceability response. The governing
+/// source's `has_prescribed_displacements` flag makes that distinction
+/// available to downstream consumers.
 #[derive(Debug, Clone)]
 pub struct Envelope {
     /// One sample per `(member, xi)` in member-major order.
     pub samples: Vec<EnvelopeSample>,
-    /// Number of results that contributed.
+    /// Number of results that contributed, in input order.
     pub n_results: usize,
     /// Number of members in the model.
     pub n_members: usize,
-    /// Samples per member (including endpoints).
+    /// Samples per member, including endpoints.
     pub n_per_member: usize,
-    /// Per-node displacement envelope (`ux`, `uy`, `rz`).
-    pub node_displacements: Vec<NodeEnvelopeSample>,
-    /// Per-node support reaction envelope (`Rx`, `Ry`, `Mz`).
-    pub support_reactions: Vec<NodeEnvelopeSample>,
+    /// Per-node displacement envelopes.
+    pub node_displacements: Vec<NodeDisplacementSample>,
+    /// Per-node support reaction envelopes.
+    pub support_reactions: Vec<NodeReactionSample>,
     /// Number of nodes in the model.
     pub n_nodes: usize,
+    /// Typed load sources, aligned with result input order.
+    pub sources: Vec<LoadSource>,
 }
 
 impl Envelope {
     /// Build an envelope from multiple solved frame results.
     ///
-    /// Each member is sampled at `n_per_member` evenly spaced points
-    /// (`xi = 0, 1/(n-1), ..., 1`). At each point, `section_forces` is
-    /// evaluated for every result, and the per-component min/max is tracked.
-    ///
-    /// All results must have the same number of members; otherwise
-    /// [`FemError::InvalidInput`] is returned.
+    /// All results must agree on member and node counts. Member forces are
+    /// sampled at `n_per_member` evenly spaced `xi` points; interior extrema
+    /// between samples may be missed. Reactions are sampled once per result and
+    /// read from the supported DOFs only.
     ///
     /// # Errors
     ///
     /// - [`FemError::InvalidInput`] if `results` is empty.
     /// - [`FemError::InvalidInput`] if `n_per_member < 2`.
-    /// - [`FemError::InvalidInput`] if results disagree on member count.
-    /// - [`FemError::InvalidInput`] if results disagree on node count.
+    /// - [`FemError::InvalidInput`] if result counts disagree.
+    /// - [`FemError::InvalidInput`] if a sampled value is non-finite.
     /// - Propagates errors from [`FrameAnalysisResult::section_forces`].
     pub fn from_frame_results(
         results: &[&FrameAnalysisResult],
@@ -201,25 +217,47 @@ impl Envelope {
             }
         }
 
-        let mut samples = Vec::with_capacity(n_members * n_per_member);
-
+        let mut samples = Vec::with_capacity(n_members.saturating_mul(n_per_member));
         for member in 0..n_members {
-            let handle = crate::frame::MemberHandle::from_index(member);
+            let handle = MemberHandle::from_index(member);
             for s in 0..n_per_member {
                 let xi = s as f64 / (n_per_member - 1) as f64;
-
                 let mut min = SectionForces::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
                 let mut max =
                     SectionForces::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+                let mut min_sources = SectionForceSources::none();
+                let mut max_sources = SectionForceSources::none();
 
-                for r in results {
+                for (source_index, r) in results.iter().enumerate() {
                     let sf = r.section_forces(handle, xi)?;
-                    min.axial = min.axial.min(sf.axial);
-                    min.shear = min.shear.min(sf.shear);
-                    min.moment = min.moment.min(sf.moment);
-                    max.axial = max.axial.max(sf.axial);
-                    max.shear = max.shear.max(sf.shear);
-                    max.moment = max.moment.max(sf.moment);
+                    require_finite("section force", sf.axial, member, xi)?;
+                    require_finite("section force", sf.shear, member, xi)?;
+                    require_finite("section force", sf.moment, member, xi)?;
+
+                    if sf.axial < min.axial {
+                        min.axial = sf.axial;
+                        min_sources.axial = Some(source_index);
+                    }
+                    if sf.shear < min.shear {
+                        min.shear = sf.shear;
+                        min_sources.shear = Some(source_index);
+                    }
+                    if sf.moment < min.moment {
+                        min.moment = sf.moment;
+                        min_sources.moment = Some(source_index);
+                    }
+                    if sf.axial > max.axial {
+                        max.axial = sf.axial;
+                        max_sources.axial = Some(source_index);
+                    }
+                    if sf.shear > max.shear {
+                        max.shear = sf.shear;
+                        max_sources.shear = Some(source_index);
+                    }
+                    if sf.moment > max.moment {
+                        max.moment = sf.moment;
+                        max_sources.moment = Some(source_index);
+                    }
                 }
 
                 samples.push(EnvelopeSample {
@@ -227,16 +265,14 @@ impl Envelope {
                     xi,
                     min,
                     max,
+                    min_sources,
+                    max_sources,
                 });
             }
         }
 
-        let node_displacements = Self::compute_node_envelope(results, n_nodes, |r, node, dof| {
-            r.displacement(node, dof).unwrap_or(0.0)
-        });
-        let support_reactions = Self::compute_node_envelope(results, n_nodes, |r, node, dof| {
-            r.reaction(node, dof).unwrap_or(0.0)
-        });
+        let node_displacements = Self::compute_node_displacements(results, n_nodes)?;
+        let support_reactions = Self::compute_support_reactions(results, n_nodes)?;
 
         Ok(Self {
             samples,
@@ -246,63 +282,88 @@ impl Envelope {
             node_displacements,
             support_reactions,
             n_nodes,
+            sources: results.iter().map(|r| r.load_source().clone()).collect(),
         })
     }
 
-    fn compute_node_envelope(
+    fn compute_node_displacements(
         results: &[&FrameAnalysisResult],
         n_nodes: usize,
-        get_value: impl Fn(&FrameAnalysisResult, NodeHandle, Dof) -> f64,
-    ) -> Vec<NodeEnvelopeSample> {
-        let mut envelope = Vec::with_capacity(n_nodes);
-        for node_idx in 0..n_nodes {
-            let handle = NodeHandle::from_index(node_idx);
-            let mut ux = Extremum::new();
-            let mut uy = Extremum::new();
-            let mut rz = Extremum::new();
-            for r in results {
-                let source = r.load_source();
-                ux.update(get_value(r, handle, Dof::Ux), source);
-                uy.update(get_value(r, handle, Dof::Uy), source);
-                rz.update(get_value(r, handle, Dof::Rz), source);
+    ) -> Result<Vec<NodeDisplacementSample>, FemError> {
+        let mut envelope = vec![std::array::from_fn(|_| Extremum::new()); n_nodes];
+        for (source_index, r) in results.iter().enumerate() {
+            let displacements = r.displacements();
+            for node in 0..n_nodes {
+                for dof in Dof::ALL {
+                    let value = displacements[node * 3 + dof.index()];
+                    require_node_finite("displacement", value, node, dof)?;
+                    envelope[node][dof.index()].update(value, source_index);
+                }
             }
-            envelope.push(NodeEnvelopeSample {
-                node_index: node_idx,
+        }
+        Ok(envelope
+            .into_iter()
+            .enumerate()
+            .map(|(node_index, [ux, uy, rz])| NodeDisplacementSample {
+                node_index,
                 ux,
                 uy,
                 rz,
-            });
-        }
-        envelope
+            })
+            .collect())
     }
 
-    /// All samples for a specific member, in `xi` order.
+    fn compute_support_reactions(
+        results: &[&FrameAnalysisResult],
+        n_nodes: usize,
+    ) -> Result<Vec<NodeReactionSample>, FemError> {
+        let mut envelope = vec![std::array::from_fn(|_| Extremum::new()); n_nodes];
+        for (source_index, r) in results.iter().enumerate() {
+            let reactions = r.reactions();
+            for (node, dof) in r.support_dofs() {
+                let value = reactions[node * 3 + dof.index()];
+                require_node_finite("reaction", value, node, dof)?;
+                envelope[node][dof.index()].update(value, source_index);
+            }
+        }
+        Ok(envelope
+            .into_iter()
+            .enumerate()
+            .map(|(node_index, [rx, ry, mz])| NodeReactionSample {
+                node_index,
+                rx,
+                ry,
+                mz,
+            })
+            .collect())
+    }
+
+    /// Typed source at an input index.
+    pub fn source(&self, index: usize) -> Option<&LoadSource> {
+        self.sources.get(index)
+    }
+
+    /// All samples for a member, in `xi` order.
     pub fn member_samples(&self, member_index: usize) -> &[EnvelopeSample] {
+        if member_index >= self.n_members {
+            return &self.samples[0..0];
+        }
         let start = member_index * self.n_per_member;
         let end = start + self.n_per_member;
-        if end > self.samples.len() {
-            &self.samples[0..0]
-        } else {
-            &self.samples[start..end]
-        }
+        &self.samples[start..end]
     }
 
-    /// Displacement envelope for a specific node, or `None` if out of range.
-    pub fn node_displacement(&self, node_index: usize) -> Option<&NodeEnvelopeSample> {
+    /// Displacement envelope for a node.
+    pub fn node_displacement(&self, node_index: usize) -> Option<&NodeDisplacementSample> {
         self.node_displacements.get(node_index)
     }
 
-    /// Support reaction envelope for a specific node, or `None` if out of
-    /// range.
-    pub fn support_reaction(&self, node_index: usize) -> Option<&NodeEnvelopeSample> {
+    /// Support reaction envelope for a node.
+    pub fn support_reaction(&self, node_index: usize) -> Option<&NodeReactionSample> {
         self.support_reactions.get(node_index)
     }
 
-    /// Maximum absolute moment across all samples and all cases.
-    ///
-    /// This is a convenience accessor for design checks that need the
-    /// worst-case moment magnitude. It returns `max(|min.moment|, |max.moment|)`
-    /// over all samples.
+    /// Maximum absolute moment across the sampled member points and sources.
     pub fn max_abs_moment(&self) -> f64 {
         self.samples
             .iter()
@@ -310,7 +371,7 @@ impl Envelope {
             .fold(0.0_f64, f64::max)
     }
 
-    /// Maximum absolute shear across all samples and all cases.
+    /// Maximum absolute shear across the sampled member points and sources.
     pub fn max_abs_shear(&self) -> f64 {
         self.samples
             .iter()
@@ -318,11 +379,32 @@ impl Envelope {
             .fold(0.0_f64, f64::max)
     }
 
-    /// Maximum absolute axial force across all samples and all cases.
+    /// Maximum absolute axial force across the sampled member points and sources.
     pub fn max_abs_axial(&self) -> f64 {
         self.samples
             .iter()
             .map(|s| s.min.axial.abs().max(s.max.axial.abs()))
             .fold(0.0_f64, f64::max)
+    }
+}
+
+fn require_finite(what: &str, value: f64, member: usize, xi: f64) -> Result<(), FemError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FemError::InvalidInput(format!(
+            "{what} is non-finite at member {member}, xi {xi}: {value}"
+        )))
+    }
+}
+
+fn require_node_finite(what: &str, value: f64, node: usize, dof: Dof) -> Result<(), FemError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FemError::InvalidInput(format!(
+            "{what} is non-finite at node {node} DOF {}: {value}",
+            dof.name()
+        )))
     }
 }

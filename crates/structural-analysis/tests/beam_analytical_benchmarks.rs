@@ -954,22 +954,12 @@ fn test_benchmark_n_result_api_consistency() {
     let raw = solver.reactions();
     for node in 0..4 {
         let base = node * 3;
-        // Constrained node 0 matches exactly; free nodes are masked to 0.
-        if node == 0 {
-            assert_close(
-                r.reaction(node).unwrap().fy,
-                raw[base + 1],
-                1e-12,
-                "result reaction == solver",
-            );
-        } else {
-            assert_close(
-                r.reaction(node).unwrap().fy,
-                0.0,
-                1e-12,
-                "masked free reaction",
-            );
-        }
+        assert_close(
+            r.reaction(node).unwrap().fy,
+            raw[base + 1],
+            1e-12,
+            "result reaction == raw K·u - f",
+        );
     }
 
     let direct_end = solver.element_end_forces().unwrap();

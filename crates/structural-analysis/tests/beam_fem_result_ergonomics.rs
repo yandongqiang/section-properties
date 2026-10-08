@@ -165,10 +165,6 @@ fn test_typed_access_matches_result_structs() {
     let reactions = s.reactions();
     for node in 0..3 {
         let r = res.reaction(node).unwrap();
-        // `BeamAnalysisResult::reaction` sanitises free-DOF residuals to exactly
-        // 0.0 (they are round-off, not physical support reactions), whereas
-        // `BeamSolver::reactions()` returns the raw `K·u - f` values. So the
-        // comparison is exact at supports and within round-off at free DOFs.
         for (got, expected, name) in [
             (s.reaction_dof(node, Dof::Ux).unwrap(), r.fx, "fx"),
             (s.reaction_dof(node, Dof::Uy).unwrap(), r.fy, "fy"),
@@ -339,31 +335,20 @@ fn test_pre_solve_reactions_are_raw_algebraic() {
 }
 
 // ===========================================================================
-// Result-struct behaviour: free DOFs sanitised to exactly zero
+// Result-struct behaviour: identical raw K·u - f snapshot
 // ===========================================================================
 
 #[test]
-fn test_result_struct_sanitises_free_dof_reactions() {
+fn test_result_struct_matches_raw_reactions() {
     let s = solved();
     let res = s.results();
-
-    // Free node: BeamAnalysisResult reports exactly 0.0 ...
-    for node in [1usize, 2] {
-        let r = res.reaction(node).unwrap();
-        assert_eq!(r.fx, 0.0, "node {} fx", node);
-        assert_eq!(r.fy, 0.0, "node {} fy", node);
-        assert_eq!(r.mz, 0.0, "node {} mz", node);
-    }
-    // ... while BeamSolver::reactions() returns the raw residual (round-off).
     let raw = s.reactions();
-    for (idx, &v) in raw.iter().enumerate().skip(3) {
-        assert!(
-            v.abs() < 1e-9,
-            "raw free-DOF residual {} = {} should be round-off",
-            idx,
-            v
-        );
+
+    for node in 0..3 {
+        let r = res.reaction(node).unwrap();
+        let base = 3 * node;
+        assert_eq!(r.fx, raw[base]);
+        assert_eq!(r.fy, raw[base + 1]);
+        assert_eq!(r.mz, raw[base + 2]);
     }
-    // A constrained DOF is reported identically by both (no sanitisation there).
-    assert_eq!(res.reaction(0).unwrap().fy, raw[1]);
 }
