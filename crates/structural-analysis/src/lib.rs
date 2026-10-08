@@ -124,6 +124,7 @@ pub mod load;
 pub mod mechanism;
 pub mod postprocessing;
 pub mod truss;
+pub mod truss3d;
 
 pub use crate::beam_fem::{
     BeamAnalysis, BeamElement, BeamModel, BeamNode, BeamSection, BeamSolver, Dof, EndRelease,
@@ -141,4 +142,8 @@ pub use crate::postprocessing::{
 pub use crate::truss::{
     TrussAnalysisResult, TrussDof, TrussElement, TrussEquilibriumReport, TrussModel, TrussNode,
     TrussSolver,
+};
+pub use crate::truss3d::{
+    TrussAnalysisResult3D, TrussDof3D, TrussElement3D, TrussEquilibriumReport3D, TrussModel3D,
+    TrussNode3D, TrussSolver3D,
 };
