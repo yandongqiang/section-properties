@@ -315,6 +315,67 @@ impl LoadCase {
         Ok(())
     }
 
+    /// Apply a **global** 3D nodal force `(fx, fy, fz)` at `node_idx`.
+    ///
+    /// This is the 3D-truss analogue of [`nodal_load`](Self::nodal_load); it
+    /// stores the three components as raw `(node_idx, dof, value)` triples
+    /// with `dof = 0, 1, 2` for `ux, uy, uz`.  No [`NodeHandle`] is required
+    /// — the raw node index is used directly, matching
+    /// [`TrussModel3D`](crate::truss3d::TrussModel3D) conventions.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if any component is non-finite.
+    pub fn nodal_load_3d(
+        &mut self,
+        node_idx: usize,
+        fx: f64,
+        fy: f64,
+        fz: f64,
+    ) -> Result<(), FemError> {
+        if !fx.is_finite() || !fy.is_finite() || !fz.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "nodal force must be finite, got fx = {fx}, fy = {fy}, fz = {fz}"
+            )));
+        }
+        self.nodal_forces.push((node_idx, 0, fx));
+        self.nodal_forces.push((node_idx, 1, fy));
+        self.nodal_forces.push((node_idx, 2, fz));
+        Ok(())
+    }
+
+    /// Prescribe a non-zero displacement `value` at `(node_idx, dof)` for a
+    /// 3D truss model.
+    ///
+    /// `dof` is the raw DOF index: `0 = ux`, `1 = uy`, `2 = uz`.  This is the
+    /// 3D-truss analogue of
+    /// [`prescribed_displacement`](Self::prescribed_displacement).
+    ///
+    /// # Interaction with [`LoadCombination`]
+    ///
+    /// Load combinations do **not** support prescribed displacements.  If any
+    /// case in a combination has prescribed displacements,
+    /// [`TrussModel3D::solve_combination`](crate::truss3d::TrussModel3D::solve_combination)
+    /// returns [`FemError::InvalidInput`].
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `value` is non-finite.
+    pub fn prescribed_displacement_3d(
+        &mut self,
+        node_idx: usize,
+        dof: usize,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "prescribed displacement must be finite, got {value}"
+            )));
+        }
+        self.prescribed_displacements.push((node_idx, dof, value));
+        Ok(())
+    }
+
     /// `true` if this case contains any prescribed displacements.
     pub fn has_prescribed_displacements(&self) -> bool {
         !self.prescribed_displacements.is_empty()

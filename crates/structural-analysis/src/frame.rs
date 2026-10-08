@@ -1343,14 +1343,14 @@ impl FrameModel {
     }
 }
 
-fn load_case_source(case: &LoadCase) -> LoadSource {
+pub(crate) fn load_case_source(case: &LoadCase) -> LoadSource {
     LoadSource::LoadCase {
         name: case.name().to_string(),
         has_prescribed_displacements: case.has_prescribed_displacements(),
     }
 }
 
-fn load_combination_source(combo: &LoadCombination) -> LoadSource {
+pub(crate) fn load_combination_source(combo: &LoadCombination) -> LoadSource {
     LoadSource::LoadCombination {
         name: combo.name().to_string(),
         terms: combo
