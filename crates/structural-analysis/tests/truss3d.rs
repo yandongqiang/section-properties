@@ -1746,3 +1746,269 @@ fn p121_reaction_sign_convention() {
     );
     assert!((support.rx.max - result.reactions[0]).abs() < 1e-9);
 }
+
+// ===========================================================================
+// Phase 126 — 3D Truss Envelope Topology Audit regression tests
+//
+// Audit found P0=0, P1=0, P2=1, P3=0.
+// P2: Truss3DEnvelope does not validate node coordinates or element
+//     connectivity, while TrussEnvelope (2D) does. This is a documented
+//     design limitation (see p120_same_count_incompatible_topology).
+// No production code changes — these tests characterize the current
+// behavior and fill gaps analogous to Phase 125.
+// ===========================================================================
+
+// Test 22 — All-positive axial force extrema (3D)
+#[test]
+fn p126_all_positive_axial_extrema() {
+    let model = axial_bar();
+    let mut light_tension = LoadCase::new("light_tension");
+    light_tension.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut heavy_tension = LoadCase::new("heavy_tension");
+    heavy_tension.nodal_load_3d(1, 3e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light_tension).unwrap();
+    let r2 = model.solve_case(&heavy_tension).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min > 0.0,
+        "all-positive min should be > 0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max > 0.0,
+        "all-positive max should be > 0, got {}",
+        af.axial.max
+    );
+    assert!(af.axial.min < af.axial.max, "min should be < max");
+    assert_eq!(af.axial.min_source, Some(0));
+    assert_eq!(af.axial.max_source, Some(1));
+}
+
+// Test 23 — All-negative axial force extrema (3D)
+#[test]
+fn p126_all_negative_axial_extrema() {
+    let model = axial_bar();
+    let mut light_comp = LoadCase::new("light_comp");
+    light_comp.nodal_load_3d(1, -1e4, 0.0, 0.0).unwrap();
+    let mut heavy_comp = LoadCase::new("heavy_comp");
+    heavy_comp.nodal_load_3d(1, -3e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light_comp).unwrap();
+    let r2 = model.solve_case(&heavy_comp).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min < 0.0,
+        "all-negative min should be < 0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max < 0.0,
+        "all-negative max should be < 0, got {}",
+        af.axial.max
+    );
+    assert!(af.axial.min < af.axial.max, "min should be < max");
+    assert_eq!(af.axial.min_source, Some(1));
+    assert_eq!(af.axial.max_source, Some(0));
+}
+
+// Test 24 — Independent governing source for axial force across elements (3D)
+#[test]
+fn p126_independent_axial_governing_source() {
+    let model = tripod();
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_3d(0, 1e4, 0.0, 0.0).unwrap();
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_3d(0, 0.0, 1e4, 0.0).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_x, &r_y]).unwrap();
+
+    let mut max_sources: Vec<Option<usize>> = (0..3)
+        .map(|i| envelope.axial_force(i).unwrap().axial.max_source)
+        .collect();
+    max_sources.sort();
+    let mut min_sources: Vec<Option<usize>> = (0..3)
+        .map(|i| envelope.axial_force(i).unwrap().axial.min_source)
+        .collect();
+    min_sources.sort();
+    let both_sources_present = max_sources.contains(&Some(0)) && max_sources.contains(&Some(1))
+        || min_sources.contains(&Some(0)) && min_sources.contains(&Some(1));
+    assert!(
+        both_sources_present,
+        "different elements should be governed by different sources, \
+         max_sources={max_sources:?}, min_sources={min_sources:?}"
+    );
+}
+
+// Test 25 — Zero axial force: exact zero is a valid extremum (3D)
+#[test]
+fn p126_zero_axial_force_extrema() {
+    let model = axial_bar();
+    let mut zero = LoadCase::new("zero");
+    zero.nodal_load_3d(1, 0.0, 0.0, 0.0).unwrap();
+    let mut tension = LoadCase::new("tension");
+    tension.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r0 = model.solve_case(&zero).unwrap();
+    let r1 = model.solve_case(&tension).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r0, &r1]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min.abs() < 1e-6,
+        "min should be ~0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max > 0.0,
+        "max should be positive, got {}",
+        af.axial.max
+    );
+}
+
+// Test 26 — Independent governing source for ux/uy/uz displacement (3D)
+#[test]
+fn p126_independent_displacement_governing_sources() {
+    let model = tripod();
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_3d(0, 1e4, 0.0, 0.0).unwrap();
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_3d(0, 0.0, 1e4, 0.0).unwrap();
+    let mut fz = LoadCase::new("fz");
+    fz.nodal_load_3d(0, 0.0, 0.0, 1e4).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let r_z = model.solve_case(&fz).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_x, &r_y, &r_z]).unwrap();
+
+    let disp = envelope.node_displacement(0).unwrap();
+    assert!(disp.ux.is_populated(), "ux should be populated");
+    assert!(disp.uy.is_populated(), "uy should be populated");
+    assert!(disp.uz.is_populated(), "uz should be populated");
+
+    let ux_sources = [disp.ux.min_source, disp.ux.max_source];
+    let uy_sources = [disp.uy.min_source, disp.uy.max_source];
+    let uz_sources = [disp.uz.min_source, disp.uz.max_source];
+    let ux_has_unique = ux_sources.contains(&Some(0))
+        || ux_sources.contains(&Some(1))
+        || ux_sources.contains(&Some(2));
+    let uy_has_unique = uy_sources.contains(&Some(0))
+        || uy_sources.contains(&Some(1))
+        || uy_sources.contains(&Some(2));
+    let uz_has_unique = uz_sources.contains(&Some(0))
+        || uz_sources.contains(&Some(1))
+        || uz_sources.contains(&Some(2));
+    assert!(
+        ux_has_unique && uy_has_unique && uz_has_unique,
+        "all three components should have governing sources, \
+         ux={ux_sources:?}, uy={uy_sources:?}, uz={uz_sources:?}"
+    );
+}
+
+// Test 27 — Different element connectivity (same counts) accepted (3D)
+//
+// Characterization test: the 3D envelope does NOT validate element
+// connectivity, unlike the 2D envelope. Two models with the same node
+// and element counts but different connectivity are silently accepted.
+// This is a documented design limitation.
+#[test]
+fn p126_different_connectivity_accepted() {
+    let mat = steel();
+
+    // Model A: chain 0-1-2 (elements: (0,1), (1,2))
+    let mut model_a = TrussModel3D::new();
+    model_a.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_a.add_node(TrussNode3D::new(1, 1.0, 0.0, 0.0));
+    model_a.add_node(TrussNode3D::new(2, 2.0, 0.0, 0.0));
+    model_a.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model_a.add_element(TrussElement3D::new(1, 2, &mat, 1e-4).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    model_a.fix_dof(2, TrussDof3D::Uy, 0.0).unwrap();
+    model_a.fix_dof(2, TrussDof3D::Uz, 0.0).unwrap();
+
+    // Model B: V-shape (elements: (0,2), (1,2)) — same counts, different connectivity
+    let mut model_b = TrussModel3D::new();
+    model_b.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_b.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model_b.add_node(TrussNode3D::new(2, 1.0, 1.0, 0.0));
+    model_b.add_element(TrussElement3D::new(0, 2, &mat, 1e-4).unwrap());
+    model_b.add_element(TrussElement3D::new(1, 2, &mat, 1e-4).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_node(1).unwrap();
+    model_b.fix_dof(2, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_3d(2, 1e3, 0.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_3d(2, 1e3, 0.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case_a).unwrap();
+    let r_b = model_b.solve_case(&case_b).unwrap();
+
+    // Verify connectivity actually differs
+    assert_ne!(
+        r_a.element_nodes, r_b.element_nodes,
+        "models should have different connectivity"
+    );
+
+    // 3D envelope accepts — documented limitation
+    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]);
+    assert!(
+        envelope.is_ok(),
+        "3D envelope should accept results with different connectivity (documented limitation)"
+    );
+}
+
+// Test 28 — Different node coordinates (same counts) accepted (3D)
+//
+// Characterization test: the 3D envelope does NOT validate node
+// coordinates, unlike the 2D envelope. Two models with the same node
+// and element counts but different geometry are silently accepted.
+// (p120_same_count_incompatible_topology already covers this for a
+// 2-node bar; this test extends coverage to a 3D-specific geometry
+// with a z-coordinate difference.)
+#[test]
+fn p126_different_coordinates_accepted() {
+    let mat = steel();
+
+    // Model A: bar in xy-plane
+    let mut model_a = TrussModel3D::new();
+    model_a.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_a.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model_a.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    // Model B: bar tilted in z direction — same counts, different coordinates
+    let mut model_b = TrussModel3D::new();
+    model_b.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_b.add_node(TrussNode3D::new(1, 2.0, 0.0, 3.0));
+    model_b.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case_a).unwrap();
+    let r_b = model_b.solve_case(&case_b).unwrap();
+
+    // Verify coordinates actually differ
+    assert_ne!(
+        r_a.node_coords, r_b.node_coords,
+        "models should have different coordinates"
+    );
+
+    // 3D envelope accepts — documented limitation
+    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]);
+    assert!(
+        envelope.is_ok(),
+        "3D envelope should accept results with different coordinates (documented limitation)"
+    );
+}
