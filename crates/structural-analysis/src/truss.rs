@@ -926,6 +926,12 @@ pub struct TrussAnalysisResult {
     pub element_nodes: Vec<(usize, usize)>,
     /// Nodal forces `(node_idx, dof, value)` that were applied.
     pub nodal_forces: Vec<(usize, usize, f64)>,
+    /// Constrained DOFs `(node_idx, dof)` — DOFs with physical support reactions.
+    ///
+    /// Populated from the solver's boundary conditions at result construction
+    /// time. Free DOFs are excluded; only DOFs that carry a physical reaction
+    /// appear here.
+    pub constrained_dofs: Vec<(usize, usize)>,
     /// Provenance of the load that produced this result.
     load_source: LoadSource,
     n_nodes: usize,
@@ -962,6 +968,15 @@ impl TrussAnalysisResult {
     /// of range.
     pub fn element_endpoints(&self, element_index: usize) -> Option<(usize, usize)> {
         self.element_nodes.get(element_index).copied()
+    }
+
+    /// Constrained DOFs `(node_idx, dof)` — DOFs with physical support reactions.
+    ///
+    /// Only DOFs that were constrained during the solve appear here. Free DOFs
+    /// are excluded because their "reaction" is a round-off residual, not a
+    /// physical support force.
+    pub fn constrained_dofs(&self) -> &[(usize, usize)] {
+        &self.constrained_dofs
     }
 
     /// Global equilibrium check: `ΣFx`, `ΣFy`, `ΣMz` about the origin.
@@ -1097,6 +1112,13 @@ impl TrussSolver {
                 .map(|e| (e.node_i, e.node_j))
                 .collect(),
             nodal_forces: self.model.nodal_forces.clone(),
+            constrained_dofs: self
+                .fixed_dofs
+                .iter()
+                .enumerate()
+                .filter(|&(_, &fixed)| fixed)
+                .map(|(i, _)| (i / 2, i % 2))
+                .collect(),
             load_source: LoadSource::ModelLoads,
             n_nodes: self.model.nodes.len(),
             n_elements: self.model.elements.len(),

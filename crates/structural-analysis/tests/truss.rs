@@ -1074,3 +1074,523 @@ fn p123_valid_dofs_0_and_1_unaffected() {
     let r = result.unwrap();
     assert!((r.displacements[2] - 10.0).abs() < 1e-9);
 }
+
+// ===========================================================================
+// Phase 124 — 2D Truss Envelope tests
+// ===========================================================================
+
+use structural_analysis::TrussEnvelope;
+
+// Test 1 — Single-result envelope: min and max equal the original values
+#[test]
+fn p124_single_result_envelope_matches_original() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("single");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&result]).unwrap();
+
+    let ux = result.displacements[2];
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.min - ux).abs() < 1e-12);
+    assert!((disp.ux.max - ux).abs() < 1e-12);
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(0));
+
+    let axial = result.axial_forces[0];
+    let af = envelope.axial_force(0).unwrap();
+    assert!((af.axial.min - axial).abs() < 1e-9);
+    assert!((af.axial.max - axial).abs() < 1e-9);
+    assert_eq!(envelope.n_results, 1);
+}
+
+// Test 2 — Two results: displacement extrema
+#[test]
+fn p124_two_results_displacement_extrema() {
+    let model = simple_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_2d(1, 40.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let ux1 = r1.displacements[2];
+    let ux2 = r2.displacements[2];
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.min - ux1).abs() < 1e-12);
+    assert!((disp.ux.max - ux2).abs() < 1e-12);
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(1));
+}
+
+// Test 3 — Two results: reaction extrema at supported DOFs
+#[test]
+fn p124_two_results_reaction_extrema() {
+    let model = simple_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_2d(1, 40.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let support = envelope.support_reaction(0).unwrap();
+    assert!(support.rx.is_populated());
+    assert!(support.ry.is_populated());
+    let rx1 = r1.reactions[0];
+    let rx2 = r2.reactions[0];
+    assert!((support.rx.min - rx1.min(rx2)).abs() < 1e-9);
+    assert!((support.rx.max - rx1.max(rx2)).abs() < 1e-9);
+    assert_eq!(support.rx.min_source, Some(1));
+    assert_eq!(support.rx.max_source, Some(0));
+}
+
+// Test 4 — Axial force tension and compression signs
+#[test]
+fn p124_axial_force_tension_compression() {
+    let model = simple_bar();
+    let mut tension = LoadCase::new("tension");
+    tension.nodal_load_2d(1, 1e4, 0.0).unwrap();
+    let mut compression = LoadCase::new("compression");
+    compression.nodal_load_2d(1, -1e4, 0.0).unwrap();
+    let r_t = model.solve_case(&tension).unwrap();
+    let r_c = model.solve_case(&compression).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_t, &r_c]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    let n_t = r_t.axial_forces[0];
+    let n_c = r_c.axial_forces[0];
+    assert!(n_t > 0.0, "tension should be positive, got {n_t}");
+    assert!(n_c < 0.0, "compression should be negative, got {n_c}");
+    assert!((af.axial.max - n_t).abs() < 1e-6, "max should be tension");
+    assert!(
+        (af.axial.min - n_c).abs() < 1e-6,
+        "min should be compression"
+    );
+    assert_eq!(af.axial.max_source, Some(0));
+    assert_eq!(af.axial.min_source, Some(1));
+}
+
+// Test 5 — Governing source correctly paired with extremum
+#[test]
+fn p124_governing_source_correct() {
+    let model = simple_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_2d(1, 50.0, 0.0).unwrap();
+    let r1 = model.solve_case(&dead).unwrap();
+    let r2 = model.solve_case(&live).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(1));
+    assert_eq!(envelope.source(0).unwrap().name(), Some("dead"));
+    assert_eq!(envelope.source(1).unwrap().name(), Some("live"));
+}
+
+// Test 6 — Multiple LoadCases
+#[test]
+fn p124_multiple_load_cases() {
+    let model = triangular_truss();
+    let mut case_a = LoadCase::new("case_a");
+    case_a.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut case_b = LoadCase::new("case_b");
+    case_b.nodal_load_2d(2, 0.0, -2e3).unwrap();
+    let mut case_c = LoadCase::new("case_c");
+    case_c.nodal_load_2d(2, -3e3, 1e3).unwrap();
+    let r_a = model.solve_case(&case_a).unwrap();
+    let r_b = model.solve_case(&case_b).unwrap();
+    let r_c = model.solve_case(&case_c).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_a, &r_b, &r_c]).unwrap();
+
+    assert_eq!(envelope.n_results, 3);
+    let disp = envelope.node_displacement(2).unwrap();
+    assert!(disp.ux.is_populated());
+    assert!(disp.uy.is_populated());
+    for i in 0..3 {
+        let af = envelope.axial_force(i).unwrap();
+        assert!(af.axial.is_populated());
+    }
+}
+
+// Test 7 — Multiple LoadCombinations
+#[test]
+fn p124_multiple_load_combinations() {
+    let model = simple_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_2d(1, 20.0, 0.0).unwrap();
+
+    let mut combo1 = LoadCombination::new("1.4D");
+    combo1.add_case(&dead, 1.4).unwrap();
+    let mut combo2 = LoadCombination::new("1.4D+1.6L");
+    combo2.add_case(&dead, 1.4).unwrap();
+    combo2.add_case(&live, 1.6).unwrap();
+
+    let r1 = model.solve_combination(&combo1).unwrap();
+    let r2 = model.solve_combination(&combo2).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!(disp.ux.is_populated());
+    match envelope.source(0).unwrap() {
+        LoadSource::LoadCombination { name, terms } => {
+            assert_eq!(name, "1.4D");
+            assert_eq!(terms.len(), 1);
+        }
+        other => panic!("expected combination, got {other:?}"),
+    }
+    match envelope.source(1).unwrap() {
+        LoadSource::LoadCombination { name, terms } => {
+            assert_eq!(name, "1.4D+1.6L");
+            assert_eq!(terms.len(), 2);
+        }
+        other => panic!("expected combination, got {other:?}"),
+    }
+}
+
+// Test 8 — Repeated source names remain unambiguous by index
+#[test]
+fn p124_repeated_source_names() {
+    let model = simple_bar();
+    let mut first = LoadCase::new("same_name");
+    first.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut second = LoadCase::new("same_name");
+    second.nodal_load_2d(1, 30.0, 0.0).unwrap();
+    let r1 = model.solve_case(&first).unwrap();
+    let r2 = model.solve_case(&second).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    assert_eq!(envelope.source(0).unwrap().name(), Some("same_name"));
+    assert_eq!(envelope.source(1).unwrap().name(), Some("same_name"));
+    let disp = envelope.node_displacement(1).unwrap();
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(1));
+}
+
+// Test 9 — Tie behavior: first input result wins
+#[test]
+fn p124_ties_keep_first_source() {
+    let model = simple_bar();
+    let mut first = LoadCase::new("first");
+    first.nodal_load_2d(1, 20.0, 0.0).unwrap();
+    let mut second = LoadCase::new("second");
+    second.nodal_load_2d(1, 20.0, 0.0).unwrap();
+    let r1 = model.solve_case(&first).unwrap();
+    let r2 = model.solve_case(&second).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(0));
+}
+
+// Test 10 — Empty input rejected
+#[test]
+fn p124_empty_input_rejected() {
+    let err = TrussEnvelope::from_results(&[]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 11 — Mismatched node counts rejected
+#[test]
+fn p124_mismatched_node_counts_rejected() {
+    let model1 = simple_bar();
+    let mut case1 = LoadCase::new("c1");
+    case1.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model1.solve_case(&case1).unwrap();
+
+    let mut model2 = TrussModel::new();
+    model2.add_node(TrussNode::new(0, 0.0, 0.0));
+    model2.add_node(TrussNode::new(1, 1.0, 0.0));
+    model2.add_node(TrussNode::new(2, 2.0, 0.0));
+    model2.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model2.add_element(TrussElement::new(1, 2, &unit_mat(), 1.0).unwrap());
+    model2.fix_node(0).unwrap();
+    model2.fix_node(2).unwrap();
+    model2.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+    let mut case2 = LoadCase::new("c2");
+    case2.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r2 = model2.solve_case(&case2).unwrap();
+
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 12 — Same node count but different node coordinates rejected
+#[test]
+fn p124_same_count_different_node_coords_rejected() {
+    let mut model_a = TrussModel::new();
+    model_a.add_node(TrussNode::new(0, 0.0, 0.0));
+    model_a.add_node(TrussNode::new(1, 2.0, 0.0));
+    model_a.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+
+    let mut model_b = TrussModel::new();
+    model_b.add_node(TrussNode::new(0, 0.0, 0.0));
+    model_b.add_node(TrussNode::new(1, 5.0, 0.0));
+    model_b.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case_a).unwrap();
+    let r_b = model_b.solve_case(&case_b).unwrap();
+
+    let err = TrussEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    match err {
+        FemError::InvalidInput(msg) => assert!(msg.contains("coordinates differ")),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+// Test 13 — Different element connectivity rejected
+#[test]
+fn p124_different_element_connectivity_rejected() {
+    let mut model_a = TrussModel::new();
+    model_a.add_node(TrussNode::new(0, 0.0, 0.0));
+    model_a.add_node(TrussNode::new(1, 1.0, 0.0));
+    model_a.add_node(TrussNode::new(2, 2.0, 0.0));
+    model_a.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model_a.add_element(TrussElement::new(1, 2, &unit_mat(), 1.0).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_node(2).unwrap();
+    model_a.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+
+    let mut model_b = TrussModel::new();
+    model_b.add_node(TrussNode::new(0, 0.0, 0.0));
+    model_b.add_node(TrussNode::new(1, 1.0, 0.0));
+    model_b.add_node(TrussNode::new(2, 2.0, 0.0));
+    model_b.add_element(TrussElement::new(0, 2, &unit_mat(), 1.0).unwrap());
+    model_b.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_node(2).unwrap();
+    model_b.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case_a).unwrap();
+    let r_b = model_b.solve_case(&case_b).unwrap();
+
+    let err = TrussEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    match err {
+        FemError::InvalidInput(msg) => assert!(msg.contains("connectivity")),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+// Test 14 — Different constraint sets: DOF constrained in some results only
+#[test]
+fn p124_different_constraint_sets() {
+    let model = triangular_truss();
+    let mut normal = LoadCase::new("normal");
+    normal.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut prescribed = LoadCase::new("prescribed");
+    prescribed.prescribed_displacement_2d(2, 0, 0.001).unwrap();
+    let r_n = model.solve_case(&normal).unwrap();
+    let r_p = model.solve_case(&prescribed).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_n, &r_p]).unwrap();
+
+    let node2 = envelope.support_reaction(2).unwrap();
+    assert!(
+        node2.rx.is_populated(),
+        "rx should be populated from prescribed case"
+    );
+    assert_eq!(node2.rx.min_source, Some(1));
+    assert_eq!(node2.rx.max_source, Some(1));
+}
+
+// Test 15 — Non-finite values rejected
+#[test]
+fn p124_non_finite_values_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut result = model.solve_case(&case).unwrap();
+    result.displacements[0] = f64::NAN;
+    let err = TrussEnvelope::from_results(&[&result]).unwrap_err();
+    match err {
+        FemError::InvalidInput(msg) => assert!(msg.contains("non-finite")),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+// Test 16 — Direct load solve result compatible with envelope
+#[test]
+fn p124_direct_load_result_compatible() {
+    let mut model = simple_bar();
+    model.add_nodal_force(1, 15.0, 0.0).unwrap();
+    let mut solver = TrussSolver::from_model(&model).unwrap();
+    solver.solve_configured().unwrap();
+    let result = solver.results().unwrap();
+    let envelope = TrussEnvelope::from_results(&[&result]).unwrap();
+
+    assert_eq!(envelope.n_results, 1);
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.max - 15.0).abs() < 1e-9);
+    match envelope.source(0).unwrap() {
+        LoadSource::ModelLoads => {}
+        other => panic!("expected ModelLoads, got {other:?}"),
+    }
+}
+
+// Test 17 — Analytical benchmark: ux = FL/EA, N = F, R = -F
+#[test]
+fn p124_analytical_benchmark() {
+    let e = 200e9;
+    let a = 1e-4;
+    let l = 3.0;
+    let f = 5e4;
+
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, l, 0.0));
+    let mat = Material::new(e, 0.3, 1.0, "mat");
+    model.add_element(TrussElement::new(0, 1, &mat, a).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+
+    let mut case = LoadCase::new("axial");
+    case.nodal_load_2d(1, f, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&result]).unwrap();
+
+    let expected_ux = f * l / (e * a);
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.max - expected_ux).abs() / expected_ux.abs() < 1e-10);
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!((af.axial.max - f).abs() / f.abs() < 1e-10);
+
+    let support = envelope.support_reaction(0).unwrap();
+    assert!((support.rx.max - (-f)).abs() / f.abs() < 1e-10);
+}
+
+// Test 18 — Reordering input results preserves numeric extrema
+#[test]
+fn p124_reorder_preserves_extrema() {
+    let model = simple_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_2d(1, 40.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+
+    let env_12 = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+    let env_21 = TrussEnvelope::from_results(&[&r2, &r1]).unwrap();
+
+    let d12 = env_12.node_displacement(1).unwrap();
+    let d21 = env_21.node_displacement(1).unwrap();
+    assert!((d12.ux.min - d21.ux.min).abs() < 1e-12);
+    assert!((d12.ux.max - d21.ux.max).abs() < 1e-12);
+
+    let a12 = env_12.axial_force(0).unwrap();
+    let a21 = env_21.axial_force(0).unwrap();
+    assert!((a12.axial.min - a21.axial.min).abs() < 1e-9);
+    assert!((a12.axial.max - a21.axial.max).abs() < 1e-9);
+}
+
+// Test 19 — Free DOFs do not produce artificial reaction extrema
+#[test]
+fn p124_free_dofs_not_populated() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 1e4, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&result]).unwrap();
+
+    let node1 = envelope.support_reaction(1).unwrap();
+    assert!(
+        !node1.rx.is_populated(),
+        "free DOF rx should not be populated"
+    );
+    assert!(
+        node1.ry.is_populated(),
+        "constrained DOF ry should be populated"
+    );
+}
+
+// Test 20 — constrained_dofs correctly populated from model
+#[test]
+fn p124_constrained_dofs_match_model() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+
+    let dofs: Vec<(usize, usize)> = result.constrained_dofs().to_vec();
+    assert!(dofs.contains(&(0, 0)), "node 0 ux should be constrained");
+    assert!(dofs.contains(&(0, 1)), "node 0 uy should be constrained");
+    assert!(!dofs.contains(&(1, 0)), "node 1 ux should be free");
+    assert!(dofs.contains(&(1, 1)), "node 1 uy should be constrained");
+}
+
+// Test 21 — Source index alignment with load_source
+#[test]
+fn p124_source_index_alignment() {
+    let model = simple_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_2d(1, 30.0, 0.0).unwrap();
+    let r1 = model.solve_case(&dead).unwrap();
+    let r2 = model.solve_case(&live).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    assert_eq!(envelope.source(0).unwrap(), r1.load_source());
+    assert_eq!(envelope.source(1).unwrap(), r2.load_source());
+    assert!(envelope.source(2).is_none());
+}
+
+// Test 22 — Both ux and uy independently tracked
+#[test]
+fn p124_both_displacement_components_independent() {
+    let model = triangular_truss();
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_2d(2, 0.0, 1e3).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_x, &r_y]).unwrap();
+
+    let disp = envelope.node_displacement(2).unwrap();
+    assert!(disp.ux.is_populated());
+    assert!(disp.uy.is_populated());
+
+    let ux_x = r_x.displacements[4];
+    let ux_y = r_y.displacements[4];
+    assert!((disp.ux.max - ux_x.max(ux_y)).abs() < 1e-9);
+    assert!((disp.ux.min - ux_x.min(ux_y)).abs() < 1e-9);
+}
+
+// Test 23 — Reaction sign convention: R = K·u - f
+#[test]
+fn p124_reaction_sign_convention() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("pull");
+    case.nodal_load_2d(1, 1e4, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&result]).unwrap();
+
+    let support = envelope.support_reaction(0).unwrap();
+    assert!(
+        support.rx.max < 0.0,
+        "reaction at fixed node should be negative (opposing), got {}",
+        support.rx.max
+    );
+    assert!((support.rx.max - result.reactions[0]).abs() < 1e-9);
+}

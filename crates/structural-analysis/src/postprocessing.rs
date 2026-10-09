@@ -680,3 +680,297 @@ impl Truss3DEnvelope {
             .fold(0.0_f64, f64::max)
     }
 }
+
+// ===========================================================================
+// 2D Truss Envelope
+// ===========================================================================
+
+use crate::truss::TrussAnalysisResult;
+
+/// Per-node displacement envelope for a 2D truss across multiple load cases.
+///
+/// Each translational component (`ux`, `uy`) is tracked independently with
+/// signed min/max and governing source index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrussNodeDisplacementSample {
+    /// Node index in model order.
+    pub node_index: usize,
+    /// Horizontal displacement envelope (global x).
+    pub ux: Extremum,
+    /// Vertical displacement envelope (global y).
+    pub uy: Extremum,
+}
+
+/// Per-node support reaction envelope for a 2D truss across multiple load cases.
+///
+/// Only DOFs that carry a physical support reaction are populated. Free-DOF
+/// round-off residuals are never sampled. A DOF that is unconstrained in every
+/// input result remains unpopulated (`min = +∞`, `max = -∞`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrussNodeReactionSample {
+    /// Node index in model order.
+    pub node_index: usize,
+    /// Horizontal reaction envelope (global x).
+    pub rx: Extremum,
+    /// Vertical reaction envelope (global y).
+    pub ry: Extremum,
+}
+
+/// Per-element axial-force envelope for a 2D truss across multiple load cases.
+///
+/// Axial force is tension-positive, matching
+/// [`TrussAnalysisResult::axial_forces`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrussAxialForceSample {
+    /// Element index in model order.
+    pub element_index: usize,
+    /// Axial force envelope (tension positive).
+    pub axial: Extremum,
+}
+
+/// Multi-case envelope over 2D truss results.
+///
+/// Aggregates displacements, support reactions, and axial forces across
+/// multiple [`TrussAnalysisResult`] values. Every governing-source field is
+/// an index into [`sources`](Self::sources), so duplicate case names remain
+/// unambiguous.
+///
+/// # Topology validation
+///
+/// Unlike [`Truss3DEnvelope`], which only checks node and element counts,
+/// `TrussEnvelope` also validates that all input results share the same node
+/// coordinates (within a relative tolerance of `1e-9`) and element connectivity
+/// (exact match). This is possible because [`TrussAnalysisResult`] stores
+/// `node_coords` and `element_nodes` snapshots. Results from different models
+/// (different geometry or connectivity) are rejected with
+/// [`FemError::InvalidInput`].
+///
+/// # Reaction semantics
+///
+/// Reactions are sampled only at constrained DOFs (see
+/// [`TrussAnalysisResult::constrained_dofs`]). Free-DOF residuals are
+/// excluded. A DOF constrained in some results but not others is populated
+/// only from the results where it is constrained.
+///
+/// # Tie behavior
+///
+/// Ties keep the first input result, consistent with [`Envelope`] and
+/// [`Truss3DEnvelope`].
+///
+/// # Errors
+///
+/// [`FemError::InvalidInput`] if `results` is empty, if result counts
+/// disagree, if node coordinates or element connectivity differ, or if any
+/// sampled value is non-finite.
+#[derive(Debug, Clone)]
+pub struct TrussEnvelope {
+    /// Per-node displacement envelopes, in node order.
+    pub node_displacements: Vec<TrussNodeDisplacementSample>,
+    /// Per-node support reaction envelopes, in node order.
+    pub support_reactions: Vec<TrussNodeReactionSample>,
+    /// Per-element axial-force envelopes, in element order.
+    pub axial_forces: Vec<TrussAxialForceSample>,
+    /// Number of results that contributed, in input order.
+    pub n_results: usize,
+    /// Number of nodes in the model.
+    pub n_nodes: usize,
+    /// Number of elements in the model.
+    pub n_elements: usize,
+    /// Typed load sources, aligned with result input order.
+    pub sources: Vec<LoadSource>,
+}
+
+impl TrussEnvelope {
+    /// Build an envelope from multiple solved 2D truss results.
+    ///
+    /// All results must agree on node count, element count, node coordinates
+    /// (within `1e-9` relative tolerance), and element connectivity (exact
+    /// match). Displacements, reactions, and axial forces are aggregated
+    /// independently.
+    ///
+    /// # Errors
+    ///
+    /// - [`FemError::InvalidInput`] if `results` is empty.
+    /// - [`FemError::InvalidInput`] if result node or element counts disagree.
+    /// - [`FemError::InvalidInput`] if node coordinates differ beyond tolerance.
+    /// - [`FemError::InvalidInput`] if element connectivity differs.
+    /// - [`FemError::InvalidInput`] if any sampled value is non-finite.
+    pub fn from_results(results: &[&TrussAnalysisResult]) -> Result<Self, FemError> {
+        if results.is_empty() {
+            return Err(FemError::InvalidInput(
+                "envelope requires at least one result".to_string(),
+            ));
+        }
+
+        let n_nodes = results[0].n_nodes();
+        let n_elements = results[0].n_elements();
+        for r in results {
+            if r.n_nodes() != n_nodes {
+                return Err(FemError::InvalidInput(format!(
+                    "all results must have the same node count; got {} and {}",
+                    n_nodes,
+                    r.n_nodes()
+                )));
+            }
+            if r.n_elements() != n_elements {
+                return Err(FemError::InvalidInput(format!(
+                    "all results must have the same element count; got {} and {}",
+                    n_elements,
+                    r.n_elements()
+                )));
+            }
+        }
+
+        Self::validate_topology(results)?;
+
+        let node_displacements = Self::compute_displacements(results, n_nodes)?;
+        let support_reactions = Self::compute_reactions(results, n_nodes)?;
+        let axial_forces = Self::compute_axial_forces(results, n_elements)?;
+
+        Ok(Self {
+            node_displacements,
+            support_reactions,
+            axial_forces,
+            n_results: results.len(),
+            n_nodes,
+            n_elements,
+            sources: results.iter().map(|r| r.load_source().clone()).collect(),
+        })
+    }
+
+    fn validate_topology(results: &[&TrussAnalysisResult]) -> Result<(), FemError> {
+        let ref_coords = &results[0].node_coords;
+        let ref_elements = &results[0].element_nodes;
+        let tol = 1e-9;
+        for (idx, r) in results.iter().enumerate().skip(1) {
+            for (node, &(rx, ry)) in ref_coords.iter().enumerate() {
+                let (x, y) = r.node_coords[node];
+                let scale = rx.abs().max(ry.abs()).max(x.abs()).max(y.abs()).max(1.0);
+                if (rx - x).abs() > tol * scale || (ry - y).abs() > tol * scale {
+                    return Err(FemError::InvalidInput(format!(
+                        "node {node} coordinates differ between result 0 and result {idx}: \
+                         ({rx}, {ry}) vs ({x}, {y})"
+                    )));
+                }
+            }
+            if r.element_nodes != *ref_elements {
+                return Err(FemError::InvalidInput(format!(
+                    "element connectivity differs between result 0 and result {idx}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn compute_displacements(
+        results: &[&TrussAnalysisResult],
+        n_nodes: usize,
+    ) -> Result<Vec<TrussNodeDisplacementSample>, FemError> {
+        let mut envelope: Vec<[Extremum; 2]> = (0..n_nodes)
+            .map(|_| std::array::from_fn(|_| Extremum::new()))
+            .collect();
+        for (source_index, r) in results.iter().enumerate() {
+            let displacements = &r.displacements;
+            for node in 0..n_nodes {
+                for dof in 0..2 {
+                    let value = displacements[node * 2 + dof];
+                    if !value.is_finite() {
+                        return Err(FemError::InvalidInput(format!(
+                            "displacement is non-finite at node {node} DOF {dof}: {value}"
+                        )));
+                    }
+                    envelope[node][dof].update(value, source_index);
+                }
+            }
+        }
+        Ok(envelope
+            .into_iter()
+            .enumerate()
+            .map(|(node_index, [ux, uy])| TrussNodeDisplacementSample { node_index, ux, uy })
+            .collect())
+    }
+
+    fn compute_reactions(
+        results: &[&TrussAnalysisResult],
+        n_nodes: usize,
+    ) -> Result<Vec<TrussNodeReactionSample>, FemError> {
+        let mut envelope: Vec<[Extremum; 2]> = (0..n_nodes)
+            .map(|_| std::array::from_fn(|_| Extremum::new()))
+            .collect();
+        for (source_index, r) in results.iter().enumerate() {
+            let reactions = &r.reactions;
+            for &(node, dof) in r.constrained_dofs() {
+                if node >= n_nodes || dof >= 2 {
+                    continue;
+                }
+                let value = reactions[node * 2 + dof];
+                if !value.is_finite() {
+                    return Err(FemError::InvalidInput(format!(
+                        "reaction is non-finite at node {node} DOF {dof}: {value}"
+                    )));
+                }
+                envelope[node][dof].update(value, source_index);
+            }
+        }
+        Ok(envelope
+            .into_iter()
+            .enumerate()
+            .map(|(node_index, [rx, ry])| TrussNodeReactionSample { node_index, rx, ry })
+            .collect())
+    }
+
+    fn compute_axial_forces(
+        results: &[&TrussAnalysisResult],
+        n_elements: usize,
+    ) -> Result<Vec<TrussAxialForceSample>, FemError> {
+        let mut envelope: Vec<Extremum> = (0..n_elements).map(|_| Extremum::new()).collect();
+        for (source_index, r) in results.iter().enumerate() {
+            let axial = &r.axial_forces;
+            for elem in 0..n_elements {
+                let value = axial[elem];
+                if !value.is_finite() {
+                    return Err(FemError::InvalidInput(format!(
+                        "axial force is non-finite at element {elem}: {value}"
+                    )));
+                }
+                envelope[elem].update(value, source_index);
+            }
+        }
+        Ok(envelope
+            .into_iter()
+            .enumerate()
+            .map(|(element_index, axial)| TrussAxialForceSample {
+                element_index,
+                axial,
+            })
+            .collect())
+    }
+
+    /// Typed source at an input index.
+    pub fn source(&self, index: usize) -> Option<&LoadSource> {
+        self.sources.get(index)
+    }
+
+    /// Displacement envelope for a node.
+    pub fn node_displacement(&self, node_index: usize) -> Option<&TrussNodeDisplacementSample> {
+        self.node_displacements.get(node_index)
+    }
+
+    /// Support reaction envelope for a node.
+    pub fn support_reaction(&self, node_index: usize) -> Option<&TrussNodeReactionSample> {
+        self.support_reactions.get(node_index)
+    }
+
+    /// Axial-force envelope for an element.
+    pub fn axial_force(&self, element_index: usize) -> Option<&TrussAxialForceSample> {
+        self.axial_forces.get(element_index)
+    }
+
+    /// Maximum absolute axial force across all elements and sources.
+    pub fn max_abs_axial(&self) -> f64 {
+        self.axial_forces
+            .iter()
+            .map(|s| s.axial.min.abs().max(s.axial.max.abs()))
+            .fold(0.0_f64, f64::max)
+    }
+}

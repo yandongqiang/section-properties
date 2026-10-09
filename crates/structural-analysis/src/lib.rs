@@ -138,7 +138,8 @@ pub use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource
 pub use crate::postprocessing::{
     Envelope, EnvelopeSample, Extremum, NodeDisplacementSample, NodeReactionSample,
     SectionForceSources, Truss3DAxialForceSample, Truss3DEnvelope, Truss3DNodeDisplacementSample,
-    Truss3DNodeReactionSample,
+    Truss3DNodeReactionSample, TrussAxialForceSample, TrussEnvelope, TrussNodeDisplacementSample,
+    TrussNodeReactionSample,
 };
 pub use crate::truss::{
     TrussAnalysisResult, TrussDof, TrussElement, TrussEquilibriumReport, TrussModel, TrussNode,
