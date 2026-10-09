@@ -1803,3 +1803,112 @@ fn p125_zero_axial_force_extrema() {
         af.axial.max
     );
 }
+
+// ===========================================================================
+// Phase 128 — Reject non-finite 2D truss envelope coordinates
+//
+// Phase 125 P3 found that NaN/∞ coordinates could pass 2D topology validation
+// due to IEEE 754 semantics. Phase 127 added is_finite() guards to 3D.
+// This phase adds the same guard to 2D, achieving parity.
+// ===========================================================================
+
+// Test 33 — NaN in x-coordinate rejected
+#[test]
+fn p128_nan_x_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 = f64::NAN;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 34 — NaN in y-coordinate rejected
+#[test]
+fn p128_nan_y_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].1 = f64::NAN;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 35 — Positive infinity rejected
+#[test]
+fn p128_positive_infinity_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 = f64::INFINITY;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 36 — Negative infinity rejected
+#[test]
+fn p128_negative_infinity_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].1 = f64::NEG_INFINITY;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 37 — Non-finite in reference result rejected
+#[test]
+fn p128_non_finite_reference_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut r1 = model.solve_case(&case).unwrap();
+    let r2 = r1.clone();
+    r1.node_coords[0].0 = f64::NAN;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 38 — Non-finite in later candidate rejected (no partial contamination)
+#[test]
+fn p128_non_finite_later_candidate_rejected() {
+    let model = simple_bar();
+    let mut case0 = LoadCase::new("case0");
+    case0.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case1 = LoadCase::new("case1");
+    case1.nodal_load_2d(1, 20.0, 0.0).unwrap();
+    let r0 = model.solve_case(&case0).unwrap();
+    let r1 = model.solve_case(&case1).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].1 = f64::INFINITY;
+    let result = TrussEnvelope::from_results(&[&r0, &r1, &r2]);
+    assert!(
+        result.is_err(),
+        "non-finite in result[2] must reject the entire envelope"
+    );
+    assert!(matches!(result.unwrap_err(), FemError::InvalidInput(_)));
+}
+
+// Test 39 — Finite matching topology still accepted
+#[test]
+fn p128_finite_matching_topology_accepted() {
+    let model = simple_bar();
+    let mut case1 = LoadCase::new("case1");
+    case1.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case2 = LoadCase::new("case2");
+    case2.nodal_load_2d(1, 20.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case1).unwrap();
+    let r2 = model.solve_case(&case2).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+    assert_eq!(envelope.n_results, 2);
+    assert_eq!(envelope.n_nodes, 2);
+    assert_eq!(envelope.n_elements, 1);
+}

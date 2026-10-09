@@ -847,6 +847,7 @@ impl TrussEnvelope {
     /// - [`FemError::InvalidInput`] if `results` is empty.
     /// - [`FemError::InvalidInput`] if result node or element counts disagree.
     /// - [`FemError::InvalidInput`] if node coordinates differ beyond tolerance.
+    /// - [`FemError::InvalidInput`] if any node coordinate is non-finite.
     /// - [`FemError::InvalidInput`] if element connectivity differs.
     /// - [`FemError::InvalidInput`] if any sampled value is non-finite.
     pub fn from_results(results: &[&TrussAnalysisResult]) -> Result<Self, FemError> {
@@ -899,6 +900,12 @@ impl TrussEnvelope {
         for (idx, r) in results.iter().enumerate().skip(1) {
             for (node, &(rx, ry)) in ref_coords.iter().enumerate() {
                 let (x, y) = r.node_coords[node];
+                if !rx.is_finite() || !ry.is_finite() || !x.is_finite() || !y.is_finite() {
+                    return Err(FemError::InvalidInput(format!(
+                        "node {node} has non-finite coordinates between result 0 and \
+                         result {idx}: ({rx}, {ry}) vs ({x}, {y})"
+                    )));
+                }
                 let scale = rx.abs().max(ry.abs()).max(x.abs()).max(y.abs()).max(1.0);
                 if (rx - x).abs() > tol * scale || (ry - y).abs() > tol * scale {
                     return Err(FemError::InvalidInput(format!(
