@@ -1912,3 +1912,206 @@ fn p128_finite_matching_topology_accepted() {
     assert_eq!(envelope.n_nodes, 2);
     assert_eq!(envelope.n_elements, 1);
 }
+
+// ===========================================================================
+// Phase 130 — Batch solving with reusable factorization (2D)
+// ===========================================================================
+
+#[test]
+fn p130_empty_cases_returns_empty() {
+    let model = simple_bar();
+    let results = model.solve_cases(&[]).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn p130_single_case_matches_solve_case() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("fx");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let batch = model.solve_cases(&[&case]).unwrap();
+    let single = model.solve_case(&case).unwrap();
+
+    assert_eq!(batch.len(), 1);
+    for i in 0..4 {
+        assert!(
+            (batch[0].displacements[i] - single.displacements[i]).abs() < 1e-12,
+            "disp mismatch at {i}"
+        );
+        assert!(
+            (batch[0].reactions[i] - single.reactions[i]).abs() < 1e-12,
+            "reaction mismatch at {i}"
+        );
+    }
+    assert!(
+        (batch[0].axial_forces[0] - single.axial_forces[0]).abs() < 1e-12,
+        "axial force mismatch"
+    );
+}
+
+#[test]
+fn p130_multiple_cases_match_solve_case_each() {
+    let model = triangular_truss();
+    let mut a = LoadCase::new("a");
+    a.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut b = LoadCase::new("b");
+    b.nodal_load_2d(2, 0.0, 2e3).unwrap();
+    let mut c = LoadCase::new("c");
+    c.nodal_load_2d(2, -500.0, 800.0).unwrap();
+
+    let batch = model.solve_cases(&[&a, &b, &c]).unwrap();
+    let sa = model.solve_case(&a).unwrap();
+    let sb = model.solve_case(&b).unwrap();
+    let sc = model.solve_case(&c).unwrap();
+
+    assert_eq!(batch.len(), 3);
+    let singles = [sa, sb, sc];
+    for (k, r) in batch.iter().enumerate() {
+        for i in 0..r.displacements.len() {
+            assert!(
+                (r.displacements[i] - singles[k].displacements[i]).abs() < 1e-9,
+                "case {k} disp mismatch at dof {i}"
+            );
+        }
+        for i in 0..r.reactions.len() {
+            assert!(
+                (r.reactions[i] - singles[k].reactions[i]).abs() < 1e-9,
+                "case {k} reaction mismatch at dof {i}"
+            );
+        }
+        for i in 0..r.axial_forces.len() {
+            assert!(
+                (r.axial_forces[i] - singles[k].axial_forces[i]).abs() < 1e-9,
+                "case {k} axial force mismatch at element {i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn p130_results_preserve_input_order() {
+    let model = simple_bar();
+    let mut first = LoadCase::new("first");
+    first.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut second = LoadCase::new("second");
+    second.nodal_load_2d(1, 20.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&first, &second]).unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(
+        (results[0].displacements[2] - 10.0).abs() < 1e-9,
+        "first case should give ux=10"
+    );
+    assert!(
+        (results[1].displacements[2] - 20.0).abs() < 1e-9,
+        "second case should give ux=20"
+    );
+}
+
+#[test]
+fn p130_load_source_is_load_case() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("my_case");
+    case.nodal_load_2d(1, 5.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&case]).unwrap();
+    assert!(matches!(
+        results[0].load_source(),
+        LoadSource::LoadCase { .. }
+    ));
+}
+
+#[test]
+fn p130_prescribed_displacement_modifies_fixed_dof() {
+    let model = simple_bar();
+    let mut plain = LoadCase::new("plain");
+    plain.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let mut shifted = LoadCase::new("shifted");
+    shifted.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    shifted.prescribed_displacement_2d(0, 0, 0.001).unwrap();
+
+    let results = model.solve_cases(&[&plain, &shifted]).unwrap();
+    assert_eq!(results.len(), 2);
+
+    let single_shifted = model.solve_case(&shifted).unwrap();
+    for i in 0..4 {
+        assert!(
+            (results[1].displacements[i] - single_shifted.displacements[i]).abs() < 1e-12,
+            "prescribed disp mismatch at dof {i}"
+        );
+    }
+}
+
+#[test]
+fn p130_new_fixed_dof_rejected() {
+    let model = simple_bar();
+    let mut bad = LoadCase::new("bad");
+    bad.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    bad.prescribed_displacement_2d(1, 0, 0.0).unwrap();
+
+    let err = model.solve_cases(&[&bad]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+#[test]
+fn p130_invalid_node_rejected() {
+    let model = simple_bar();
+    let mut bad = LoadCase::new("bad");
+    bad.nodal_load_2d(5, 10.0, 0.0).unwrap();
+
+    let err = model.solve_cases(&[&bad]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidNode(_)));
+}
+
+#[test]
+fn p130_all_constrained_n_free_zero() {
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, 1.0, 0.0));
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_node(1).unwrap();
+
+    let mut case = LoadCase::new("constrained");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&case]).unwrap();
+    assert_eq!(results.len(), 1);
+    for &u in &results[0].displacements {
+        assert!(u.abs() < 1e-12, "all displacements should be zero");
+    }
+    assert_eq!(results[0].reactions.len(), 4);
+}
+
+#[test]
+fn p130_batch_then_envelope() {
+    use structural_analysis::postprocessing::TrussEnvelope;
+
+    let model = triangular_truss();
+    let mut a = LoadCase::new("a");
+    a.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut b = LoadCase::new("b");
+    b.nodal_load_2d(2, 0.0, 2e3).unwrap();
+    let mut c = LoadCase::new("c");
+    c.nodal_load_2d(2, -500.0, 800.0).unwrap();
+
+    let batch = model.solve_cases(&[&a, &b, &c]).unwrap();
+    let refs: Vec<&_> = batch.iter().collect();
+    let envelope = TrussEnvelope::from_results(&refs).unwrap();
+    assert_eq!(envelope.n_results, 3);
+}
+
+#[test]
+fn p130_solver_name_populated_when_free_dofs_exist() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("fx");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&case]).unwrap();
+    assert!(
+        results[0].solver_name.is_some(),
+        "solver_name should be populated when free DOFs exist"
+    );
+}

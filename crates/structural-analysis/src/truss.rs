@@ -499,6 +499,254 @@ impl TrussModel {
         result.load_source = load_combination_source(combo);
         Ok(result)
     }
+
+    /// Solve the truss under multiple [`LoadCase`]s sharing one factorization.
+    ///
+    /// All cases must use the same constraint structure as the model: a case
+    /// may modify the *value* of an already-fixed DOF via
+    /// [`LoadCase::prescribed_displacements`], but it must not introduce a
+    /// new fixed DOF. Cases that would add new constraints are rejected with
+    /// [`FemError::InvalidInput`].
+    ///
+    /// The reduced stiffness matrix `K_ff` is assembled and factorized **once**;
+    /// each case only assembles its effective right-hand side and performs a
+    /// back-substitution. This is faster than calling [`solve_case`](Self::solve_case)
+    /// repeatedly when the number of cases is large relative to the model size.
+    ///
+    /// Results are returned in input order. Each result's
+    /// [`load_source`](TrussAnalysisResult::load_source) is
+    /// [`LoadSource::LoadCase`], preserving case identity.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if a load references an out-of-bounds node.
+    /// [`FemError::InvalidInput`] if a load references DOF ≥ 2, or if a case
+    /// prescribes a displacement at a DOF that is not fixed in the model.
+    /// [`FemError::InvalidModel`] if the model is invalid.
+    /// [`FemError::SolverError`] if the linear solve fails.
+    pub fn solve_cases(&self, cases: &[&LoadCase]) -> Result<Vec<TrussAnalysisResult>, FemError> {
+        if cases.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let n_nodes = self.nodes.len();
+        let n_dof = self.n_dof();
+
+        for case in cases {
+            for &(node_idx, dof, _) in case.nodal_forces() {
+                if node_idx >= n_nodes {
+                    return Err(FemError::InvalidNode(format!(
+                        "load case '{}' references node {node_idx} out of bounds (max {})",
+                        case.name(),
+                        n_nodes.saturating_sub(1)
+                    )));
+                }
+                if dof >= 2 {
+                    return Err(FemError::InvalidInput(format!(
+                        "load case '{}' has nodal force with DOF {dof} at node {node_idx}; \
+                         2D truss only has DOF 0 (ux) and 1 (uy)",
+                        case.name()
+                    )));
+                }
+            }
+            for &(node_idx, dof, _) in case.prescribed_displacements() {
+                if node_idx >= n_nodes {
+                    return Err(FemError::InvalidNode(format!(
+                        "load case '{}' prescribes displacement at node {node_idx} out of \
+                         bounds (max {})",
+                        case.name(),
+                        n_nodes.saturating_sub(1)
+                    )));
+                }
+                if dof >= 2 {
+                    return Err(FemError::InvalidInput(format!(
+                        "load case '{}' prescribes displacement with DOF {dof} at node \
+                         {node_idx}; 2D truss only has DOF 0 (ux) and 1 (uy)",
+                        case.name()
+                    )));
+                }
+                let idx = self.dof_index(node_idx, dof);
+                let is_model_fixed = self
+                    .fixed_dofs
+                    .iter()
+                    .any(|&(n, d, _)| self.dof_index(n, d) == idx);
+                if !is_model_fixed {
+                    return Err(FemError::InvalidInput(format!(
+                        "load case '{}' prescribes displacement at node {node_idx} DOF {dof} \
+                         which is not fixed in the model; batch solving requires all cases to \
+                         share the model's constraint structure",
+                        case.name()
+                    )));
+                }
+            }
+        }
+
+        let solver = TrussSolver::from_model(self)?;
+
+        let mut free_to_global = Vec::new();
+        let mut global_to_free = vec![None; n_dof];
+        for i in 0..n_dof {
+            if !solver.fixed_dofs[i] {
+                global_to_free[i] = Some(free_to_global.len());
+                free_to_global.push(i);
+            }
+        }
+        let n_free = free_to_global.len();
+
+        let mut k_orig_csr = solver.k_global.clone();
+        k_orig_csr.compress();
+        let row_ptr = k_orig_csr.row_ptr();
+        let csr_cols = k_orig_csr.csr_cols();
+        let csr_vals = k_orig_csr.csr_vals();
+
+        let constrained_dofs: Vec<(usize, usize)> = solver
+            .fixed_dofs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &fixed)| fixed)
+            .map(|(i, _)| (i / 2, i % 2))
+            .collect();
+
+        let node_coords: Vec<(f64, f64)> = self.nodes.iter().map(|n| (n.x, n.y)).collect();
+        let element_nodes: Vec<(usize, usize)> =
+            self.elements.iter().map(|e| (e.node_i, e.node_j)).collect();
+
+        let mut results = Vec::with_capacity(cases.len());
+
+        if n_free == 0 {
+            for case in cases {
+                let mut u_global = vec![0.0; n_dof];
+                let mut prescribed = solver.prescribed_values.clone();
+                for &(node_idx, dof, value) in case.prescribed_displacements() {
+                    prescribed[self.dof_index(node_idx, dof)] = Some(value);
+                }
+                for i in 0..n_dof {
+                    if solver.fixed_dofs[i] {
+                        u_global[i] = prescribed[i].unwrap_or(0.0);
+                    }
+                }
+                let mut f_global = vec![0.0; n_dof];
+                for &(node_idx, dof, value) in case.nodal_forces() {
+                    f_global[self.dof_index(node_idx, dof)] += value;
+                }
+                let ku = solver.k_original.matvec(&u_global);
+                let reactions: Vec<f64> = (0..n_dof).map(|i| ku[i] - f_global[i]).collect();
+                let mut axial_forces = Vec::with_capacity(self.elements.len());
+                for el in &self.elements {
+                    let pi = self.nodes[el.node_i].point();
+                    let pj = self.nodes[el.node_j].point();
+                    let u = [
+                        u_global[self.dof_index(el.node_i, 0)],
+                        u_global[self.dof_index(el.node_i, 1)],
+                        u_global[self.dof_index(el.node_j, 0)],
+                        u_global[self.dof_index(el.node_j, 1)],
+                    ];
+                    axial_forces.push(el.axial_force(pi, pj, u)?);
+                }
+                results.push(TrussAnalysisResult {
+                    displacements: u_global,
+                    reactions,
+                    axial_forces,
+                    solver_name: None,
+                    node_coords: node_coords.clone(),
+                    element_nodes: element_nodes.clone(),
+                    nodal_forces: case.nodal_forces().to_vec(),
+                    constrained_dofs: constrained_dofs.clone(),
+                    load_source: load_case_source(case),
+                    n_nodes,
+                    n_elements: self.elements.len(),
+                });
+            }
+            return Ok(results);
+        }
+
+        let mut k_ff = SparseMatrix::new(n_free);
+        for (free_idx, &global_i) in free_to_global.iter().enumerate() {
+            for idx in row_ptr[global_i]..row_ptr[global_i + 1] {
+                let global_j = csr_cols[idx];
+                let val = csr_vals[idx];
+                if let Some(free_j) = global_to_free[global_j] {
+                    k_ff.add(free_idx, free_j, val);
+                }
+            }
+        }
+        k_ff.compress();
+
+        let registry = SolverRegistry::default();
+        let mut linear_solver = registry
+            .create_selected(&k_ff, &solver.solver_selection)
+            .map_err(FemError::from)?;
+        let solver_name = linear_solver.name().to_string();
+        linear_solver.factor(&k_ff)?;
+
+        for case in cases {
+            let mut f_global = vec![0.0; n_dof];
+            for &(node_idx, dof, value) in case.nodal_forces() {
+                f_global[self.dof_index(node_idx, dof)] += value;
+            }
+
+            let mut prescribed = solver.prescribed_values.clone();
+            for &(node_idx, dof, value) in case.prescribed_displacements() {
+                prescribed[self.dof_index(node_idx, dof)] = Some(value);
+            }
+
+            let mut f_reduced = vec![0.0; n_free];
+            for (free_idx, &global_i) in free_to_global.iter().enumerate() {
+                f_reduced[free_idx] = f_global[global_i];
+                for idx in row_ptr[global_i]..row_ptr[global_i + 1] {
+                    let global_j = csr_cols[idx];
+                    if global_to_free[global_j].is_none() {
+                        let u_c = prescribed[global_j].unwrap_or(0.0);
+                        f_reduced[free_idx] -= csr_vals[idx] * u_c;
+                    }
+                }
+            }
+
+            let u_free = linear_solver.solve(&f_reduced)?;
+
+            let mut u_global = vec![0.0; n_dof];
+            for (free_idx, &global_idx) in free_to_global.iter().enumerate() {
+                u_global[global_idx] = u_free[free_idx];
+            }
+            for i in 0..n_dof {
+                if solver.fixed_dofs[i] {
+                    u_global[i] = prescribed[i].unwrap_or(0.0);
+                }
+            }
+
+            let ku = solver.k_original.matvec(&u_global);
+            let reactions: Vec<f64> = (0..n_dof).map(|i| ku[i] - f_global[i]).collect();
+
+            let mut axial_forces = Vec::with_capacity(self.elements.len());
+            for el in &self.elements {
+                let pi = self.nodes[el.node_i].point();
+                let pj = self.nodes[el.node_j].point();
+                let u = [
+                    u_global[self.dof_index(el.node_i, 0)],
+                    u_global[self.dof_index(el.node_i, 1)],
+                    u_global[self.dof_index(el.node_j, 0)],
+                    u_global[self.dof_index(el.node_j, 1)],
+                ];
+                axial_forces.push(el.axial_force(pi, pj, u)?);
+            }
+
+            results.push(TrussAnalysisResult {
+                displacements: u_global,
+                reactions,
+                axial_forces,
+                solver_name: Some(solver_name.clone()),
+                node_coords: node_coords.clone(),
+                element_nodes: element_nodes.clone(),
+                nodal_forces: case.nodal_forces().to_vec(),
+                constrained_dofs: constrained_dofs.clone(),
+                load_source: load_case_source(case),
+                n_nodes,
+                n_elements: self.elements.len(),
+            });
+        }
+
+        Ok(results)
+    }
 }
 
 // ---------------------------------------------------------------------------
