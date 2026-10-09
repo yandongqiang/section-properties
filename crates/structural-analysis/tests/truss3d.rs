@@ -1215,3 +1215,407 @@ fn test_multi_node_accumulation_cancellation() {
         3.0 * 50.0
     );
 }
+
+// ===========================================================================
+// Phase 120 — 3D Truss Envelope tests
+// ===========================================================================
+
+use structural_analysis::FemError;
+use structural_analysis::Truss3DEnvelope;
+
+fn steel() -> section_properties::Material {
+    section_properties::Material::new(200e9, 0.3, 7850.0, "Steel")
+}
+
+/// Simple axial bar along X: node 0 fixed, node 1 free (uy/uz constrained).
+fn axial_bar() -> TrussModel3D {
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &steel(), 1e-4).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    model
+}
+
+/// 3D tripod: apex node 0 supported by 3 fixed nodes.
+fn tripod() -> TrussModel3D {
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 3.0));
+    model.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(2, -1.0, 1.732, 0.0));
+    model.add_node(TrussNode3D::new(3, -1.0, -1.732, 0.0));
+    let mat = steel();
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model.add_element(TrussElement3D::new(0, 2, &mat, 1e-4).unwrap());
+    model.add_element(TrussElement3D::new(0, 3, &mat, 1e-4).unwrap());
+    model.fix_node(1).unwrap();
+    model.fix_node(2).unwrap();
+    model.fix_node(3).unwrap();
+    model
+}
+
+// Test 1 — Single-result envelope: min and max equal the original values
+#[test]
+fn p120_single_result_envelope_matches_original() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("single");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&result]).unwrap();
+
+    let ux = result.displacement(1, TrussDof3D::Ux).unwrap();
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.min - ux).abs() < 1e-12);
+    assert!((disp.ux.max - ux).abs() < 1e-12);
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(0));
+
+    let axial = result.member_axial_force(0).unwrap();
+    let af = envelope.axial_force(0).unwrap();
+    assert!((af.axial.min - axial).abs() < 1e-9);
+    assert!((af.axial.max - axial).abs() < 1e-9);
+}
+
+// Test 2 — Multiple results: component-wise ux/uy/uz minima and maxima
+#[test]
+fn p120_multiple_results_component_wise_extrema() {
+    let model = axial_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_3d(1, 4e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let ux1 = r1.displacement(1, TrussDof3D::Ux).unwrap();
+    let ux2 = r2.displacement(1, TrussDof3D::Ux).unwrap();
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.min - ux1).abs() < 1e-12);
+    assert!((disp.ux.max - ux2).abs() < 1e-12);
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(1));
+}
+
+// Test 3 — Reaction extrema for supported DOFs
+#[test]
+fn p120_reaction_extrema_for_supported_dofs() {
+    let model = axial_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_3d(1, 4e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let support = envelope.support_reaction(0).unwrap();
+    assert!(support.rx.is_populated());
+    assert!(support.ry.is_populated());
+    assert!(support.rz.is_populated());
+    let rx1 = r1.reactions[0];
+    let rx2 = r2.reactions[0];
+    assert!((support.rx.min - rx1.min(rx2)).abs() < 1e-9);
+    assert!((support.rx.max - rx1.max(rx2)).abs() < 1e-9);
+}
+
+// Test 4 — Free DOFs do not produce artificial zero reaction extrema
+#[test]
+fn p120_free_dofs_no_artificial_reactions() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&result]).unwrap();
+
+    // Node 1 has ux free (only uy/uz constrained)
+    let node1 = envelope.support_reaction(1).unwrap();
+    assert!(
+        !node1.rx.is_populated(),
+        "free DOF rx should not be populated"
+    );
+    assert!(
+        node1.ry.is_populated(),
+        "constrained DOF ry should be populated"
+    );
+    assert!(
+        node1.rz.is_populated(),
+        "constrained DOF rz should be populated"
+    );
+}
+
+// Test 5 — Mixed support configurations via prescribed displacement
+#[test]
+fn p120_mixed_support_configurations() {
+    let model = tripod();
+    // Case A: normal load, no prescribed displacement
+    let mut case_a = LoadCase::new("normal");
+    case_a.nodal_load_3d(0, 0.0, 0.0, -1e4).unwrap();
+    // Case B: prescribed displacement at node 0 uz (adds a constraint)
+    let mut case_b = LoadCase::new("prescribed");
+    case_b.prescribed_displacement_3d(0, 2, -0.001).unwrap();
+    let r_a = model.solve_case(&case_a).unwrap();
+    let r_b = model.solve_case(&case_b).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap();
+
+    // Node 0 rz is free in case_a but constrained in case_b
+    let node0 = envelope.support_reaction(0).unwrap();
+    assert!(
+        node0.rz.is_populated(),
+        "rz should be populated from case_b"
+    );
+    assert_eq!(node0.rz.min_source, Some(1));
+    assert_eq!(node0.rz.max_source, Some(1));
+}
+
+// Test 6 — Per-member axial-force minimum and maximum
+#[test]
+fn p120_axial_force_min_max() {
+    let model = tripod();
+    let mut down = LoadCase::new("down");
+    down.nodal_load_3d(0, 0.0, 0.0, -1e4).unwrap();
+    let mut up = LoadCase::new("up");
+    up.nodal_load_3d(0, 0.0, 0.0, 1e4).unwrap();
+    let r_down = model.solve_case(&down).unwrap();
+    let r_up = model.solve_case(&up).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_down, &r_up]).unwrap();
+
+    for elem in 0..3 {
+        let af = envelope.axial_force(elem).unwrap();
+        assert!(af.axial.is_populated());
+        assert!(af.axial.min <= af.axial.max);
+        let n_down = r_down.member_axial_force(elem).unwrap();
+        let n_up = r_up.member_axial_force(elem).unwrap();
+        assert!((af.axial.min - n_down.min(n_up)).abs() < 1e-6);
+        assert!((af.axial.max - n_down.max(n_up)).abs() < 1e-6);
+    }
+}
+
+// Test 7 — Correct governing LoadSource for every extremum
+#[test]
+fn p120_governing_load_source_correct() {
+    let model = axial_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_3d(1, 5e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&dead).unwrap();
+    let r2 = model.solve_case(&live).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(1));
+    assert_eq!(envelope.source(0).unwrap().name(), Some("dead"));
+    assert_eq!(envelope.source(1).unwrap().name(), Some("live"));
+}
+
+// Test 8 — Results from both solve_case and solve_combination
+#[test]
+fn p120_case_and_combination_sources() {
+    let model = axial_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_3d(1, 2e4, 0.0, 0.0).unwrap();
+    let mut combo = LoadCombination::new("1.4D+1.6L");
+    combo.add_case(&dead, 1.4).unwrap();
+    combo.add_case(&live, 1.6).unwrap();
+
+    let case_result = model.solve_case(&dead).unwrap();
+    let combo_result = model.solve_combination(&combo).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&case_result, &combo_result]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!(disp.ux.is_populated());
+    match envelope.source(1).unwrap() {
+        LoadSource::LoadCombination { name, terms } => {
+            assert_eq!(name, "1.4D+1.6L");
+            assert_eq!(terms.len(), 2);
+        }
+        other => panic!("expected combination, got {other:?}"),
+    }
+}
+
+// Test 9 — Deterministic tie behavior
+#[test]
+fn p120_ties_keep_first_source() {
+    let model = axial_bar();
+    let mut first = LoadCase::new("first");
+    first.nodal_load_3d(1, 2e4, 0.0, 0.0).unwrap();
+    let mut second = LoadCase::new("second");
+    second.nodal_load_3d(1, 2e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&first).unwrap();
+    let r2 = model.solve_case(&second).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let disp = envelope.node_displacement(1).unwrap();
+    assert_eq!(disp.ux.min_source, Some(0));
+    assert_eq!(disp.ux.max_source, Some(0));
+}
+
+// Test 10 — Empty input behavior
+#[test]
+fn p120_empty_input_rejected() {
+    let err = Truss3DEnvelope::from_results(&[]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 11 — Incompatible node/member counts
+#[test]
+fn p120_incompatible_counts_rejected() {
+    let model1 = axial_bar();
+    let mut case1 = LoadCase::new("c1");
+    case1.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model1.solve_case(&case1).unwrap();
+
+    let mut model2 = TrussModel3D::new();
+    model2.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model2.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model2.add_node(TrussNode3D::new(2, 4.0, 0.0, 0.0));
+    model2.add_element(TrussElement3D::new(0, 1, &steel(), 1e-4).unwrap());
+    model2.add_element(TrussElement3D::new(1, 2, &steel(), 1e-4).unwrap());
+    model2.fix_node(0).unwrap();
+    model2.fix_node(2).unwrap();
+    model2.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model2.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    let mut case2 = LoadCase::new("c2");
+    case2.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r2 = model2.solve_case(&case2).unwrap();
+
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    match err {
+        FemError::InvalidInput(msg) => {
+            assert!(msg.contains("node count") || msg.contains("element count"));
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+// Test 12 — Same-count but incompatible topology
+#[test]
+fn p120_same_count_incompatible_topology() {
+    // Model A: bar 0-1
+    let mut model_a = TrussModel3D::new();
+    model_a.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_a.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model_a.add_element(TrussElement3D::new(0, 1, &steel(), 1e-4).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    // Model B: bar 0-1 but different length (same counts, different geometry)
+    let mut model_b = TrussModel3D::new();
+    model_b.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_b.add_node(TrussNode3D::new(1, 5.0, 0.0, 0.0));
+    model_b.add_element(TrussElement3D::new(0, 1, &steel(), 1e-4).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case_a).unwrap();
+    let r_b = model_b.solve_case(&case_b).unwrap();
+
+    // Same counts → envelope accepts (documented limitation)
+    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap();
+    assert_eq!(envelope.n_nodes, 2);
+    assert_eq!(envelope.n_elements, 1);
+    // Values differ because geometry differs — user responsibility
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!(disp.ux.min.abs() > 0.0);
+    assert!(disp.ux.max.abs() > 0.0);
+    assert!((disp.ux.min - disp.ux.max).abs() > 1e-12);
+}
+
+// Test 13 — Reordering input results does not change numeric extrema
+#[test]
+fn p120_reorder_preserves_extrema() {
+    let model = axial_bar();
+    let mut light = LoadCase::new("light");
+    light.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load_3d(1, 4e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light).unwrap();
+    let r2 = model.solve_case(&heavy).unwrap();
+
+    let env_12 = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+    let env_21 = Truss3DEnvelope::from_results(&[&r2, &r1]).unwrap();
+
+    let d12 = env_12.node_displacement(1).unwrap();
+    let d21 = env_21.node_displacement(1).unwrap();
+    assert!((d12.ux.min - d21.ux.min).abs() < 1e-12);
+    assert!((d12.ux.max - d21.ux.max).abs() < 1e-12);
+
+    let a12 = env_12.axial_force(0).unwrap();
+    let a21 = env_21.axial_force(0).unwrap();
+    assert!((a12.axial.min - a21.axial.min).abs() < 1e-9);
+    assert!((a12.axial.max - a21.axial.max).abs() < 1e-9);
+}
+
+// Test 14 — Analytical 3D truss benchmark
+#[test]
+fn p120_analytical_benchmark() {
+    let E = 200e9;
+    let A = 1e-4;
+    let L = 3.0;
+    let F = 5e4;
+
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, L, 0.0, 0.0));
+    let mat = section_properties::Material::new(E, 0.3, 1.0, "mat");
+    model.add_element(TrussElement3D::new(0, 1, &mat, A).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut case = LoadCase::new("axial");
+    case.nodal_load_3d(1, F, 0.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&result]).unwrap();
+
+    let expected_ux = F * L / (E * A);
+    let disp = envelope.node_displacement(1).unwrap();
+    assert!((disp.ux.max - expected_ux).abs() / expected_ux.abs() < 1e-10);
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!((af.axial.max - F).abs() / F.abs() < 1e-10);
+
+    let support = envelope.support_reaction(0).unwrap();
+    assert!((support.rx.max - (-F)).abs() / F.abs() < 1e-10);
+}
+
+// Test 15 — Frame Envelope regression (unchanged behavior)
+#[test]
+fn p120_frame_envelope_regression() {
+    use structural_analysis::{BeamSection, Envelope, FrameModel};
+
+    let mut frame = FrameModel::new();
+    let a = frame.add_node(0.0, 0.0).unwrap();
+    let b = frame.add_node(5.0, 0.0).unwrap();
+    frame
+        .add_member(a, b, steel(), BeamSection::new(5e-3, 2e-5))
+        .unwrap();
+    frame.fix(a).unwrap();
+
+    let mut light = LoadCase::new("light");
+    light.nodal_load(b, 0.0, -1000.0).unwrap();
+    let mut heavy = LoadCase::new("heavy");
+    heavy.nodal_load(b, 0.0, -4000.0).unwrap();
+    let r1 = frame.solve_case(&light).unwrap();
+    let r2 = frame.solve_case(&heavy).unwrap();
+    let envelope = Envelope::from_frame_results(&[&r1, &r2], 5).unwrap();
+
+    assert_eq!(envelope.n_results, 2);
+    assert_eq!(envelope.n_members, 1);
+    assert_eq!(envelope.n_nodes, 2);
+    let tip = envelope.node_displacement(b.index()).unwrap();
+    assert_eq!(tip.uy.min_source, Some(1));
+    assert_eq!(tip.uy.max_source, Some(0));
+}

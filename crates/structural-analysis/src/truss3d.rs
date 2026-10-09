@@ -53,7 +53,7 @@
 //! - No bending, no torsion, no shear.
 //! - No member distributed loads.
 //! - No self-weight.
-//! - No `Envelope` support.
+//! - `Envelope` support via [`Truss3DEnvelope`](crate::postprocessing::Truss3DEnvelope).
 //! - No 3D Frame.
 //! - No generic dimension abstraction.
 
@@ -1006,6 +1006,12 @@ pub struct TrussAnalysisResult3D {
     pub element_nodes: Vec<(usize, usize)>,
     /// Nodal forces `(node_idx, dof, value)` that were applied.
     pub nodal_forces: Vec<(usize, usize, f64)>,
+    /// Constrained DOFs `(node_idx, dof)` — DOFs with physical support reactions.
+    ///
+    /// Populated from the solver's boundary conditions at result construction
+    /// time. Free DOFs are excluded; only DOFs that carry a physical reaction
+    /// appear here.
+    pub constrained_dofs: Vec<(usize, usize)>,
     /// Provenance of the load that produced this result.
     load_source: LoadSource,
     n_nodes: usize,
@@ -1031,6 +1037,15 @@ impl TrussAnalysisResult3D {
     /// Provenance of the load that produced this result.
     pub fn load_source(&self) -> &LoadSource {
         &self.load_source
+    }
+
+    /// Constrained DOFs `(node_idx, dof)` — DOFs with physical support reactions.
+    ///
+    /// Only DOFs that were constrained during the solve appear here. Free DOFs
+    /// are excluded because their "reaction" is a round-off residual, not a
+    /// physical support force.
+    pub fn constrained_dofs(&self) -> &[(usize, usize)] {
+        &self.constrained_dofs
     }
 
     /// Coordinates of a node `(x, y, z)`, or `None` if out of range.
@@ -1278,6 +1293,13 @@ impl TrussSolver3D {
                 .map(|e| (e.node_i, e.node_j))
                 .collect(),
             nodal_forces: self.model.nodal_forces.clone(),
+            constrained_dofs: self
+                .fixed_dofs
+                .iter()
+                .enumerate()
+                .filter(|&(_, &fixed)| fixed)
+                .map(|(i, _)| (i / 3, i % 3))
+                .collect(),
             load_source: LoadSource::ModelLoads,
             n_nodes: self.model.nodes.len(),
             n_elements: self.model.elements.len(),
