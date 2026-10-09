@@ -1494,7 +1494,7 @@ fn p120_incompatible_counts_rejected() {
     }
 }
 
-// Test 12 — Same-count but incompatible topology
+// Test 12 — Same-count but incompatible topology (now rejected, Phase 127)
 #[test]
 fn p120_same_count_incompatible_topology() {
     // Model A: bar 0-1
@@ -1522,15 +1522,9 @@ fn p120_same_count_incompatible_topology() {
     let r_a = model_a.solve_case(&case_a).unwrap();
     let r_b = model_b.solve_case(&case_b).unwrap();
 
-    // Same counts → envelope accepts (documented limitation)
-    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap();
-    assert_eq!(envelope.n_nodes, 2);
-    assert_eq!(envelope.n_elements, 1);
-    // Values differ because geometry differs — user responsibility
-    let disp = envelope.node_displacement(1).unwrap();
-    assert!(disp.ux.min.abs() > 0.0);
-    assert!(disp.ux.max.abs() > 0.0);
-    assert!((disp.ux.min - disp.ux.max).abs() > 1e-12);
+    // Phase 127: topology validation now rejects different coordinates
+    let err = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
 }
 
 // Test 13 — Reordering input results does not change numeric extrema
@@ -1907,12 +1901,10 @@ fn p126_independent_displacement_governing_sources() {
     );
 }
 
-// Test 27 — Different element connectivity (same counts) accepted (3D)
+// Test 27 — Different element connectivity (same counts) rejected (3D, Phase 127)
 //
-// Characterization test: the 3D envelope does NOT validate element
-// connectivity, unlike the 2D envelope. Two models with the same node
-// and element counts but different connectivity are silently accepted.
-// This is a documented design limitation.
+// Phase 127 added topology validation: the 3D envelope now rejects results
+// with different element connectivity, matching the 2D envelope contract.
 #[test]
 fn p126_different_connectivity_accepted() {
     let mat = steel();
@@ -1954,22 +1946,15 @@ fn p126_different_connectivity_accepted() {
         "models should have different connectivity"
     );
 
-    // 3D envelope accepts — documented limitation
-    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]);
-    assert!(
-        envelope.is_ok(),
-        "3D envelope should accept results with different connectivity (documented limitation)"
-    );
+    // Phase 127: topology validation now rejects different connectivity
+    let err = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
 }
 
-// Test 28 — Different node coordinates (same counts) accepted (3D)
+// Test 28 — Different node coordinates (same counts) rejected (3D, Phase 127)
 //
-// Characterization test: the 3D envelope does NOT validate node
-// coordinates, unlike the 2D envelope. Two models with the same node
-// and element counts but different geometry are silently accepted.
-// (p120_same_count_incompatible_topology already covers this for a
-// 2-node bar; this test extends coverage to a 3D-specific geometry
-// with a z-coordinate difference.)
+// Phase 127 added topology validation: the 3D envelope now rejects results
+// with different node coordinates, matching the 2D envelope contract.
 #[test]
 fn p126_different_coordinates_accepted() {
     let mat = steel();
@@ -2005,10 +1990,234 @@ fn p126_different_coordinates_accepted() {
         "models should have different coordinates"
     );
 
-    // 3D envelope accepts — documented limitation
-    let envelope = Truss3DEnvelope::from_results(&[&r_a, &r_b]);
+    // Phase 127: topology validation now rejects different coordinates
+    let err = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// ===========================================================================
+// Phase 127 — 3D Truss Envelope Topology Validation tests
+// ===========================================================================
+
+// Test 29 — Identical topology accepted
+#[test]
+fn p127_identical_topology_accepted() {
+    let model = axial_bar();
+    let mut case1 = LoadCase::new("case1");
+    case1.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut case2 = LoadCase::new("case2");
+    case2.nodal_load_3d(1, 2e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case1).unwrap();
+    let r2 = model.solve_case(&case2).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+    assert_eq!(envelope.n_results, 2);
+    assert_eq!(envelope.n_nodes, 2);
+    assert_eq!(envelope.n_elements, 1);
+}
+
+// Test 30 — x-coordinate mismatch independently detected
+#[test]
+fn p127_x_mismatch_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 += 1.0;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 31 — y-coordinate mismatch independently detected
+#[test]
+fn p127_y_mismatch_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].1 += 1.0;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 32 — z-coordinate mismatch independently detected
+#[test]
+fn p127_z_mismatch_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].2 += 1.0;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 33 — Near-zero coordinate tolerance: tiny perturbation passes
+#[test]
+fn p127_near_zero_coordinate_tolerance() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1e-12;
+    r2.node_coords[1].1 += 1e-13;
+    r2.node_coords[0].2 += 1e-14;
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]);
     assert!(
         envelope.is_ok(),
-        "3D envelope should accept results with different coordinates (documented limitation)"
+        "near-zero perturbation within absolute tolerance should pass"
     );
+}
+
+// Test 34 — Near-zero coordinate tolerance: larger perturbation rejected
+#[test]
+fn p127_near_zero_coordinate_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 += 1e-6;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 35 — Large-coordinate tolerance: relative perturbation passes
+#[test]
+fn p127_large_coordinate_tolerance() {
+    let mat = steel();
+    let big = 1e8;
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, big, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, big + 5.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1e-4;
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]);
+    assert!(
+        envelope.is_ok(),
+        "large-coordinate perturbation within relative tolerance should pass"
+    );
+}
+
+// Test 36 — Large-coordinate tolerance: excessive perturbation rejected
+#[test]
+fn p127_large_coordinate_rejected() {
+    let mat = steel();
+    let big = 1e8;
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, big, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, big + 5.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1.0;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 37 — NaN coordinate rejected deterministically
+#[test]
+fn p127_nan_coordinate_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 = f64::NAN;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 38 — Positive infinity coordinate rejected deterministically
+#[test]
+fn p127_positive_infinity_coordinate_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].1 = f64::INFINITY;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 39 — Negative infinity coordinate rejected deterministically
+#[test]
+fn p127_negative_infinity_coordinate_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].2 = f64::NEG_INFINITY;
+    let err = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 40 — Mismatch in a later result does not partially contaminate the envelope
+#[test]
+fn p127_later_mismatch_no_partial_contamination() {
+    let model = axial_bar();
+    let mut case0 = LoadCase::new("case0");
+    case0.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut case1 = LoadCase::new("case1");
+    case1.nodal_load_3d(1, 2e4, 0.0, 0.0).unwrap();
+    let r0 = model.solve_case(&case0).unwrap();
+    let r1 = model.solve_case(&case1).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 += 10.0;
+    let result = Truss3DEnvelope::from_results(&[&r0, &r1, &r2]);
+    assert!(
+        result.is_err(),
+        "mismatch in result[2] must reject the entire envelope"
+    );
+    assert!(matches!(result.unwrap_err(), FemError::InvalidInput(_)));
+}
+
+// Test 41 — Reversed element endpoints are rejected (exact match contract)
+#[test]
+fn p127_reversed_endpoints_rejected() {
+    let mat = steel();
+    let mut model_a = TrussModel3D::new();
+    model_a.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_a.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model_a.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model_a.fix_node(0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_a.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut model_b = TrussModel3D::new();
+    model_b.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model_b.add_node(TrussNode3D::new(1, 2.0, 0.0, 0.0));
+    model_b.add_element(TrussElement3D::new(1, 0, &mat, 1e-4).unwrap());
+    model_b.fix_node(0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model_b.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let r_a = model_a.solve_case(&case).unwrap();
+    let r_b = model_b.solve_case(&case).unwrap();
+
+    assert_ne!(
+        r_a.element_nodes, r_b.element_nodes,
+        "models should have reversed endpoint ordering"
+    );
+    let err = Truss3DEnvelope::from_results(&[&r_a, &r_b]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
 }

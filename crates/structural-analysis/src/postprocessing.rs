@@ -468,10 +468,10 @@ pub struct Truss3DAxialForceSample {
 ///
 /// # Compatibility
 ///
-/// All input results must agree on node and element counts. Results from
-/// different models (different topology) should not be combined — the count
-/// check catches size mismatches but cannot detect same-count topology
-/// differences.
+/// All input results must agree on node and element counts, node coordinates
+/// (within a relative tolerance of `1e-9`), and element connectivity (exact
+/// match). Results from different models (different geometry or connectivity)
+/// are rejected with [`FemError::InvalidInput`].
 ///
 /// # Reaction semantics
 ///
@@ -486,8 +486,9 @@ pub struct Truss3DAxialForceSample {
 ///
 /// # Errors
 ///
-/// [`FemError::InvalidInput`] if `results` is empty or if result counts disagree.
-/// [`FemError::InvalidInput`] if any sampled value is non-finite.
+/// [`FemError::InvalidInput`] if `results` is empty, if result counts
+/// disagree, if node coordinates or element connectivity differ, or if any
+/// sampled value is non-finite.
 #[derive(Debug, Clone)]
 pub struct Truss3DEnvelope {
     /// Per-node displacement envelopes, in node order.
@@ -509,13 +510,18 @@ pub struct Truss3DEnvelope {
 impl Truss3DEnvelope {
     /// Build an envelope from multiple solved 3D truss results.
     ///
-    /// All results must agree on node and element counts. Displacements,
-    /// reactions, and axial forces are aggregated independently.
+    /// All results must agree on node count, element count, node coordinates
+    /// (within `1e-9` relative tolerance), and element connectivity (exact
+    /// match). Displacements, reactions, and axial forces are aggregated
+    /// independently.
     ///
     /// # Errors
     ///
     /// - [`FemError::InvalidInput`] if `results` is empty.
     /// - [`FemError::InvalidInput`] if result node or element counts disagree.
+    /// - [`FemError::InvalidInput`] if node coordinates differ beyond tolerance.
+    /// - [`FemError::InvalidInput`] if any node coordinate is non-finite.
+    /// - [`FemError::InvalidInput`] if element connectivity differs.
     /// - [`FemError::InvalidInput`] if any sampled value is non-finite.
     pub fn from_results(results: &[&TrussAnalysisResult3D]) -> Result<Self, FemError> {
         if results.is_empty() {
@@ -543,6 +549,8 @@ impl Truss3DEnvelope {
             }
         }
 
+        Self::validate_topology(results)?;
+
         let node_displacements = Self::compute_displacements(results, n_nodes)?;
         let support_reactions = Self::compute_reactions(results, n_nodes)?;
         let axial_forces = Self::compute_axial_forces(results, n_elements)?;
@@ -556,6 +564,52 @@ impl Truss3DEnvelope {
             n_elements,
             sources: results.iter().map(|r| r.load_source().clone()).collect(),
         })
+    }
+
+    fn validate_topology(results: &[&TrussAnalysisResult3D]) -> Result<(), FemError> {
+        let ref_coords = &results[0].node_coords;
+        let ref_elements = &results[0].element_nodes;
+        let tol = 1e-9;
+        for (idx, r) in results.iter().enumerate().skip(1) {
+            for (node, &(rx, ry, rz)) in ref_coords.iter().enumerate() {
+                let (x, y, z) = r.node_coords[node];
+                if !rx.is_finite()
+                    || !ry.is_finite()
+                    || !rz.is_finite()
+                    || !x.is_finite()
+                    || !y.is_finite()
+                    || !z.is_finite()
+                {
+                    return Err(FemError::InvalidInput(format!(
+                        "node {node} has non-finite coordinates between result 0 and \
+                         result {idx}: ({rx}, {ry}, {rz}) vs ({x}, {y}, {z})"
+                    )));
+                }
+                let scale = rx
+                    .abs()
+                    .max(ry.abs())
+                    .max(rz.abs())
+                    .max(x.abs())
+                    .max(y.abs())
+                    .max(z.abs())
+                    .max(1.0);
+                if (rx - x).abs() > tol * scale
+                    || (ry - y).abs() > tol * scale
+                    || (rz - z).abs() > tol * scale
+                {
+                    return Err(FemError::InvalidInput(format!(
+                        "node {node} coordinates differ between result 0 and result {idx}: \
+                         ({rx}, {ry}, {rz}) vs ({x}, {y}, {z})"
+                    )));
+                }
+            }
+            if r.element_nodes != *ref_elements {
+                return Err(FemError::InvalidInput(format!(
+                    "element connectivity differs between result 0 and result {idx}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn compute_displacements(
@@ -737,13 +791,13 @@ pub struct TrussAxialForceSample {
 ///
 /// # Topology validation
 ///
-/// Unlike [`Truss3DEnvelope`], which only checks node and element counts,
-/// `TrussEnvelope` also validates that all input results share the same node
-/// coordinates (within a relative tolerance of `1e-9`) and element connectivity
-/// (exact match). This is possible because [`TrussAnalysisResult`] stores
-/// `node_coords` and `element_nodes` snapshots. Results from different models
-/// (different geometry or connectivity) are rejected with
-/// [`FemError::InvalidInput`].
+/// `TrussEnvelope` validates that all input results share the same node
+/// coordinates (within a relative tolerance of `1e-9`) and element
+/// connectivity (exact match). This is possible because
+/// [`TrussAnalysisResult`] stores `node_coords` and `element_nodes`
+/// snapshots. Results from different models (different geometry or
+/// connectivity) are rejected with [`FemError::InvalidInput`].
+/// [`Truss3DEnvelope`] applies the same validation for 3D results.
 ///
 /// # Reaction semantics
 ///
