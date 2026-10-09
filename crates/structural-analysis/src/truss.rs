@@ -41,6 +41,8 @@ use section_properties::geometry::Point;
 use section_properties::material::Material;
 
 use crate::beam_fem::FemError;
+use crate::frame::{load_case_source, load_combination_source};
+use crate::load::{LoadCase, LoadCombination, LoadSource};
 use crate::mechanism::{StructuralDiagnostic, diagnose_reduced};
 
 // ---------------------------------------------------------------------------
@@ -347,6 +349,129 @@ impl TrussModel {
     /// Global DOF index: `2*node + dof`.
     pub(crate) fn dof_index(&self, node_idx: usize, dof: usize) -> usize {
         node_idx * 2 + dof
+    }
+
+    /// Solve the truss under a single [`LoadCase`].
+    ///
+    /// The stiffness matrix and boundary conditions come from `self`; the load
+    /// vector is assembled entirely from `case`. Any loads added directly to
+    /// the model (via [`add_nodal_force`](Self::add_nodal_force)) are
+    /// **ignored** — only the load case's loads are used.
+    ///
+    /// Prescribed displacements in the case override the model's fixed DOFs
+    /// for the same `(node, dof)`. A prescription at a DOF that is not already
+    /// constrained adds a new constraint.
+    ///
+    /// The result's [`load_source`](TrussAnalysisResult::load_source) is
+    /// `LoadSource::LoadCase`.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidNode`] if a load or prescribed displacement in the
+    /// case references a node that does not exist.
+    /// [`FemError::InvalidModel`] if the model is invalid (see
+    /// [`TrussSolver::from_model`]).
+    /// [`FemError::SolverError`] if the linear solve fails.
+    pub fn solve_case(&self, case: &LoadCase) -> Result<TrussAnalysisResult, FemError> {
+        for &(node_idx, _, _) in case.nodal_forces() {
+            if node_idx >= self.nodes.len() {
+                return Err(FemError::InvalidNode(format!(
+                    "load case '{}' references node {node_idx} out of bounds (max {})",
+                    case.name(),
+                    self.nodes.len().saturating_sub(1)
+                )));
+            }
+        }
+        for &(node_idx, _, _) in case.prescribed_displacements() {
+            if node_idx >= self.nodes.len() {
+                return Err(FemError::InvalidNode(format!(
+                    "load case '{}' prescribes displacement at node {node_idx} out of bounds (max {})",
+                    case.name(),
+                    self.nodes.len().saturating_sub(1)
+                )));
+            }
+        }
+
+        let mut model = self.clone();
+        model.nodal_forces.clear();
+        model.nodal_forces.extend_from_slice(case.nodal_forces());
+
+        for &(node_idx, dof, value) in case.prescribed_displacements() {
+            let mut found = false;
+            for entry in &mut model.fixed_dofs {
+                if entry.0 == node_idx && entry.1 == dof {
+                    entry.2 = value;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                model.fixed_dofs.push((node_idx, dof, value));
+            }
+        }
+
+        let mut solver = TrussSolver::from_model(&model)?;
+        solver.solve_configured()?;
+        let mut result = solver.results()?;
+        result.load_source = load_case_source(case);
+        Ok(result)
+    }
+
+    /// Solve the truss under a [`LoadCombination`].
+    ///
+    /// The right-hand side is merged: `f = Σ factor_i × f_case_i`, then
+    /// `K u = f` is solved **once**. This is mathematically equivalent to
+    /// solving each case separately and superposing the results (by linearity
+    /// of the solve), but more efficient (a single factorisation).
+    ///
+    /// The result's [`load_source`](TrussAnalysisResult::load_source) is
+    /// `LoadSource::LoadCombination` and records every scaled term.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if any case in the combination contains
+    /// prescribed displacements (load combinations do not support prescribed
+    /// displacement combination).
+    /// [`FemError::InvalidNode`] if a load in any case references a node that
+    /// does not exist.
+    /// [`FemError::InvalidModel`] if the model is invalid.
+    /// [`FemError::SolverError`] if the linear solve fails.
+    pub fn solve_combination(
+        &self,
+        combo: &LoadCombination,
+    ) -> Result<TrussAnalysisResult, FemError> {
+        for (case, _) in combo.terms() {
+            if case.has_prescribed_displacements() {
+                return Err(FemError::InvalidInput(format!(
+                    "load case '{}' in combination '{}' contains prescribed displacements; \
+                     LoadCombination does not support prescribed displacement combination",
+                    case.name(),
+                    combo.name()
+                )));
+            }
+        }
+
+        let mut model = self.clone();
+        model.nodal_forces.clear();
+        for (case, factor) in combo.terms() {
+            for &(node_idx, dof, value) in case.nodal_forces() {
+                if node_idx >= self.nodes.len() {
+                    return Err(FemError::InvalidNode(format!(
+                        "load case '{}' in combination '{}' references node {node_idx} out of bounds (max {})",
+                        case.name(),
+                        combo.name(),
+                        self.nodes.len().saturating_sub(1)
+                    )));
+                }
+                model.nodal_forces.push((node_idx, dof, factor * value));
+            }
+        }
+
+        let mut solver = TrussSolver::from_model(&model)?;
+        solver.solve_configured()?;
+        let mut result = solver.results()?;
+        result.load_source = load_combination_source(combo);
+        Ok(result)
     }
 }
 
@@ -775,6 +900,8 @@ pub struct TrussAnalysisResult {
     pub element_nodes: Vec<(usize, usize)>,
     /// Nodal forces `(node_idx, dof, value)` that were applied.
     pub nodal_forces: Vec<(usize, usize, f64)>,
+    /// Provenance of the load that produced this result.
+    load_source: LoadSource,
     n_nodes: usize,
     n_elements: usize,
 }
@@ -793,6 +920,11 @@ impl TrussAnalysisResult {
     /// Solver backend name.
     pub fn solver_name(&self) -> Option<&str> {
         self.solver_name.as_deref()
+    }
+
+    /// Provenance of the load that produced this result.
+    pub fn load_source(&self) -> &LoadSource {
+        &self.load_source
     }
 
     /// Coordinates of a node `(x, y)`, or `None` if out of range.
@@ -939,6 +1071,7 @@ impl TrussSolver {
                 .map(|e| (e.node_i, e.node_j))
                 .collect(),
             nodal_forces: self.model.nodal_forces.clone(),
+            load_source: LoadSource::ModelLoads,
             n_nodes: self.model.nodes.len(),
             n_elements: self.model.elements.len(),
         })

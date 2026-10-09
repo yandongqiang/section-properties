@@ -4,6 +4,7 @@ use section_properties::Material;
 use section_properties::SolverSelection;
 use section_properties::geometry::Point;
 use structural_analysis::truss::{TrussDof, TrussElement, TrussModel, TrussNode, TrussSolver};
+use structural_analysis::{LoadCase, LoadCombination, LoadSource};
 
 fn unit_mat() -> Material {
     Material::new(1.0, 0.3, 1.0, "unit")
@@ -582,4 +583,421 @@ fn explicit_solver_selection() {
     let ux = solver.displacement(1, TrussDof::Ux).unwrap();
     assert!((ux - 10.0).abs() < 1e-9);
     assert_eq!(solver.solver_name(), Some("sparse_lu"));
+}
+
+// ===========================================================================
+// Phase 122 — LoadCase / LoadCombination tests
+// ===========================================================================
+
+fn simple_bar() -> TrussModel {
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, 1.0, 0.0));
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+    model
+}
+
+fn triangular_truss() -> TrussModel {
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, 4.0, 0.0));
+    model.add_node(TrussNode::new(2, 2.0, 3.0));
+    model.add_element(TrussElement::new(0, 2, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(1, 2, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_node(1).unwrap();
+    model
+}
+
+#[test]
+fn p122_single_case_matches_direct_load() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("fx");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let result_case = model.solve_case(&case).unwrap();
+
+    let mut model2 = simple_bar();
+    model2.add_nodal_force(1, 10.0, 0.0).unwrap();
+    let mut solver = TrussSolver::from_model(&model2).unwrap();
+    solver.solve_configured().unwrap();
+    let result_direct = solver.results().unwrap();
+
+    assert!(
+        (result_case.displacements[2] - result_direct.displacements[2]).abs() < 1e-12,
+        "ux mismatch"
+    );
+    assert!((result_case.displacements[2] - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn p122_two_cases_no_pollution() {
+    let model = simple_bar();
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_2d(1, 20.0, 0.0).unwrap();
+
+    let result_a = model.solve_case(&case_a).unwrap();
+    let result_b = model.solve_case(&case_b).unwrap();
+
+    assert!(
+        (result_a.displacements[2] - 10.0).abs() < 1e-9,
+        "case A polluted"
+    );
+    assert!(
+        (result_b.displacements[2] - 20.0).abs() < 1e-9,
+        "case B polluted"
+    );
+}
+
+#[test]
+fn p122_combination_linear_superposition() {
+    let model = simple_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_2d(1, 20.0, 0.0).unwrap();
+
+    let mut combo = LoadCombination::new("1.4D+1.6L");
+    combo.add_case(&dead, 1.4).unwrap();
+    combo.add_case(&live, 1.6).unwrap();
+    let result_combo = model.solve_combination(&combo).unwrap();
+
+    let r_dead = model.solve_case(&dead).unwrap();
+    let r_live = model.solve_case(&live).unwrap();
+    let ux_super = 1.4 * r_dead.displacements[2] + 1.6 * r_live.displacements[2];
+
+    assert!(
+        (result_combo.displacements[2] - ux_super).abs() < 1e-9,
+        "combo = {}, super = {}",
+        result_combo.displacements[2],
+        ux_super
+    );
+    assert!((result_combo.displacements[2] - 46.0).abs() < 1e-9);
+}
+
+#[test]
+fn p122_fx_fy_independent() {
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, 2.0, 0.0));
+    model.add_node(TrussNode::new(2, 1.0, 1.0));
+    model.add_element(TrussElement::new(0, 2, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(1, 2, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_node(1).unwrap();
+
+    let mut case_fx = LoadCase::new("fx");
+    case_fx.nodal_load_2d(2, 10.0, 0.0).unwrap();
+    let mut case_fy = LoadCase::new("fy");
+    case_fy.nodal_load_2d(2, 0.0, 10.0).unwrap();
+
+    let r_fx = model.solve_case(&case_fx).unwrap();
+    let r_fy = model.solve_case(&case_fy).unwrap();
+
+    let ux_fx = r_fx.displacements[4];
+    let uy_fx = r_fx.displacements[5];
+    let ux_fy = r_fy.displacements[4];
+    let uy_fy = r_fy.displacements[5];
+
+    assert!(ux_fx.abs() > 1e-6, "fx should produce nonzero ux");
+    assert!(uy_fy.abs() > 1e-6, "fy should produce nonzero uy");
+    assert!(
+        uy_fx.abs() < 1e-9,
+        "fx should not produce uy in symmetric config"
+    );
+    assert!(
+        ux_fy.abs() < 1e-9,
+        "fy should not produce ux in symmetric config"
+    );
+}
+
+#[test]
+fn p122_cancellation_same_dof() {
+    let model = simple_bar();
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_2d(1, -10.0, 0.0).unwrap();
+
+    let mut combo = LoadCombination::new("cancel");
+    combo.add_case(&case_a, 1.0).unwrap();
+    combo.add_case(&case_b, 1.0).unwrap();
+    let result = model.solve_combination(&combo).unwrap();
+
+    assert!(
+        result.displacements.iter().all(|&v| v.abs() < 1e-9),
+        "cancellation failed: {:?}",
+        result.displacements
+    );
+    assert!(
+        result.axial_forces.iter().all(|&v| v.abs() < 1e-9),
+        "axial forces should be zero"
+    );
+}
+
+#[test]
+fn p122_positive_negative_zero_factors() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("f");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let mut combo_pos = LoadCombination::new("pos");
+    combo_pos.add_case(&case, 2.0).unwrap();
+    let r_pos = model.solve_combination(&combo_pos).unwrap();
+    assert!((r_pos.displacements[2] - 20.0).abs() < 1e-9);
+
+    let mut combo_neg = LoadCombination::new("neg");
+    combo_neg.add_case(&case, -1.5).unwrap();
+    let r_neg = model.solve_combination(&combo_neg).unwrap();
+    assert!((r_neg.displacements[2] + 15.0).abs() < 1e-9);
+
+    let mut combo_zero = LoadCombination::new("zero");
+    combo_zero.add_case(&case, 0.0).unwrap();
+    let r_zero = model.solve_combination(&combo_zero).unwrap();
+    assert!(r_zero.displacements[2].abs() < 1e-9);
+}
+
+#[test]
+fn p122_invalid_node_error() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("bad");
+    case.nodal_load_2d(5, 10.0, 0.0).unwrap();
+    let result = model.solve_case(&case);
+    assert!(result.is_err());
+}
+
+#[test]
+fn p122_duplicate_case_in_combination() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("f");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+
+    let mut combo = LoadCombination::new("dup");
+    combo.add_case(&case, 1.0).unwrap();
+    combo.add_case(&case, 1.0).unwrap();
+    let result = model.solve_combination(&combo).unwrap();
+
+    assert!(
+        (result.displacements[2] - 20.0).abs() < 1e-9,
+        "duplicate case should accumulate: got {}",
+        result.displacements[2]
+    );
+}
+
+#[test]
+fn p122_empty_combination() {
+    let model = simple_bar();
+    let combo = LoadCombination::new("empty");
+    let result = model.solve_combination(&combo).unwrap();
+
+    assert!(
+        result.displacements.iter().all(|&v| v.abs() < 1e-9),
+        "empty combo should produce zero displacements"
+    );
+    assert!(
+        result.reactions.iter().all(|&v| v.abs() < 1e-9),
+        "empty combo should produce zero reactions"
+    );
+    assert!(
+        result.axial_forces.iter().all(|&v| v.abs() < 1e-9),
+        "empty combo should produce zero axial forces"
+    );
+}
+
+#[test]
+fn p122_reaction_equilibrium() {
+    let model = triangular_truss();
+    let mut case = LoadCase::new("down");
+    case.nodal_load_2d(2, 0.0, -100.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+
+    let eq = result.equilibrium();
+    assert!(eq.is_balanced(), "equilibrium not balanced: {eq:?}");
+
+    let ry0 = result.reactions[1];
+    let ry1 = result.reactions[3];
+    assert!(
+        (ry0 + ry1 + (-100.0)).abs() < 1e-6,
+        "sum Fy != 0: {ry0} + {ry1} - 100"
+    );
+    assert!((ry0 - 50.0).abs() < 1e-6, "by symmetry Ry0 = 50, got {ry0}");
+    assert!((ry1 - 50.0).abs() < 1e-6, "by symmetry Ry1 = 50, got {ry1}");
+}
+
+#[test]
+fn p122_axial_force_sign() {
+    let model = simple_bar();
+
+    let mut case_tension = LoadCase::new("tension");
+    case_tension.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r_tension = model.solve_case(&case_tension).unwrap();
+    assert!(
+        r_tension.axial_forces[0] > 0.0,
+        "tension should be positive"
+    );
+
+    let mut case_compression = LoadCase::new("compression");
+    case_compression.nodal_load_2d(1, -10.0, 0.0).unwrap();
+    let r_compression = model.solve_case(&case_compression).unwrap();
+    assert!(
+        r_compression.axial_forces[0] < 0.0,
+        "compression should be negative"
+    );
+
+    let mut combo = LoadCombination::new("mixed");
+    combo.add_case(&case_tension, 1.0).unwrap();
+    combo.add_case(&case_compression, 0.5).unwrap();
+    let r_combo = model.solve_combination(&combo).unwrap();
+    assert!(
+        r_combo.axial_forces[0] > 0.0,
+        "1.0*tension + 0.5*compression should be positive"
+    );
+    assert!((r_combo.axial_forces[0] - 5.0).abs() < 1e-9);
+}
+
+#[test]
+fn p122_load_source_case() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("test_case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+
+    match result.load_source() {
+        LoadSource::LoadCase { name, .. } => {
+            assert_eq!(name, "test_case");
+        }
+        other => panic!("expected LoadCase, got {other:?}"),
+    }
+}
+
+#[test]
+fn p122_load_source_combination() {
+    let model = simple_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_2d(1, 5.0, 0.0).unwrap();
+
+    let mut combo = LoadCombination::new("combo");
+    combo.add_case(&dead, 1.4).unwrap();
+    combo.add_case(&live, 1.6).unwrap();
+    let result = model.solve_combination(&combo).unwrap();
+
+    match result.load_source() {
+        LoadSource::LoadCombination { name, terms } => {
+            assert_eq!(name, "combo");
+            assert_eq!(terms.len(), 2);
+            assert_eq!(terms[0].case_name, "dead");
+            assert!((terms[0].factor - 1.4).abs() < 1e-12);
+            assert_eq!(terms[1].case_name, "live");
+            assert!((terms[1].factor - 1.6).abs() < 1e-12);
+        }
+        other => panic!("expected LoadCombination, got {other:?}"),
+    }
+}
+
+#[test]
+fn p122_load_source_model_loads() {
+    let mut model = simple_bar();
+    model.add_nodal_force(1, 10.0, 0.0).unwrap();
+    let mut solver = TrussSolver::from_model(&model).unwrap();
+    solver.solve_configured().unwrap();
+    let result = solver.results().unwrap();
+
+    assert_eq!(result.load_source(), &LoadSource::ModelLoads);
+}
+
+#[test]
+fn p122_direct_api_regression() {
+    let mut model = simple_bar();
+    model.add_nodal_force(1, 10.0, 0.0).unwrap();
+    let mut solver = TrussSolver::from_model(&model).unwrap();
+    solver.solve_configured().unwrap();
+
+    let ux = solver.displacement(1, TrussDof::Ux).unwrap();
+    assert!((ux - 10.0).abs() < 1e-9);
+
+    let result = solver.results().unwrap();
+    assert!((result.displacements[2] - 10.0).abs() < 1e-9);
+    assert!(result.axial_forces[0] > 0.0);
+}
+
+#[test]
+fn p122_results_not_mutated_by_subsequent_solve() {
+    let model = simple_bar();
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_2d(1, 20.0, 0.0).unwrap();
+
+    let result_a = model.solve_case(&case_a).unwrap();
+    let ux_a = result_a.displacements[2];
+    let _result_b = model.solve_case(&case_b).unwrap();
+
+    assert!(
+        (result_a.displacements[2] - ux_a).abs() < 1e-12,
+        "result_a was mutated by subsequent solve"
+    );
+    assert!((ux_a - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn p122_combination_rejects_prescribed_displacement() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("with_settlement");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    case.prescribed_displacement_2d(0, 0, 0.001).unwrap();
+
+    let mut combo = LoadCombination::new("bad");
+    combo.add_case(&case, 1.0).unwrap();
+    let result = model.solve_combination(&combo);
+    assert!(result.is_err());
+}
+
+#[test]
+fn p122_prescribed_displacement_2d() {
+    let mut model = TrussModel::new();
+    model.add_node(TrussNode::new(0, 0.0, 0.0));
+    model.add_node(TrussNode::new(1, 1.0, 0.0));
+    model.add_node(TrussNode::new(2, 2.0, 0.0));
+    model.add_node(TrussNode::new(3, 1.0, 1.0));
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(1, 2, &unit_mat(), 1.0).unwrap());
+    model.add_element(TrussElement::new(1, 3, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_node(2).unwrap();
+    model.fix_node(3).unwrap();
+
+    let mut case = LoadCase::new("settlement");
+    case.prescribed_displacement_2d(2, 0, 0.01).unwrap();
+    let result = model.solve_case(&case).unwrap();
+
+    let ux1 = result.displacements[2];
+    assert!(
+        ux1.abs() > 1e-9,
+        "settlement should produce nonzero displacement"
+    );
+    assert!(
+        (ux1 - 0.005).abs() < 1e-9,
+        "ux1 = L1/(L1+L2) * delta = 0.5 * 0.01, got {ux1}"
+    );
+}
+
+#[test]
+fn p122_prescribed_displacement_2d_invalid_dof() {
+    let mut case = LoadCase::new("bad_dof");
+    let result = case.prescribed_displacement_2d(0, 2, 0.01);
+    assert!(result.is_err());
+}
+
+#[test]
+fn p122_nodal_load_2d_non_finite() {
+    let mut case = LoadCase::new("bad");
+    assert!(case.nodal_load_2d(0, f64::NAN, 0.0).is_err());
+    assert!(case.nodal_load_2d(0, 0.0, f64::INFINITY).is_err());
 }

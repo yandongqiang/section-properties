@@ -315,6 +315,28 @@ impl LoadCase {
         Ok(())
     }
 
+    /// Apply a **global** 2D nodal force `(fx, fy)` at `node_idx`.
+    ///
+    /// This is the 2D-truss analogue of [`nodal_load`](Self::nodal_load); it
+    /// stores the two components as raw `(node_idx, dof, value)` triples
+    /// with `dof = 0, 1` for `ux, uy`.  No [`NodeHandle`] is required — the
+    /// raw node index is used directly, matching
+    /// [`TrussModel`](crate::truss::TrussModel) conventions.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if either component is non-finite.
+    pub fn nodal_load_2d(&mut self, node_idx: usize, fx: f64, fy: f64) -> Result<(), FemError> {
+        if !fx.is_finite() || !fy.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "nodal force must be finite, got fx = {fx}, fy = {fy}"
+            )));
+        }
+        self.nodal_forces.push((node_idx, 0, fx));
+        self.nodal_forces.push((node_idx, 1, fy));
+        Ok(())
+    }
+
     /// Apply a **global** 3D nodal force `(fx, fy, fz)` at `node_idx`.
     ///
     /// This is the 3D-truss analogue of [`nodal_load`](Self::nodal_load); it
@@ -341,6 +363,44 @@ impl LoadCase {
         self.nodal_forces.push((node_idx, 0, fx));
         self.nodal_forces.push((node_idx, 1, fy));
         self.nodal_forces.push((node_idx, 2, fz));
+        Ok(())
+    }
+
+    /// Prescribe a non-zero displacement `value` at `(node_idx, dof)` for a
+    /// 2D truss model.
+    ///
+    /// `dof` is the raw DOF index: `0 = ux`, `1 = uy`.  This is the 2D-truss
+    /// analogue of
+    /// [`prescribed_displacement`](Self::prescribed_displacement).
+    ///
+    /// # Interaction with [`LoadCombination`]
+    ///
+    /// Load combinations do **not** support prescribed displacements.  If any
+    /// case in a combination has prescribed displacements,
+    /// [`TrussModel::solve_combination`](crate::truss::TrussModel::solve_combination)
+    /// returns [`FemError::InvalidInput`].
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidInput`] if `dof` is not 0 or 1, or if `value` is
+    /// non-finite.
+    pub fn prescribed_displacement_2d(
+        &mut self,
+        node_idx: usize,
+        dof: usize,
+        value: f64,
+    ) -> Result<(), FemError> {
+        if dof >= 2 {
+            return Err(FemError::InvalidInput(format!(
+                "2D truss DOF index must be 0 (ux) or 1 (uy), got {dof}"
+            )));
+        }
+        if !value.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "prescribed displacement must be finite, got {value}"
+            )));
+        }
+        self.prescribed_displacements.push((node_idx, dof, value));
         Ok(())
     }
 
