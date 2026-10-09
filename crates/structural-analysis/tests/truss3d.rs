@@ -1619,3 +1619,130 @@ fn p120_frame_envelope_regression() {
     assert_eq!(tip.uy.min_source, Some(1));
     assert_eq!(tip.uy.max_source, Some(0));
 }
+
+// ===========================================================================
+// Phase 121 — Audit-driven tests
+// ===========================================================================
+
+// Test 16 — Tension and compression axial force signs
+#[test]
+fn p121_axial_force_tension_compression_signs() {
+    let model = axial_bar();
+    // Tension: force pulling node 1 away from fixed node 0
+    let mut tension = LoadCase::new("tension");
+    tension.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    // Compression: force pushing node 1 toward fixed node 0
+    let mut compression = LoadCase::new("compression");
+    compression.nodal_load_3d(1, -1e4, 0.0, 0.0).unwrap();
+    let r_t = model.solve_case(&tension).unwrap();
+    let r_c = model.solve_case(&compression).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_t, &r_c]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    let n_t = r_t.member_axial_force(0).unwrap();
+    let n_c = r_c.member_axial_force(0).unwrap();
+    assert!(
+        n_t > 0.0,
+        "tension case should produce positive axial force, got {n_t}"
+    );
+    assert!(
+        n_c < 0.0,
+        "compression case should produce negative axial force, got {n_c}"
+    );
+    assert!((af.axial.max - n_t).abs() < 1e-9, "max should be tension");
+    assert!(
+        (af.axial.min - n_c).abs() < 1e-9,
+        "min should be compression"
+    );
+    assert_eq!(af.axial.max_source, Some(0));
+    assert_eq!(af.axial.min_source, Some(1));
+}
+
+// Test 17 — constrained_dofs correctly populated from model
+#[test]
+fn p121_constrained_dofs_match_model() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+
+    // Node 0 is fully fixed (ux, uy, uz)
+    // Node 1 has uy, uz constrained
+    let dofs: Vec<(usize, usize)> = result.constrained_dofs().to_vec();
+    assert!(dofs.contains(&(0, 0)), "node 0 ux should be constrained");
+    assert!(dofs.contains(&(0, 1)), "node 0 uy should be constrained");
+    assert!(dofs.contains(&(0, 2)), "node 0 uz should be constrained");
+    assert!(!dofs.contains(&(1, 0)), "node 1 ux should be free");
+    assert!(dofs.contains(&(1, 1)), "node 1 uy should be constrained");
+    assert!(dofs.contains(&(1, 2)), "node 1 uz should be constrained");
+}
+
+// Test 18 — Source index alignment with load_source
+#[test]
+fn p121_source_index_alignment() {
+    let model = axial_bar();
+    let mut dead = LoadCase::new("dead");
+    dead.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut live = LoadCase::new("live");
+    live.nodal_load_3d(1, 3e4, 0.0, 0.0).unwrap();
+    let r1 = model.solve_case(&dead).unwrap();
+    let r2 = model.solve_case(&live).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    assert_eq!(envelope.source(0).unwrap(), r1.load_source());
+    assert_eq!(envelope.source(1).unwrap(), r2.load_source());
+    assert!(envelope.source(2).is_none());
+}
+
+// Test 19 — All three displacement components independently tracked
+#[test]
+fn p121_all_three_displacement_components() {
+    let model = tripod();
+    // Load in x direction
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_3d(0, 1e4, 0.0, 0.0).unwrap();
+    // Load in y direction
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_3d(0, 0.0, 1e4, 0.0).unwrap();
+    // Load in z direction
+    let mut fz = LoadCase::new("fz");
+    fz.nodal_load_3d(0, 0.0, 0.0, 1e4).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let r_z = model.solve_case(&fz).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&r_x, &r_y, &r_z]).unwrap();
+
+    let disp = envelope.node_displacement(0).unwrap();
+    // Each load case should produce a different governing source for each component
+    assert!(disp.ux.is_populated());
+    assert!(disp.uy.is_populated());
+    assert!(disp.uz.is_populated());
+
+    // Verify values match independent results
+    let ux_x = r_x.displacement(0, TrussDof3D::Ux).unwrap();
+    let ux_y = r_y.displacement(0, TrussDof3D::Ux).unwrap();
+    let ux_z = r_z.displacement(0, TrussDof3D::Ux).unwrap();
+    let ux_expected_max = ux_x.max(ux_y).max(ux_z);
+    let ux_expected_min = ux_x.min(ux_y).min(ux_z);
+    assert!((disp.ux.max - ux_expected_max).abs() < 1e-9);
+    assert!((disp.ux.min - ux_expected_min).abs() < 1e-9);
+}
+
+// Test 20 — Reaction values match R = K·u − f convention
+#[test]
+fn p121_reaction_sign_convention() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("pull");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let result = model.solve_case(&case).unwrap();
+    let envelope = Truss3DEnvelope::from_results(&[&result]).unwrap();
+
+    // For a bar pulled in +x at node 1, the reaction at node 0 should be -F in x
+    let support = envelope.support_reaction(0).unwrap();
+    assert!(
+        support.rx.max < 0.0,
+        "reaction at fixed node should be negative (opposing), got {}",
+        support.rx.max
+    );
+    assert!((support.rx.max - result.reactions[0]).abs() < 1e-9);
+}
