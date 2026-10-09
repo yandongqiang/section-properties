@@ -369,11 +369,13 @@ impl TrussModel {
     ///
     /// [`FemError::InvalidNode`] if a load or prescribed displacement in the
     /// case references a node that does not exist.
+    /// [`FemError::InvalidInput`] if a load or prescribed displacement in the
+    /// case references a DOF index ≥ 2 (2D truss only has DOF 0 and 1).
     /// [`FemError::InvalidModel`] if the model is invalid (see
     /// [`TrussSolver::from_model`]).
     /// [`FemError::SolverError`] if the linear solve fails.
     pub fn solve_case(&self, case: &LoadCase) -> Result<TrussAnalysisResult, FemError> {
-        for &(node_idx, _, _) in case.nodal_forces() {
+        for &(node_idx, dof, _) in case.nodal_forces() {
             if node_idx >= self.nodes.len() {
                 return Err(FemError::InvalidNode(format!(
                     "load case '{}' references node {node_idx} out of bounds (max {})",
@@ -381,13 +383,27 @@ impl TrussModel {
                     self.nodes.len().saturating_sub(1)
                 )));
             }
+            if dof >= 2 {
+                return Err(FemError::InvalidInput(format!(
+                    "load case '{}' has nodal force with DOF {dof} at node {node_idx}; \
+                     2D truss only has DOF 0 (ux) and 1 (uy)",
+                    case.name()
+                )));
+            }
         }
-        for &(node_idx, _, _) in case.prescribed_displacements() {
+        for &(node_idx, dof, _) in case.prescribed_displacements() {
             if node_idx >= self.nodes.len() {
                 return Err(FemError::InvalidNode(format!(
                     "load case '{}' prescribes displacement at node {node_idx} out of bounds (max {})",
                     case.name(),
                     self.nodes.len().saturating_sub(1)
+                )));
+            }
+            if dof >= 2 {
+                return Err(FemError::InvalidInput(format!(
+                    "load case '{}' prescribes displacement with DOF {dof} at node {node_idx}; \
+                     2D truss only has DOF 0 (ux) and 1 (uy)",
+                    case.name()
                 )));
             }
         }
@@ -434,6 +450,8 @@ impl TrussModel {
     /// displacement combination).
     /// [`FemError::InvalidNode`] if a load in any case references a node that
     /// does not exist.
+    /// [`FemError::InvalidInput`] if a load in any case references a DOF
+    /// index ≥ 2 (2D truss only has DOF 0 and 1).
     /// [`FemError::InvalidModel`] if the model is invalid.
     /// [`FemError::SolverError`] if the linear solve fails.
     pub fn solve_combination(
@@ -461,6 +479,14 @@ impl TrussModel {
                         case.name(),
                         combo.name(),
                         self.nodes.len().saturating_sub(1)
+                    )));
+                }
+                if dof >= 2 {
+                    return Err(FemError::InvalidInput(format!(
+                        "load case '{}' in combination '{}' has nodal force with DOF {dof} at node {node_idx}; \
+                         2D truss only has DOF 0 (ux) and 1 (uy)",
+                        case.name(),
+                        combo.name()
                     )));
                 }
                 model.nodal_forces.push((node_idx, dof, factor * value));

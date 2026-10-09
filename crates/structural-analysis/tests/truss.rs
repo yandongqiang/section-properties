@@ -4,7 +4,7 @@ use section_properties::Material;
 use section_properties::SolverSelection;
 use section_properties::geometry::Point;
 use structural_analysis::truss::{TrussDof, TrussElement, TrussModel, TrussNode, TrussSolver};
-use structural_analysis::{LoadCase, LoadCombination, LoadSource};
+use structural_analysis::{FemError, LoadCase, LoadCombination, LoadSource};
 
 fn unit_mat() -> Material {
     Material::new(1.0, 0.3, 1.0, "unit")
@@ -1000,4 +1000,77 @@ fn p122_nodal_load_2d_non_finite() {
     let mut case = LoadCase::new("bad");
     assert!(case.nodal_load_2d(0, f64::NAN, 0.0).is_err());
     assert!(case.nodal_load_2d(0, 0.0, f64::INFINITY).is_err());
+}
+
+// ===========================================================================
+// Phase 123 — Cross-model DOF validation tests
+// ===========================================================================
+
+#[test]
+fn p123_solve_case_rejects_3d_dof_in_nodal_load() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("cross_model");
+    case.nodal_load_3d(1, 10.0, 20.0, 30.0).unwrap();
+    let result = model.solve_case(&case);
+    assert!(
+        matches!(result, Err(FemError::InvalidInput(_))),
+        "solve_case should return InvalidInput for DOF >= 2, got {result:?}"
+    );
+}
+
+#[test]
+fn p123_solve_case_rejects_3d_dof_in_prescribed_displacement() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("cross_model");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    case.prescribed_displacement_3d(0, 2, 0.001).unwrap();
+    let result = model.solve_case(&case);
+    assert!(
+        matches!(result, Err(FemError::InvalidInput(_))),
+        "solve_case should return InvalidInput for prescribed DOF >= 2, got {result:?}"
+    );
+}
+
+#[test]
+fn p123_solve_combination_rejects_3d_dof() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("cross_model");
+    case.nodal_load_3d(1, 10.0, 20.0, 30.0).unwrap();
+
+    let mut combo = LoadCombination::new("bad");
+    combo.add_case(&case, 1.0).unwrap();
+    let result = model.solve_combination(&combo);
+    assert!(
+        matches!(result, Err(FemError::InvalidInput(_))),
+        "solve_combination should return InvalidInput for DOF >= 2, got {result:?}"
+    );
+}
+
+#[test]
+fn p123_solve_combination_rejects_3d_dof_in_second_case() {
+    let model = simple_bar();
+    let mut case_a = LoadCase::new("valid");
+    case_a.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut case_b = LoadCase::new("invalid");
+    case_b.nodal_load_3d(0, 5.0, 5.0, 5.0).unwrap();
+
+    let mut combo = LoadCombination::new("mixed");
+    combo.add_case(&case_a, 1.0).unwrap();
+    combo.add_case(&case_b, 1.0).unwrap();
+    let result = model.solve_combination(&combo);
+    assert!(
+        matches!(result, Err(FemError::InvalidInput(_))),
+        "solve_combination should reject invalid DOF in second case, got {result:?}"
+    );
+}
+
+#[test]
+fn p123_valid_dofs_0_and_1_unaffected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("valid");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let result = model.solve_case(&case);
+    assert!(result.is_ok(), "valid DOFs 0 and 1 should not be rejected");
+    let r = result.unwrap();
+    assert!((r.displacements[2] - 10.0).abs() < 1e-9);
 }
