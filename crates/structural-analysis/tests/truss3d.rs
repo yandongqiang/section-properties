@@ -2421,3 +2421,261 @@ fn p130_solver_name_populated_when_free_dofs_exist() {
         "solver_name should be populated when free DOFs exist"
     );
 }
+
+// ===========================================================================
+// Phase 131 — Batch solver audit (3D)
+// ===========================================================================
+
+fn chain_model_3d(n_nodes: usize) -> TrussModel3D {
+    let mat = steel();
+    let mut model = TrussModel3D::new();
+    for i in 0..n_nodes {
+        model.add_node(TrussNode3D::new(i, i as f64, 0.0, 0.0));
+    }
+    for i in 0..n_nodes - 1 {
+        model.add_element(TrussElement3D::new(i, i + 1, &mat, 1e-4).unwrap());
+    }
+    model.fix_node(0).unwrap();
+    for i in 1..n_nodes {
+        model.fix_dof(i, TrussDof3D::Uy, 0.0).unwrap();
+        model.fix_dof(i, TrussDof3D::Uz, 0.0).unwrap();
+    }
+    model
+}
+
+#[test]
+fn p131_factorization_reuse_timing() {
+    let n_nodes = 30;
+    let n_cases = 50;
+    let model = chain_model_3d(n_nodes);
+
+    let cases: Vec<LoadCase> = (0..n_cases)
+        .map(|k| {
+            let mut c = LoadCase::new(&format!("case{k}"));
+            c.nodal_load_3d(n_nodes - 1, (k + 1) as f64 * 1e4, 0.0, 0.0)
+                .unwrap();
+            c
+        })
+        .collect();
+    let case_refs: Vec<&LoadCase> = cases.iter().collect();
+
+    let t0 = std::time::Instant::now();
+    let batch = model.solve_cases(&case_refs).unwrap();
+    let t_batch = t0.elapsed();
+
+    let t1 = std::time::Instant::now();
+    let _individual: Vec<_> = cases.iter().map(|c| model.solve_case(c).unwrap()).collect();
+    let t_individual = t1.elapsed();
+
+    assert_eq!(batch.len(), n_cases);
+
+    for k in 0..n_cases {
+        for i in 0..batch[k].displacements.len() {
+            assert!(
+                (batch[k].displacements[i] - model.solve_case(&cases[k]).unwrap().displacements[i])
+                    .abs()
+                    < 1e-6,
+                "case {k} disp mismatch at dof {i}"
+            );
+        }
+    }
+
+    eprintln!(
+        "p131 3D: batch={:?} individual={:?} ratio={:.2}",
+        t_batch,
+        t_individual,
+        t_individual.as_secs_f64() / t_batch.as_secs_f64()
+    );
+}
+
+#[test]
+fn p131_zero_load_case() {
+    let model = axial_bar();
+    let zero = LoadCase::new("zero");
+    let results = model.solve_cases(&[&zero]).unwrap();
+    assert_eq!(results.len(), 1);
+    for &u in &results[0].displacements {
+        assert!(
+            u.abs() < 1e-6,
+            "zero load should give zero displacement, got {u}"
+        );
+    }
+    for &r in &results[0].reactions {
+        assert!(
+            r.abs() < 1e-6,
+            "zero load should give zero reaction, got {r}"
+        );
+    }
+    for &af in &results[0].axial_forces {
+        assert!(
+            af.abs() < 1e-6,
+            "zero load should give zero axial force, got {af}"
+        );
+    }
+}
+
+#[test]
+fn p131_mixed_sign_axial_forces() {
+    let model = tripod();
+    let mut push_x = LoadCase::new("push_x");
+    push_x.nodal_load_3d(0, 1e4, 0.0, 0.0).unwrap();
+    let mut pull_x = LoadCase::new("pull_x");
+    pull_x.nodal_load_3d(0, -1e4, 0.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&push_x, &pull_x]).unwrap();
+    assert_eq!(results.len(), 2);
+
+    for i in 0..results[0].axial_forces.len() {
+        assert!(
+            (results[0].axial_forces[i] + results[1].axial_forces[i]).abs() < 1e-3,
+            "axial forces should be antisymmetric for opposite loads"
+        );
+    }
+}
+
+#[test]
+fn p131_nonzero_prescribed_displacement_batch() {
+    let model = axial_bar();
+    let mut case1 = LoadCase::new("case1");
+    case1.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    case1.prescribed_displacement_3d(0, 0, 0.0).unwrap();
+
+    let mut case2 = LoadCase::new("case2");
+    case2.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    case2.prescribed_displacement_3d(0, 0, 0.001).unwrap();
+
+    let results = model.solve_cases(&[&case1, &case2]).unwrap();
+    let s1 = model.solve_case(&case1).unwrap();
+    let s2 = model.solve_case(&case2).unwrap();
+
+    for i in 0..6 {
+        assert!(
+            (results[0].displacements[i] - s1.displacements[i]).abs() < 1e-6,
+            "case1 disp mismatch at {i}"
+        );
+        assert!(
+            (results[1].displacements[i] - s2.displacements[i]).abs() < 1e-6,
+            "case2 disp mismatch at {i}"
+        );
+    }
+}
+
+#[test]
+fn p131_singular_model_rejected() {
+    let mat = steel();
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, 1.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+
+    let mut case = LoadCase::new("unconstrained");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+
+    let err = model.solve_cases(&[&case]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FemError::SolverError { .. } | FemError::InvalidModel(_)
+        ),
+        "unconstrained model should fail, got {err:?}"
+    );
+}
+
+#[test]
+fn p131_later_case_failure_aborts_batch() {
+    let model = axial_bar();
+    let mut good = LoadCase::new("good");
+    good.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    let mut bad = LoadCase::new("bad");
+    bad.nodal_load_3d(99, 1e4, 0.0, 0.0).unwrap();
+
+    let result = model.solve_cases(&[&good, &bad]);
+    assert!(
+        result.is_err(),
+        "batch with invalid later case must fail entirely"
+    );
+    assert!(matches!(result.unwrap_err(), FemError::InvalidNode(_)));
+}
+
+#[test]
+fn p131_prescribed_on_non_fixed_dof_rejected() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("bad_prescribed");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+    case.prescribed_displacement_3d(1, 0, 0.0).unwrap();
+
+    let err = model.solve_cases(&[&case]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+#[test]
+fn p131_all_results_same_solver_name() {
+    let model = tripod();
+    let cases: Vec<LoadCase> = (0..5)
+        .map(|k| {
+            let mut c = LoadCase::new(&format!("c{k}"));
+            c.nodal_load_3d(0, (k + 1) as f64 * 1e4, (k as f64) * 5e3, 0.0)
+                .unwrap();
+            c
+        })
+        .collect();
+    let refs: Vec<&LoadCase> = cases.iter().collect();
+    let results = model.solve_cases(&refs).unwrap();
+
+    let name0 = &results[0].solver_name;
+    for r in &results[1..] {
+        assert_eq!(
+            r.solver_name, *name0,
+            "all results should share the same solver backend"
+        );
+    }
+}
+
+#[test]
+fn p131_n_free_zero_solver_name_is_none() {
+    let mat = steel();
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, 1.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1e-4).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_node(1).unwrap();
+
+    let mut case = LoadCase::new("all_fixed");
+    case.nodal_load_3d(1, 1e4, 0.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&case]).unwrap();
+    assert!(
+        results[0].solver_name.is_none(),
+        "solver_name should be None when n_free == 0"
+    );
+}
+
+#[test]
+fn p131_constrained_dofs_match_model() {
+    let model = tripod();
+    let mut case = LoadCase::new("test");
+    case.nodal_load_3d(0, 1e4, 0.0, 0.0).unwrap();
+
+    let batch = model.solve_cases(&[&case]).unwrap();
+    let single = model.solve_case(&case).unwrap();
+
+    assert_eq!(batch[0].constrained_dofs, single.constrained_dofs);
+    assert_eq!(batch[0].node_coords, single.node_coords);
+    assert_eq!(batch[0].element_nodes, single.element_nodes);
+    assert_eq!(batch[0].n_nodes(), single.n_nodes());
+    assert_eq!(batch[0].n_elements(), single.n_elements());
+}
+
+#[test]
+fn p131_nodal_forces_in_result_match_case() {
+    let model = axial_bar();
+    let mut case = LoadCase::new("test");
+    case.nodal_load_3d(1, 42e3, 0.0, 0.0).unwrap();
+
+    let results = model.solve_cases(&[&case]).unwrap();
+    assert_eq!(
+        results[0].nodal_forces,
+        vec![(1, 0, 42e3), (1, 1, 0.0), (1, 2, 0.0)]
+    );
+}
