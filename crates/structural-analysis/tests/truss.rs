@@ -1594,3 +1594,212 @@ fn p124_reaction_sign_convention() {
     );
     assert!((support.rx.max - result.reactions[0]).abs() < 1e-9);
 }
+
+// ===========================================================================
+// Phase 125 — Audit-driven regression tests
+// ===========================================================================
+
+// Test 24 — All-positive axial force extrema
+#[test]
+fn p125_all_positive_axial_extrema() {
+    let model = simple_bar();
+    let mut light_tension = LoadCase::new("light_tension");
+    light_tension.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let mut heavy_tension = LoadCase::new("heavy_tension");
+    heavy_tension.nodal_load_2d(1, 30.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light_tension).unwrap();
+    let r2 = model.solve_case(&heavy_tension).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min > 0.0,
+        "all-positive min should be > 0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max > 0.0,
+        "all-positive max should be > 0, got {}",
+        af.axial.max
+    );
+    assert!(af.axial.min < af.axial.max, "min should be < max");
+    assert_eq!(af.axial.min_source, Some(0));
+    assert_eq!(af.axial.max_source, Some(1));
+}
+
+// Test 25 — All-negative axial force extrema
+#[test]
+fn p125_all_negative_axial_extrema() {
+    let model = simple_bar();
+    let mut light_comp = LoadCase::new("light_comp");
+    light_comp.nodal_load_2d(1, -10.0, 0.0).unwrap();
+    let mut heavy_comp = LoadCase::new("heavy_comp");
+    heavy_comp.nodal_load_2d(1, -30.0, 0.0).unwrap();
+    let r1 = model.solve_case(&light_comp).unwrap();
+    let r2 = model.solve_case(&heavy_comp).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min < 0.0,
+        "all-negative min should be < 0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max < 0.0,
+        "all-negative max should be < 0, got {}",
+        af.axial.max
+    );
+    assert!(af.axial.min < af.axial.max, "min should be < max");
+    assert_eq!(af.axial.min_source, Some(1));
+    assert_eq!(af.axial.max_source, Some(0));
+}
+
+// Test 26 — Independent governing source for axial force across elements
+#[test]
+fn p125_independent_axial_governing_source() {
+    let model = triangular_truss();
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_2d(2, 0.0, -2e3).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_x, &r_y]).unwrap();
+
+    let mut max_sources: Vec<Option<usize>> = (0..3)
+        .map(|i| envelope.axial_force(i).unwrap().axial.max_source)
+        .collect();
+    max_sources.sort();
+    let mut min_sources: Vec<Option<usize>> = (0..3)
+        .map(|i| envelope.axial_force(i).unwrap().axial.min_source)
+        .collect();
+    min_sources.sort();
+    let both_sources_present = max_sources.contains(&Some(0)) && max_sources.contains(&Some(1))
+        || min_sources.contains(&Some(0)) && min_sources.contains(&Some(1));
+    assert!(
+        both_sources_present,
+        "different elements should be governed by different sources, \
+         max_sources={max_sources:?}, min_sources={min_sources:?}"
+    );
+}
+
+// Test 27 — Near-zero coordinate tolerance: tiny perturbation passes
+#[test]
+fn p125_near_zero_coordinate_tolerance() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1e-12;
+    r2.node_coords[1].1 += 1e-13;
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]);
+    assert!(
+        envelope.is_ok(),
+        "near-zero perturbation within absolute tolerance should pass"
+    );
+}
+
+// Test 28 — Near-zero coordinate tolerance: larger perturbation rejected
+#[test]
+fn p125_near_zero_coordinate_rejected() {
+    let model = simple_bar();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[1].0 += 1e-6;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 29 — Large-coordinate tolerance: relative perturbation passes
+#[test]
+fn p125_large_coordinate_tolerance() {
+    let mut model = TrussModel::new();
+    let big = 1e8;
+    model.add_node(TrussNode::new(0, big, 0.0));
+    model.add_node(TrussNode::new(1, big + 5.0, 0.0));
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1e-4;
+    let envelope = TrussEnvelope::from_results(&[&r1, &r2]);
+    assert!(
+        envelope.is_ok(),
+        "large-coordinate perturbation within relative tolerance should pass"
+    );
+}
+
+// Test 30 — Large-coordinate tolerance: excessive perturbation rejected
+#[test]
+fn p125_large_coordinate_rejected() {
+    let mut model = TrussModel::new();
+    let big = 1e8;
+    model.add_node(TrussNode::new(0, big, 0.0));
+    model.add_node(TrussNode::new(1, big + 5.0, 0.0));
+    model.add_element(TrussElement::new(0, 1, &unit_mat(), 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof::Uy, 0.0).unwrap();
+    let mut case = LoadCase::new("case");
+    case.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r1 = model.solve_case(&case).unwrap();
+    let mut r2 = r1.clone();
+    r2.node_coords[0].0 += 1.0;
+    let err = TrussEnvelope::from_results(&[&r1, &r2]).unwrap_err();
+    assert!(matches!(err, FemError::InvalidInput(_)));
+}
+
+// Test 31 — Independent governing source for ux and uy displacement
+#[test]
+fn p125_independent_displacement_governing_sources() {
+    let model = triangular_truss();
+    let mut fx = LoadCase::new("fx");
+    fx.nodal_load_2d(2, 1e3, 0.0).unwrap();
+    let mut fy = LoadCase::new("fy");
+    fy.nodal_load_2d(2, 0.0, 1e3).unwrap();
+    let r_x = model.solve_case(&fx).unwrap();
+    let r_y = model.solve_case(&fy).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r_x, &r_y]).unwrap();
+
+    let disp = envelope.node_displacement(2).unwrap();
+    let ux_sources = [disp.ux.min_source, disp.ux.max_source];
+    let uy_sources = [disp.uy.min_source, disp.uy.max_source];
+    let ux_has_both = ux_sources.contains(&Some(0)) && ux_sources.contains(&Some(1));
+    let uy_has_both = uy_sources.contains(&Some(0)) && uy_sources.contains(&Some(1));
+    assert!(
+        ux_has_both || uy_has_both,
+        "ux and uy should have independent governing sources, \
+         ux={ux_sources:?}, uy={uy_sources:?}"
+    );
+}
+
+// Test 32 — Zero axial force: exact zero is a valid extremum
+#[test]
+fn p125_zero_axial_force_extrema() {
+    let model = simple_bar();
+    let mut zero = LoadCase::new("zero");
+    zero.nodal_load_2d(1, 0.0, 0.0).unwrap();
+    let mut tension = LoadCase::new("tension");
+    tension.nodal_load_2d(1, 10.0, 0.0).unwrap();
+    let r0 = model.solve_case(&zero).unwrap();
+    let r1 = model.solve_case(&tension).unwrap();
+    let envelope = TrussEnvelope::from_results(&[&r0, &r1]).unwrap();
+
+    let af = envelope.axial_force(0).unwrap();
+    assert!(
+        af.axial.min.abs() < 1e-12,
+        "min should be ~0, got {}",
+        af.axial.min
+    );
+    assert!(
+        af.axial.max > 0.0,
+        "max should be positive, got {}",
+        af.axial.max
+    );
+}
