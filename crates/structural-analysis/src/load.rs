@@ -367,6 +367,11 @@ impl LoadCase {
         dof: usize,
         value: f64,
     ) -> Result<(), FemError> {
+        if dof >= 3 {
+            return Err(FemError::InvalidInput(format!(
+                "3D truss DOF index must be 0 (ux), 1 (uy), or 2 (uz), got {dof}"
+            )));
+        }
         if !value.is_finite() {
             return Err(FemError::InvalidInput(format!(
                 "prescribed displacement must be finite, got {value}"

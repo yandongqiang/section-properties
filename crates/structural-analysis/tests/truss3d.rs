@@ -1008,3 +1008,210 @@ fn test_2d_regression() {
     assert!((n01 - (-fx)).abs() < 1e-10, "N01 = {n01}, expected {}", -fx);
     assert!((n02 - (-fy)).abs() < 1e-10, "N02 = {n02}, expected {}", -fy);
 }
+
+// ===========================================================================
+// Phase 118 — Deep Audit tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Test 28 — Combination with zero and negative factors
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_combination_zero_negative_factors() {
+    let model = make_tripod();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_3d(0, 10.0, 0.0, 0.0).unwrap();
+
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_3d(0, 0.0, 20.0, 0.0).unwrap();
+
+    let mut combo = LoadCombination::new("1.0A + 0.0B - 0.5A");
+    combo.add_case(&case_a, 1.0).unwrap();
+    combo.add_case(&case_b, 0.0).unwrap();
+    combo.add_case(&case_a, -0.5).unwrap();
+
+    let result = model.solve_combination(&combo).unwrap();
+
+    let ux = result.displacement(0, TrussDof3D::Ux).unwrap();
+    let uy = result.displacement(0, TrussDof3D::Uy).unwrap();
+    assert!(
+        (ux - 3.0 * 0.5 * 10.0).abs() < 1e-9,
+        "ux = {ux}, expected {}",
+        3.0 * 0.5 * 10.0
+    );
+    assert!(uy.abs() < 1e-12, "uy = {uy}, expected 0 (zero factor on B)");
+}
+
+// ---------------------------------------------------------------------------
+// Test 29 — Prescribed displacement via LoadCase with concurrent nodal force
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_loadcase_prescribed_with_force() {
+    let mat = section_properties::Material::new(1.0, 0.3, 1.0, "unit");
+
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, 1.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(2, 2.0, 0.0, 0.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1.0).unwrap());
+    model.add_element(TrussElement3D::new(1, 2, &mat, 1.0).unwrap());
+    model.fix_node(0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uy, 0.0).unwrap();
+    model.fix_dof(1, TrussDof3D::Uz, 0.0).unwrap();
+    model.fix_node(2).unwrap();
+
+    let delta = 0.002;
+    let f = 5.0;
+    let mut case = LoadCase::new("settlement+force");
+    case.prescribed_displacement_3d(2, 0, delta).unwrap();
+    case.nodal_load_3d(1, f, 0.0, 0.0).unwrap();
+
+    let result = model.solve_case(&case).unwrap();
+
+    let ux1 = result.displacement(1, TrussDof3D::Ux).unwrap();
+    assert!(ux1.is_finite(), "ux1 should be finite, got {ux1}");
+
+    let n01 = result.member_axial_force(0).unwrap();
+    let n12 = result.member_axial_force(1).unwrap();
+    assert!(n01.is_finite(), "N01 should be finite");
+    assert!(n12.is_finite(), "N12 should be finite");
+
+    assert!(
+        result.equilibrium().is_balanced(),
+        "equilibrium not balanced"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 30 — LoadCombination rejects prescribed displacements
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_combination_rejects_prescribed() {
+    let model = make_tripod();
+
+    let mut case = LoadCase::new("with_settlement");
+    case.nodal_load_3d(0, 1.0, 0.0, 0.0).unwrap();
+    case.prescribed_displacement_3d(1, 0, 0.001).unwrap();
+
+    let mut combo = LoadCombination::new("bad");
+    combo.add_case(&case, 1.0).unwrap();
+
+    let result = model.solve_combination(&combo);
+    assert!(
+        result.is_err(),
+        "combination with prescribed displacement should be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 31 — Invalid DOF rejected by prescribed_displacement_3d
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_prescribed_displacement_3d_invalid_dof() {
+    let mut case = LoadCase::new("bad_dof");
+    assert!(
+        case.prescribed_displacement_3d(0, 3, 0.001).is_err(),
+        "dof=3 should be rejected"
+    );
+    assert!(
+        case.prescribed_displacement_3d(0, 99, 0.001).is_err(),
+        "dof=99 should be rejected"
+    );
+    assert!(
+        case.prescribed_displacement_3d(0, 0, 0.001).is_ok(),
+        "dof=0 should be accepted"
+    );
+    assert!(
+        case.prescribed_displacement_3d(0, 2, 0.001).is_ok(),
+        "dof=2 should be accepted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 32 — Repeated solve isolation (results don't pollute each other)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_repeated_solve_isolation() {
+    let model = make_tripod();
+
+    let mut case_a = LoadCase::new("a");
+    case_a.nodal_load_3d(0, 100.0, 0.0, 0.0).unwrap();
+
+    let mut case_b = LoadCase::new("b");
+    case_b.nodal_load_3d(0, 0.0, 0.0, 200.0).unwrap();
+
+    let result_a = model.solve_case(&case_a).unwrap();
+    let result_b = model.solve_case(&case_b).unwrap();
+    let result_a2 = model.solve_case(&case_a).unwrap();
+
+    let ux_a = result_a.displacement(0, TrussDof3D::Ux).unwrap();
+    let ux_a2 = result_a2.displacement(0, TrussDof3D::Ux).unwrap();
+    assert!(
+        (ux_a - ux_a2).abs() < 1e-12,
+        "repeated solve should be identical: {ux_a} vs {ux_a2}"
+    );
+
+    let uz_b = result_b.displacement(0, TrussDof3D::Uz).unwrap();
+    let ux_b = result_b.displacement(0, TrussDof3D::Ux).unwrap();
+    assert!(
+        ux_b.abs() < 1e-12,
+        "case B should not produce ux, got {ux_b}"
+    );
+    assert!((uz_b - 5.0 * 200.0).abs() < 1e-9, "uz_b = {uz_b}");
+
+    let uz_a = result_a.displacement(0, TrussDof3D::Uz).unwrap();
+    assert!(
+        uz_a.abs() < 1e-12,
+        "case A result should not be polluted by case B: uz_a = {uz_a}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 33 — Multi-node load accumulation and cancellation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_multi_node_accumulation_cancellation() {
+    let mat = section_properties::Material::new(1.0, 0.3, 1.0, "unit");
+
+    let mut model = TrussModel3D::new();
+    model.add_node(TrussNode3D::new(0, 0.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(1, 3.0, 0.0, 0.0));
+    model.add_node(TrussNode3D::new(2, 0.0, 4.0, 0.0));
+    model.add_node(TrussNode3D::new(3, 0.0, 0.0, 5.0));
+    model.add_element(TrussElement3D::new(0, 1, &mat, 1.0).unwrap());
+    model.add_element(TrussElement3D::new(0, 2, &mat, 1.0).unwrap());
+    model.add_element(TrussElement3D::new(0, 3, &mat, 1.0).unwrap());
+    model.fix_node(1).unwrap();
+    model.fix_node(2).unwrap();
+    model.fix_node(3).unwrap();
+
+    let mut case_cancel = LoadCase::new("cancel");
+    case_cancel.nodal_load_3d(0, 50.0, 0.0, 0.0).unwrap();
+    case_cancel.nodal_load_3d(0, -50.0, 0.0, 0.0).unwrap();
+
+    let result = model.solve_case(&case_cancel).unwrap();
+    let ux = result.displacement(0, TrussDof3D::Ux).unwrap();
+    assert!(
+        ux.abs() < 1e-12,
+        "cancelling forces should produce zero displacement, got ux = {ux}"
+    );
+
+    let mut case_accum = LoadCase::new("accum");
+    case_accum.nodal_load_3d(0, 30.0, 0.0, 0.0).unwrap();
+    case_accum.nodal_load_3d(0, 20.0, 0.0, 0.0).unwrap();
+
+    let result = model.solve_case(&case_accum).unwrap();
+    let ux = result.displacement(0, TrussDof3D::Ux).unwrap();
+    assert!(
+        (ux - 3.0 * 50.0).abs() < 1e-10,
+        "accumulated 30+20=50, ux = {ux}, expected {}",
+        3.0 * 50.0
+    );
+}
