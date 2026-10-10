@@ -9,7 +9,7 @@ use viewport_poc::{
     app_state::{AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
-    edit_model::{EditModel, NodeId},
+    edit_model::{EditModel, NodeId, SupportSpec},
     model, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -30,6 +30,7 @@ const LABEL_C: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
 const HELP_C: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
 const STALE_C: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);
 const ERROR_C: egui::Color32 = egui::Color32::from_rgb(255, 80, 80);
+const SUPPORT_C: egui::Color32 = egui::Color32::from_rgb(100, 255, 200);
 
 // ── App ─────────────────────────────────────────────────────────────────
 struct ViewportApp {
@@ -457,6 +458,38 @@ impl eframe::App for ViewportApp {
                 }
             }
 
+            // ── Draw support symbols ──
+            if self.display.show_undeformed {
+                for (i, &pos) in scene.node_positions.iter().enumerate() {
+                    let Some(spec) = scene.node_supports.get(i).copied().flatten() else {
+                        continue;
+                    };
+                    let Some(p) = self.camera.project(pos, w, h) else {
+                        continue;
+                    };
+                    let center = scr(&p, rect);
+                    painter.circle_stroke(
+                        center,
+                        10.0,
+                        egui::Stroke::new(2.0_f32, SUPPORT_C),
+                    );
+                    let label = if spec.is_fixed() {
+                        "F".to_string()
+                    } else if spec.is_pinned() {
+                        "P".to_string()
+                    } else {
+                        format!("C{}", spec.n_constrained())
+                    };
+                    painter.text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(10.0),
+                        SUPPORT_C,
+                    );
+                }
+            }
+
             // ── Draw deformed shape ──
             if self.display.show_deformed {
                 if let Some(result) = self.analysis_result() {
@@ -728,6 +761,88 @@ impl ViewportApp {
                         }
                     }
 
+                    // ── Support editing ──
+                    ui.separator();
+                    ui.label("Support:");
+                    let mut support_changed = false;
+                    let mut new_spec = SupportSpec::free();
+                    let mut has_support = false;
+                    let mut clear_clicked = false;
+                    if let Some(model) = self.project.model.as_ref() {
+                        if let Some(spec) = model.support(id) {
+                            new_spec = *spec;
+                            has_support = true;
+                        }
+                    }
+                    ui.label(format!(
+                        "Current: {}",
+                        if has_support {
+                            new_spec.label()
+                        } else {
+                            "Free (no support)"
+                        }
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Fixed").clicked() {
+                            new_spec = SupportSpec::fixed();
+                            support_changed = true;
+                        }
+                        if ui.button("Pinned").clicked() {
+                            new_spec = SupportSpec::pinned();
+                            support_changed = true;
+                        }
+                        if ui.button("Custom").clicked() {
+                            if !has_support {
+                                new_spec = SupportSpec::free();
+                            }
+                            support_changed = true;
+                        }
+                        if has_support && ui.button("Clear").clicked() {
+                            clear_clicked = true;
+                        }
+                    });
+
+                    if has_support || support_changed {
+                        ui.label("DOFs (checked = constrained to 0):");
+                        let mut dof_changed = false;
+                        for dof in Dof3D::ALL {
+                            let mut constrained = new_spec.dof(dof).is_some();
+                            if ui.checkbox(&mut constrained, dof.name()).changed() {
+                                new_spec.set_dof(dof, if constrained { Some(0.0) } else { None });
+                                dof_changed = true;
+                            }
+                        }
+                        if dof_changed {
+                            support_changed = true;
+                        }
+                    }
+
+                    if clear_clicked {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.clear_support(id) {
+                                Ok(()) => {
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                    self.messages.push(AppMessage::info(format!(
+                                        "Cleared support at node N{}",
+                                        id.0
+                                    )));
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
+                    } else if support_changed {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.set_support(id, new_spec) {
+                                Ok(()) => {
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
+                    }
+
                     if ui.button("Delete node").clicked() {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.delete_node(id) {
@@ -844,12 +959,16 @@ impl ViewportApp {
                     ui.label(format!("Nodes ({}):", model.n_nodes()));
                     for node in model.nodes() {
                         let is_sel = self.selection == SelectionState::Node(node.id);
+                        let sup_label = match model.support(node.id) {
+                            Some(spec) => format!(" [{}]", spec.label()),
+                            None => String::new(),
+                        };
                         if ui
                             .selectable_label(
                                 is_sel,
                                 format!(
-                                    "N{} ({:.1}, {:.1}, {:.1})",
-                                    node.id.0, node.x, node.y, node.z
+                                    "N{} ({:.1}, {:.1}, {:.1}){}",
+                                    node.id.0, node.x, node.y, node.z, sup_label
                                 ),
                             )
                             .clicked()
@@ -1025,7 +1144,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 143"),
+            .with_title("Structural Analysis \u{2014} Phase 144"),
         ..Default::default()
     };
     eframe::run_native(

@@ -42,6 +42,106 @@ pub struct EditMember {
     pub ref_vec: [f64; 3],
 }
 
+// ── Support specification ─────────────────────────────────────────────
+
+/// Boundary-condition specification for a node.
+///
+/// Each of the 6 DOFs (Ux, Uy, Uz, Rx, Ry, Rz) can be:
+/// - `None`     — free (unconstrained)
+/// - `Some(v)`  — constrained to prescribed value `v`
+///
+/// Common presets: [`SupportSpec::fixed`], [`SupportSpec::pinned`],
+/// [`SupportSpec::free`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupportSpec {
+    dofs: [Option<f64>; 6],
+}
+
+impl Default for SupportSpec {
+    fn default() -> Self {
+        Self::free()
+    }
+}
+
+impl SupportSpec {
+    /// Fully fixed: all 6 DOFs constrained to 0.
+    pub fn fixed() -> Self {
+        Self {
+            dofs: [Some(0.0); 6],
+        }
+    }
+
+    /// Pinned: translations (Ux, Uy, Uz) constrained to 0, rotations free.
+    pub fn pinned() -> Self {
+        Self {
+            dofs: [Some(0.0), Some(0.0), Some(0.0), None, None, None],
+        }
+    }
+
+    /// Free: no constraints.
+    pub fn free() -> Self {
+        Self { dofs: [None; 6] }
+    }
+
+    /// Custom from an explicit DOF array.
+    pub fn custom(dofs: [Option<f64>; 6]) -> Self {
+        Self { dofs }
+    }
+
+    /// Query a specific DOF.
+    pub fn dof(&self, dof: Dof3D) -> Option<f64> {
+        self.dofs[dof.index()]
+    }
+
+    /// Set a specific DOF: `None` = free, `Some(v)` = constrained to v.
+    pub fn set_dof(&mut self, dof: Dof3D, value: Option<f64>) {
+        self.dofs[dof.index()] = value;
+    }
+
+    /// Is this a fully fixed support (all 6 DOFs constrained)?
+    pub fn is_fixed(&self) -> bool {
+        self.dofs.iter().all(|d| d.is_some())
+    }
+
+    /// Is this a pinned support (Ux, Uy, Uz constrained, Rx, Ry, Rz free)?
+    pub fn is_pinned(&self) -> bool {
+        self.dofs[0].is_some()
+            && self.dofs[1].is_some()
+            && self.dofs[2].is_some()
+            && self.dofs[3].is_none()
+            && self.dofs[4].is_none()
+            && self.dofs[5].is_none()
+    }
+
+    /// Is this a free support (no constraints)?
+    pub fn is_free(&self) -> bool {
+        self.dofs.iter().all(|d| d.is_none())
+    }
+
+    /// Number of constrained DOFs.
+    pub fn n_constrained(&self) -> usize {
+        self.dofs.iter().filter(|d| d.is_some()).count()
+    }
+
+    /// Short human-readable label.
+    pub fn label(&self) -> &'static str {
+        if self.is_fixed() {
+            "Fixed"
+        } else if self.is_pinned() {
+            "Pinned"
+        } else if self.is_free() {
+            "Free"
+        } else {
+            "Custom"
+        }
+    }
+
+    /// Raw DOF array (read-only copy).
+    pub fn dofs(&self) -> [Option<f64>; 6] {
+        self.dofs
+    }
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 /// Error from a model editing operation.
@@ -89,14 +189,12 @@ impl EditError {
 /// Editable structural model with stable IDs.
 ///
 /// Stores nodes and members with stable identifiers that survive deletion.
-/// Also stores fixed nodes and nodal loads (not editable in this phase, but
-/// needed for preset model compatibility).
+/// Also stores supports (boundary conditions) and nodal loads.
 #[derive(Debug, Clone)]
 pub struct EditModel {
     nodes: Vec<EditNode>,
     members: Vec<EditMember>,
-    fixed_nodes: Vec<NodeId>,
-    fixed_dofs: Vec<(NodeId, Dof3D)>,
+    supports: Vec<(NodeId, SupportSpec)>,
     nodal_loads: Vec<(NodeId, [f64; 6])>,
     next_node_id: u32,
     next_member_id: u32,
@@ -114,8 +212,7 @@ impl EditModel {
         Self {
             nodes: Vec::new(),
             members: Vec::new(),
-            fixed_nodes: Vec::new(),
-            fixed_dofs: Vec::new(),
+            supports: Vec::new(),
             nodal_loads: Vec::new(),
             next_node_id: 0,
             next_member_id: 0,
@@ -174,8 +271,7 @@ impl EditModel {
             return Err(EditError::NodeInUse(referencing));
         }
         self.nodes.retain(|n| n.id != id);
-        self.fixed_nodes.retain(|&nid| nid != id);
-        self.fixed_dofs.retain(|(nid, _)| *nid != id);
+        self.supports.retain(|(nid, _)| *nid != id);
         self.nodal_loads.retain(|(nid, _)| *nid != id);
         Ok(())
     }
@@ -242,28 +338,69 @@ impl EditModel {
         Ok(())
     }
 
-    // ── Constraint / load storage (not editable in this phase) ────────
+    // ── Support / constraint operations ───────────────────────────────
 
-    /// Mark a node as fully fixed.  Used by preset models.
+    /// Mark a node as fully fixed.  Delegates to
+    /// [`set_support`](Self::set_support).
     pub fn fix_node(&mut self, id: NodeId) -> Result<(), EditError> {
-        if self.nodes.iter().all(|n| n.id != id) {
-            return Err(EditError::NodeNotFound(id));
-        }
-        if !self.fixed_nodes.contains(&id) {
-            self.fixed_nodes.push(id);
-        }
-        Ok(())
+        self.set_support(id, SupportSpec::fixed())
     }
 
-    /// Fix a single DOF at a node.  Used by preset models.
+    /// Constrain a single DOF at a node to 0.  Merges into any existing
+    /// support at that node.
     pub fn fix_dof(&mut self, id: NodeId, dof: Dof3D) -> Result<(), EditError> {
         if self.nodes.iter().all(|n| n.id != id) {
             return Err(EditError::NodeNotFound(id));
         }
-        if !self.fixed_dofs.contains(&(id, dof)) {
-            self.fixed_dofs.push((id, dof));
+        if let Some((_, spec)) = self.supports.iter_mut().find(|(nid, _)| *nid == id) {
+            spec.set_dof(dof, Some(0.0));
+        } else {
+            let mut spec = SupportSpec::free();
+            spec.set_dof(dof, Some(0.0));
+            self.supports.push((id, spec));
         }
         Ok(())
+    }
+
+    /// Set the support specification for a node, replacing any existing
+    /// support.
+    pub fn set_support(&mut self, id: NodeId, spec: SupportSpec) -> Result<(), EditError> {
+        if self.nodes.iter().all(|n| n.id != id) {
+            return Err(EditError::NodeNotFound(id));
+        }
+        if let Some((_, existing)) = self.supports.iter_mut().find(|(nid, _)| *nid == id) {
+            *existing = spec;
+        } else {
+            self.supports.push((id, spec));
+        }
+        Ok(())
+    }
+
+    /// Clear the support at a node, making all DOFs free.
+    pub fn clear_support(&mut self, id: NodeId) -> Result<(), EditError> {
+        if self.nodes.iter().all(|n| n.id != id) {
+            return Err(EditError::NodeNotFound(id));
+        }
+        self.supports.retain(|(nid, _)| *nid != id);
+        Ok(())
+    }
+
+    /// Get the support specification for a node, if any.
+    pub fn support(&self, id: NodeId) -> Option<&SupportSpec> {
+        self.supports
+            .iter()
+            .find(|(nid, _)| *nid == id)
+            .map(|(_, spec)| spec)
+    }
+
+    /// Does the node have any support?
+    pub fn has_support(&self, id: NodeId) -> bool {
+        self.supports.iter().any(|(nid, _)| *nid == id)
+    }
+
+    /// All supports (node ID + spec), in insertion order.
+    pub fn supports(&self) -> &[(NodeId, SupportSpec)] {
+        &self.supports
     }
 
     /// Add a nodal load.  Used by preset models.
@@ -373,18 +510,25 @@ impl EditModel {
                 .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
         }
 
-        for &nid in &self.fixed_nodes {
-            let idx = *id_to_idx.get(&nid).ok_or(EditError::NodeNotFound(nid))?;
-            model
-                .fix_node(idx)
-                .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
-        }
-
-        for (nid, dof) in &self.fixed_dofs {
+        for (nid, spec) in &self.supports {
             let idx = *id_to_idx.get(nid).ok_or(EditError::NodeNotFound(*nid))?;
-            model
-                .fix_dof(idx, *dof, 0.0)
-                .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+            if spec.is_fixed() {
+                model
+                    .fix_node(idx)
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+            } else if spec.is_pinned() {
+                model
+                    .pin_node(idx)
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+            } else {
+                for dof in Dof3D::ALL {
+                    if let Some(value) = spec.dof(dof) {
+                        model
+                            .fix_dof(idx, dof, value)
+                            .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                    }
+                }
+            }
         }
 
         for (nid, loads) in &self.nodal_loads {
@@ -708,5 +852,243 @@ mod tests {
         assert!(e.message().contains("N5"));
         let e = EditError::NodeInUse(vec![MemberId(3)]);
         assert!(e.message().contains("M3"));
+    }
+
+    // ── SupportSpec tests ─────────────────────────────────────────────
+
+    #[test]
+    fn support_fixed_constrains_all() {
+        let s = SupportSpec::fixed();
+        assert!(s.is_fixed());
+        assert!(!s.is_pinned());
+        assert!(!s.is_free());
+        assert_eq!(s.n_constrained(), 6);
+        assert_eq!(s.label(), "Fixed");
+        for dof in Dof3D::ALL {
+            assert_eq!(s.dof(dof), Some(0.0));
+        }
+    }
+
+    #[test]
+    fn support_pinned_constrains_translations_only() {
+        let s = SupportSpec::pinned();
+        assert!(!s.is_fixed());
+        assert!(s.is_pinned());
+        assert!(!s.is_free());
+        assert_eq!(s.n_constrained(), 3);
+        assert_eq!(s.label(), "Pinned");
+        assert_eq!(s.dof(Dof3D::Ux), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Uy), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Uz), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Rx), None);
+        assert_eq!(s.dof(Dof3D::Ry), None);
+        assert_eq!(s.dof(Dof3D::Rz), None);
+    }
+
+    #[test]
+    fn support_free_constrains_none() {
+        let s = SupportSpec::free();
+        assert!(!s.is_fixed());
+        assert!(!s.is_pinned());
+        assert!(s.is_free());
+        assert_eq!(s.n_constrained(), 0);
+        assert_eq!(s.label(), "Free");
+    }
+
+    #[test]
+    fn support_custom() {
+        let dofs = [Some(0.0), None, Some(0.0), None, None, Some(0.0)];
+        let s = SupportSpec::custom(dofs);
+        assert!(!s.is_fixed());
+        assert!(!s.is_pinned());
+        assert!(!s.is_free());
+        assert_eq!(s.n_constrained(), 3);
+        assert_eq!(s.label(), "Custom");
+    }
+
+    #[test]
+    fn support_set_dof() {
+        let mut s = SupportSpec::free();
+        s.set_dof(Dof3D::Ux, Some(0.0));
+        s.set_dof(Dof3D::Rz, Some(0.0));
+        assert_eq!(s.n_constrained(), 2);
+        assert_eq!(s.dof(Dof3D::Ux), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Rz), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Uy), None);
+        assert_eq!(s.label(), "Custom");
+    }
+
+    #[test]
+    fn support_default_is_free() {
+        assert_eq!(SupportSpec::default(), SupportSpec::free());
+    }
+
+    #[test]
+    fn support_dofs_roundtrip() {
+        let s = SupportSpec::fixed();
+        let dofs = s.dofs();
+        let s2 = SupportSpec::custom(dofs);
+        assert_eq!(s, s2);
+    }
+
+    // ── Support operation tests ───────────────────────────────────────
+
+    #[test]
+    fn set_support_fixed() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_support(id, SupportSpec::fixed()).unwrap();
+        assert!(m.has_support(id));
+        assert!(m.support(id).unwrap().is_fixed());
+    }
+
+    #[test]
+    fn set_support_pinned() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_support(id, SupportSpec::pinned()).unwrap();
+        assert!(m.support(id).unwrap().is_pinned());
+    }
+
+    #[test]
+    fn set_support_replaces_existing() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_support(id, SupportSpec::fixed()).unwrap();
+        m.set_support(id, SupportSpec::pinned()).unwrap();
+        assert!(m.support(id).unwrap().is_pinned());
+        assert!(!m.support(id).unwrap().is_fixed());
+    }
+
+    #[test]
+    fn clear_support() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_support(id, SupportSpec::fixed()).unwrap();
+        assert!(m.has_support(id));
+        m.clear_support(id).unwrap();
+        assert!(!m.has_support(id));
+        assert!(m.support(id).is_none());
+    }
+
+    #[test]
+    fn clear_support_nonexistent_is_ok() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.clear_support(id).unwrap();
+    }
+
+    #[test]
+    fn set_support_nonexistent_node_fails() {
+        let mut m = EditModel::new();
+        assert_eq!(
+            m.set_support(NodeId(99), SupportSpec::fixed()),
+            Err(EditError::NodeNotFound(NodeId(99)))
+        );
+    }
+
+    #[test]
+    fn fix_node_delegates_to_set_support() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_node(id).unwrap();
+        assert!(m.support(id).unwrap().is_fixed());
+    }
+
+    #[test]
+    fn fix_dof_creates_custom_support() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_dof(id, Dof3D::Ux).unwrap();
+        let s = m.support(id).unwrap();
+        assert_eq!(s.n_constrained(), 1);
+        assert_eq!(s.dof(Dof3D::Ux), Some(0.0));
+        assert_eq!(s.dof(Dof3D::Uy), None);
+        assert_eq!(s.label(), "Custom");
+    }
+
+    #[test]
+    fn fix_dof_merges_into_existing() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_dof(id, Dof3D::Ux).unwrap();
+        m.fix_dof(id, Dof3D::Uy).unwrap();
+        m.fix_dof(id, Dof3D::Uz).unwrap();
+        let s = m.support(id).unwrap();
+        assert_eq!(s.n_constrained(), 3);
+        assert!(s.is_pinned());
+    }
+
+    #[test]
+    fn fix_dof_merges_into_fixed() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_node(id).unwrap();
+        m.fix_dof(id, Dof3D::Ux).unwrap();
+        let s = m.support(id).unwrap();
+        assert!(s.is_fixed());
+        assert_eq!(s.n_constrained(), 6);
+    }
+
+    #[test]
+    fn delete_node_removes_support() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.add_member(a, b).unwrap();
+        m.set_support(b, SupportSpec::fixed()).unwrap();
+        assert!(m.has_support(b));
+        m.delete_member(m.members()[0].id).unwrap();
+        m.delete_node(b).unwrap();
+        assert!(!m.has_support(b));
+    }
+
+    #[test]
+    fn supports_list() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.set_support(a, SupportSpec::fixed()).unwrap();
+        m.set_support(b, SupportSpec::pinned()).unwrap();
+        let sups = m.supports();
+        assert_eq!(sups.len(), 2);
+    }
+
+    // ── Conversion with supports ─────────────────────────────────────
+
+    #[test]
+    fn to_frame_model_with_pinned_support_solves() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+        m.add_member(a, c).unwrap();
+        m.add_member(c, d).unwrap();
+        m.add_member(b, d).unwrap();
+        m.set_support(a, SupportSpec::fixed()).unwrap();
+        m.set_support(b, SupportSpec::fixed()).unwrap();
+        m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
+    }
+
+    #[test]
+    fn to_frame_model_custom_support_solves() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+        m.add_member(a, c).unwrap();
+        m.add_member(c, d).unwrap();
+        m.add_member(b, d).unwrap();
+        let mut spec = SupportSpec::fixed();
+        spec.set_dof(Dof3D::Rz, None);
+        m.set_support(a, spec).unwrap();
+        m.set_support(b, SupportSpec::fixed()).unwrap();
+        m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
     }
 }

@@ -1,7 +1,8 @@
 //! Integration tests for the editable structural model.
 
+use structural_analysis::Dof3D;
 use viewport_poc::{
-    edit_model::{EditError, EditModel, MemberId, NodeId},
+    edit_model::{EditError, EditModel, MemberId, NodeId, SupportSpec},
     model,
     scene::ViewportScene,
 };
@@ -291,4 +292,145 @@ fn default_ref_vec_is_z_axis() {
     let b = m.add_node(3.0, 0.0, 0.0).unwrap();
     let mid = m.add_member(a, b).unwrap();
     assert_eq!(m.member(mid).unwrap().ref_vec, [0.0, 0.0, 1.0]);
+}
+
+// ── Support editing integration tests ───────────────────────────────
+
+#[test]
+fn set_support_fixed_then_solve() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+    m.add_member(a, c).unwrap();
+    m.add_member(c, d).unwrap();
+    m.add_member(b, d).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::fixed()).unwrap();
+    m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    let fm = m.to_frame_model().unwrap();
+    assert!(fm.solve().is_ok());
+}
+
+#[test]
+fn set_support_pinned_then_solve() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+    let e = m.add_node(2.0, 3.0, 0.0).unwrap();
+    m.add_member(a, c).unwrap();
+    m.add_member(c, e).unwrap();
+    m.add_member(e, d).unwrap();
+    m.add_member(b, d).unwrap();
+    m.add_member(c, d).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::fixed()).unwrap();
+    m.add_nodal_load(e, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    let fm = m.to_frame_model().unwrap();
+    assert!(fm.solve().is_ok());
+}
+
+#[test]
+fn clear_support_makes_node_free() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.set_support(id, SupportSpec::fixed()).unwrap();
+    assert!(m.has_support(id));
+    m.clear_support(id).unwrap();
+    assert!(!m.has_support(id));
+    assert!(m.support(id).is_none());
+}
+
+#[test]
+fn fix_dof_merges_into_pinned() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.set_support(id, SupportSpec::pinned()).unwrap();
+    m.fix_dof(id, Dof3D::Rz).unwrap();
+    let s = m.support(id).unwrap();
+    assert_eq!(s.n_constrained(), 4);
+    assert!(!s.is_pinned());
+    assert!(!s.is_fixed());
+}
+
+#[test]
+fn support_preserved_after_node_coordinate_update() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.set_support(id, SupportSpec::fixed()).unwrap();
+    m.update_node(id, 1.0, 2.0, 3.0).unwrap();
+    assert!(m.support(id).unwrap().is_fixed());
+}
+
+#[test]
+fn preset_inclined_supports_correct() {
+    let m = model::build_inclined_edit();
+    let nodes: Vec<_> = m.nodes().iter().map(|n| n.id).collect();
+    assert!(m.support(nodes[0]).unwrap().is_fixed());
+    assert!(m.support(nodes[1]).unwrap().is_fixed());
+    let s4 = m.support(nodes[4]).unwrap();
+    assert_eq!(s4.n_constrained(), 3);
+    assert!(s4.dof(Dof3D::Ux).is_some());
+    assert!(s4.dof(Dof3D::Uy).is_some());
+    assert!(s4.dof(Dof3D::Uz).is_some());
+    assert!(s4.dof(Dof3D::Rx).is_none());
+    assert!(s4.dof(Dof3D::Ry).is_none());
+    assert!(s4.dof(Dof3D::Rz).is_none());
+}
+
+#[test]
+fn all_presets_supports_solve() {
+    for &preset in model::PresetModel::all() {
+        let m = preset.build_edit();
+        let fm = m
+            .to_frame_model()
+            .unwrap_or_else(|e| panic!("preset '{}' to_frame_model failed: {e:?}", preset.name()));
+        assert!(
+            fm.solve().is_ok(),
+            "preset '{}' with supports should solve",
+            preset.name()
+        );
+    }
+}
+
+// ── Scene node_supports tests ───────────────────────────────────────
+
+#[test]
+fn scene_reflects_supports() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::pinned()).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert_eq!(scene.node_supports.len(), 2);
+    assert!(scene.node_supports[0].unwrap().is_fixed());
+    assert!(scene.node_supports[1].unwrap().is_pinned());
+}
+
+#[test]
+fn scene_no_supports_when_none_set() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert!(scene.node_supports[0].is_none());
+    assert!(scene.node_supports[1].is_none());
+}
+
+#[test]
+fn scene_supports_match_model_after_clear() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.clear_support(a).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert!(scene.node_supports[0].is_none());
 }

@@ -16,6 +16,6 @@ pub mod selection;
 pub use app_state::{AppMessage, MessageLevel, Project};
 pub use camera::Camera3D;
 pub use display::ResultDisplayState;
-pub use edit_model::{EditError, EditMember, EditModel, EditNode, MemberId, NodeId};
+pub use edit_model::{EditError, EditMember, EditModel, EditNode, MemberId, NodeId, SupportSpec};
 pub use scene::ViewportScene;
 pub use selection::SelectionState;

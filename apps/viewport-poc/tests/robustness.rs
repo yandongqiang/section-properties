@@ -13,6 +13,7 @@ fn empty_scene_bounding_box() {
         member_nodes: vec![],
         member_ids: vec![],
         member_ref_vecs: vec![],
+        node_supports: vec![],
     };
     let (min, max) = scene.bounding_box();
     assert_eq!(min, [0.0; 3]);
@@ -27,6 +28,7 @@ fn empty_scene_deformed_positions() {
         member_nodes: vec![],
         member_ids: vec![],
         member_ref_vecs: vec![],
+        node_supports: vec![],
     };
     let deformed = scene.deformed_positions(&[], 100.0);
     assert!(deformed.is_empty());
@@ -40,6 +42,7 @@ fn single_node_scene() {
         member_nodes: vec![],
         member_ids: vec![],
         member_ref_vecs: vec![],
+        node_supports: vec![None],
     };
     let (min, max) = scene.bounding_box();
     assert_eq!(min, [1.0, 2.0, 3.0]);
@@ -62,6 +65,7 @@ fn coincident_nodes_bounding_box() {
         member_nodes: vec![(0, 1), (1, 2)],
         member_ids: vec![MemberId(0), MemberId(1)],
         member_ref_vecs: vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+        node_supports: vec![None, None, None],
     };
     let (min, max) = scene.bounding_box();
     assert_eq!(min, [2.0, 2.0, 2.0]);
@@ -83,6 +87,7 @@ fn non_finite_displacement_returns_original() {
         member_nodes: vec![],
         member_ids: vec![],
         member_ref_vecs: vec![],
+        node_supports: vec![None, None],
     };
     let disp = vec![
         f64::NAN,
@@ -129,6 +134,7 @@ fn zero_length_member() {
         member_nodes: vec![(0, 1)],
         member_ids: vec![MemberId(0)],
         member_ref_vecs: vec![[0.0, 0.0, 1.0]],
+        node_supports: vec![None, None],
     };
     let len = scene.member_length(0).unwrap();
     assert_eq!(len, 0.0);
