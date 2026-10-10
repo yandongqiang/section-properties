@@ -2,6 +2,51 @@
 
 use structural_analysis::{Dof3D, FrameModel3D, FrameSection3D};
 
+/// Available preset models for the model browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetModel {
+    Portal,
+    Inclined,
+    Grid1x1,
+    Grid3x3,
+    Grid10x10,
+}
+
+impl PresetModel {
+    /// All available presets, in display order.
+    pub fn all() -> &'static [PresetModel] {
+        &[
+            PresetModel::Portal,
+            PresetModel::Inclined,
+            PresetModel::Grid1x1,
+            PresetModel::Grid3x3,
+            PresetModel::Grid10x10,
+        ]
+    }
+
+    /// Human-readable name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            PresetModel::Portal => "Portal Frame",
+            PresetModel::Inclined => "Inclined Frame",
+            PresetModel::Grid1x1 => "Grid 1x1",
+            PresetModel::Grid3x3 => "Grid 3x3",
+            PresetModel::Grid10x10 => "Grid 10x10",
+        }
+    }
+
+    /// Build the structural model.
+    pub fn build(&self) -> FrameModel3D {
+        match self {
+            PresetModel::Portal => build_portal_frame(),
+            PresetModel::Inclined => build_inclined_frame(),
+            PresetModel::Grid1x1 => build_grid_frame(1, 1),
+            PresetModel::Grid3x3 => build_grid_frame(3, 3),
+            PresetModel::Grid10x10 => build_grid_frame(10, 10),
+        }
+    }
+}
+
 /// Steel I-section properties.
 fn steel_section() -> FrameSection3D {
     FrameSection3D::new(200e9, 80e9, 1e-3, 2e-6, 1e-6, 3e-6).unwrap()
@@ -186,5 +231,30 @@ mod tests {
             "grid frame should solve: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn preset_names_are_unique() {
+        let names: Vec<&str> = PresetModel::all().iter().map(|p| p.name()).collect();
+        for i in 0..names.len() {
+            for j in (i + 1)..names.len() {
+                assert_ne!(names[i], names[j], "duplicate preset name: {}", names[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn preset_all_builds_solve() {
+        for &preset in PresetModel::all() {
+            let m = preset.build();
+            assert!(m.solve().is_ok(), "preset '{}' should solve", preset.name());
+        }
+    }
+
+    #[test]
+    fn preset_grid_10x10_node_count() {
+        let m = PresetModel::Grid10x10.build();
+        assert_eq!(m.n_nodes(), 242);
+        assert_eq!(m.n_members(), 341);
     }
 }

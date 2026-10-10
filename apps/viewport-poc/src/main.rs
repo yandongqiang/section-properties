@@ -1,11 +1,12 @@
-//! 3D Viewport Proof of Concept — egui + eframe.
+//! Desktop application — egui + eframe.
 //!
 //! Run with: `cargo run -p viewport-poc`
 
 use eframe;
 use egui;
-use structural_analysis::{Dof3D, FrameAnalysisResult3D, FrameModel3D};
+use structural_analysis::{Dof3D, FrameAnalysisResult3D};
 use viewport_poc::{
+    app_state::{AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
     model, project,
@@ -26,36 +27,95 @@ const DEF_NODE: egui::Color32 = egui::Color32::from_rgb(255, 100, 255);
 const DEF_MEMBER: egui::Color32 = egui::Color32::from_rgb(180, 100, 255);
 const LABEL_C: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
 const HELP_C: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
+const STALE_C: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);
+const ERROR_C: egui::Color32 = egui::Color32::from_rgb(255, 80, 80);
 
 // ── App ─────────────────────────────────────────────────────────────────
 struct ViewportApp {
-    model: FrameModel3D,
-    result: Option<FrameAnalysisResult3D>,
+    project: Project,
     scene: Option<ViewportScene>,
     camera: Camera3D,
     selection: SelectionState,
     display: ResultDisplayState,
+    messages: Vec<AppMessage>,
 }
 
 impl ViewportApp {
     fn new() -> Self {
-        let model = model::build_portal_frame();
-        let result = model.solve().ok();
-        let scene = result.as_ref().map(ViewportScene::from_result);
-        let camera = scene
-            .as_ref()
-            .map(|s| {
-                let (min, max) = s.bounding_box();
-                Camera3D::fit(min, max)
-            })
-            .unwrap_or_default();
         Self {
-            model,
-            result,
-            scene,
-            camera,
+            project: Project::empty(),
+            scene: None,
+            camera: Camera3D::default(),
             selection: SelectionState::None,
             display: ResultDisplayState::default(),
+            messages: vec![AppMessage::info(
+                "Application started. Select a model from the browser.",
+            )],
+        }
+    }
+
+    /// Borrow the current analysis result, if any.
+    fn analysis_result(&self) -> Option<&FrameAnalysisResult3D> {
+        self.project.analysis.as_ref().map(|a| &a.result)
+    }
+
+    /// Load a preset model and immediately solve it.
+    fn load_preset(&mut self, preset: model::PresetModel) {
+        let name = preset.name().to_string();
+        let m = preset.build();
+        self.project.load_model(name, m);
+        self.messages
+            .push(AppMessage::info(format!("Loaded '{}'", preset.name())));
+        self.run_solve();
+    }
+
+    /// Run the FEM analysis and rebuild the viewport scene.
+    ///
+    /// This is the **only** place the scene is rebuilt from analysis data.
+    /// Camera, selection, and display-option changes never call this.
+    fn run_solve(&mut self) {
+        match self.project.solve() {
+            Ok(()) => {
+                if let Some(ref analysis) = self.project.analysis {
+                    self.scene = Some(ViewportScene::from_result(&analysis.result));
+                    if let Some(ref s) = self.scene {
+                        let (min, max) = s.bounding_box();
+                        self.camera = Camera3D::fit(min, max);
+                    }
+                }
+                self.selection = SelectionState::None;
+                self.messages.push(AppMessage::info("Analysis complete."));
+            }
+            Err(e) => {
+                self.messages
+                    .push(AppMessage::error(format!("Analysis failed: {e}")));
+                self.scene = None;
+            }
+        }
+    }
+
+    /// Clear the project to the empty state.
+    fn clear_project(&mut self) {
+        self.project.clear();
+        self.scene = None;
+        self.selection = SelectionState::None;
+        self.messages.push(AppMessage::info("Project cleared."));
+    }
+
+    /// Clear selection if it points to a node/member that no longer exists.
+    fn validate_selection(&mut self) {
+        if let Some(ref scene) = self.scene {
+            match self.selection {
+                SelectionState::Node(i) if i >= scene.n_nodes() => {
+                    self.selection = SelectionState::None;
+                }
+                SelectionState::Member(i) if i >= scene.n_members() => {
+                    self.selection = SelectionState::None;
+                }
+                _ => {}
+            }
+        } else {
+            self.selection = SelectionState::None;
         }
     }
 
@@ -112,21 +172,111 @@ impl ViewportApp {
 
 impl eframe::App for ViewportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── Side panel ───────────────────────────────────────────────────
-        egui::SidePanel::right("side")
+        // ── Top panel: toolbar ──────────────────────────────────────────
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("New (empty)").clicked() {
+                        self.clear_project();
+                        ui.close_menu();
+                    }
+                });
+                ui.separator();
+                let solve_enabled = !self.project.is_empty();
+                if ui
+                    .add_enabled(solve_enabled, egui::Button::new("Solve"))
+                    .clicked()
+                {
+                    self.run_solve();
+                }
+                if ui.button("Clear selection").clicked() {
+                    self.selection = SelectionState::None;
+                }
+                ui.separator();
+                if self.project.results_are_stale() {
+                    ui.label(
+                        egui::RichText::new(
+                            "\u{26a0} Results are stale \u{2014} re-solve to update",
+                        )
+                        .color(STALE_C),
+                    );
+                }
+            });
+        });
+
+        // ── Bottom panel: status / diagnostics ─────────────────────────
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(28.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if self.project.is_empty() {
+                        ui.label("No model loaded");
+                    } else {
+                        ui.label(format!("Model: {}", self.project.name));
+                        if let Some(ref m) = self.project.model {
+                            ui.label(format!("Nodes: {}", m.n_nodes()));
+                            ui.label(format!("Members: {}", m.n_members()));
+                        }
+                        if self.project.has_results() {
+                            if self.project.results_are_stale() {
+                                ui.label(egui::RichText::new("Analysis: STALE").color(STALE_C));
+                            } else {
+                                ui.label("Analysis: \u{2713}");
+                            }
+                        } else {
+                            ui.label("Analysis: not run");
+                        }
+                    }
+                    ui.separator();
+                    if let Some(last) = self.messages.last() {
+                        let color = match last.level {
+                            MessageLevel::Info => LABEL_C,
+                            MessageLevel::Warning => STALE_C,
+                            MessageLevel::Error => ERROR_C,
+                        };
+                        ui.label(egui::RichText::new(&last.text).color(color));
+                    }
+                });
+            });
+
+        // ── Left panel: model browser ──────────────────────────────────
+        egui::SidePanel::left("browser")
+            .default_width(180.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.heading("Models");
+                ui.separator();
+                for &preset in model::PresetModel::all() {
+                    let is_active = self.project.name == preset.name();
+                    if ui
+                        .add_enabled(!is_active, egui::Button::new(preset.name()))
+                        .clicked()
+                    {
+                        self.load_preset(preset);
+                    }
+                }
+                ui.separator();
+                if ui.button("Clear project").clicked() {
+                    self.clear_project();
+                }
+            });
+
+        // ── Right panel: inspector ─────────────────────────────────────
+        egui::SidePanel::right("inspector")
             .default_width(350.0)
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.show_model_section(ui);
                     self.show_display_section(ui);
                     self.show_selection_section(ui);
                     self.show_camera_section(ui);
                 });
             });
 
-        // ── Viewport ─────────────────────────────────────────────────────
+        // ── Central panel: 3D viewport ─────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.validate_selection();
+
             let (rect, response) =
                 ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
             let painter = ui.painter_at(rect);
@@ -136,10 +286,9 @@ impl eframe::App for ViewportApp {
                 return;
             }
 
-            // Background
             painter.rect_filled(rect, 0.0, BG);
 
-            // Camera input
+            // Camera input — does NOT trigger solve.
             if response.dragged_by(egui::PointerButton::Primary) {
                 let d = response.drag_delta();
                 self.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01);
@@ -162,7 +311,7 @@ impl eframe::App for ViewportApp {
                 self.selection = SelectionState::None;
             }
 
-            // Selection on click
+            // Selection on click — does NOT trigger solve.
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let mx = pos.x as f64 - rect.min.x as f64;
@@ -178,6 +327,13 @@ impl eframe::App for ViewportApp {
                     "No model loaded",
                     egui::FontId::proportional(16.0),
                     LABEL_C,
+                );
+                painter.text(
+                    rect.min + egui::vec2(10.0, rect.height() - 10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | Click: select | Esc: clear",
+                    egui::FontId::proportional(11.0),
+                    HELP_C,
                 );
                 return;
             };
@@ -272,7 +428,7 @@ impl eframe::App for ViewportApp {
 
             // ── Draw deformed shape ──
             if self.display.show_deformed {
-                if let Some(ref result) = self.result {
+                if let Some(result) = self.analysis_result() {
                     let deformed = scene
                         .deformed_positions(&result.displacements, self.display.deformation_scale);
                     for &mi in &order {
@@ -300,7 +456,9 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw local axes for selected member ──
-            if let (SelectionState::Member(mi), Some(result)) = (self.selection, &self.result) {
+            if let (SelectionState::Member(mi), Some(result)) =
+                (self.selection, self.analysis_result())
+            {
                 if self.display.show_local_axes {
                     if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
                         if let Some(mid) = scene.member_midpoint(mi) {
@@ -429,26 +587,6 @@ fn fmt(v: f64) -> String {
 
 // ── Side panel sections ─────────────────────────────────────────────────
 impl ViewportApp {
-    fn show_model_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Model")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.label("Portal frame (deterministic)");
-                ui.label(format!("Nodes: {}", self.model.n_nodes()));
-                ui.label(format!("Members: {}", self.model.n_members()));
-                if self.result.is_some() {
-                    ui.label("Status: ✓ Analyzed");
-                } else {
-                    ui.label("Status: ✗ Not analyzed");
-                }
-                if ui.button("Re-solve").clicked() {
-                    self.result = self.model.solve().ok();
-                    self.scene = self.result.as_ref().map(ViewportScene::from_result);
-                    self.selection = SelectionState::None;
-                }
-            });
-    }
-
     fn show_display_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Display")
             .default_open(true)
@@ -461,11 +599,11 @@ impl ViewportApp {
                 ui.checkbox(&mut self.display.show_node_labels, "Node labels");
                 ui.add(
                     egui::Slider::new(&mut self.display.deformation_scale, 0.0..=2000.0)
-                        .text("Deform scale (× actual)")
+                        .text("Deform scale")
                         .logarithmic(true),
                 );
                 ui.label(format!(
-                    "Scale: {:.1}× actual displacement",
+                    "Scale: {:.1}x actual displacement",
                     self.display.deformation_scale
                 ));
             });
@@ -488,7 +626,7 @@ impl ViewportApp {
                             ));
                         }
                     }
-                    if let Some(r) = &self.result {
+                    if let Some(r) = self.analysis_result() {
                         let disp = Dof3D::ALL.map(|d| r.displacement(idx, d).unwrap_or(0.0));
                         ui.label("Displacement:");
                         ui.label(format!(
@@ -498,7 +636,7 @@ impl ViewportApp {
                             fmt(disp[2])
                         ));
                         ui.label(format!(
-                            "  θ = ({}, {}, {})",
+                            "  \u{03b8} = ({}, {}, {})",
                             fmt(disp[3]),
                             fmt(disp[4]),
                             fmt(disp[5])
@@ -523,13 +661,13 @@ impl ViewportApp {
                     ui.strong(format!("Member M{idx}"));
                     if let Some(s) = &self.scene {
                         if let Some(&(ni, nj)) = s.member_nodes.get(idx) {
-                            ui.label(format!("Nodes: N{ni} → N{nj}"));
+                            ui.label(format!("Nodes: N{ni} \u{2192} N{nj}"));
                         }
                         if let Some(len) = s.member_length(idx) {
                             ui.label(format!("Length: {:.4} m", len));
                         }
                     }
-                    if let Some(r) = &self.result {
+                    if let Some(r) = self.analysis_result() {
                         if let Ok(f) = r.member_end_forces(idx) {
                             ui.label("Local end forces:");
                             forces_grid(ui, "local", f);
@@ -540,9 +678,9 @@ impl ViewportApp {
                         }
                         if let Ok((x, y, z)) = r.member_local_axes(idx) {
                             ui.label("Local axes (in global coords):");
-                            ui.label(format!("  x̂ = ({:.4}, {:.4}, {:.4})", x[0], x[1], x[2]));
-                            ui.label(format!("  ŷ = ({:.4}, {:.4}, {:.4})", y[0], y[1], y[2]));
-                            ui.label(format!("  ẑ = ({:.4}, {:.4}, {:.4})", z[0], z[1], z[2]));
+                            ui.label(format!("  x = ({:.4}, {:.4}, {:.4})", x[0], x[1], x[2]));
+                            ui.label(format!("  y = ({:.4}, {:.4}, {:.4})", y[0], y[1], y[2]));
+                            ui.label(format!("  z = ({:.4}, {:.4}, {:.4})", z[0], z[1], z[2]));
                         }
                     }
                 }
@@ -558,12 +696,15 @@ impl ViewportApp {
                     self.camera.target[0], self.camera.target[1], self.camera.target[2]
                 ));
                 ui.label(format!("Distance: {:.2} m", self.camera.distance));
-                ui.label(format!("Azimuth: {:.1}°", self.camera.azimuth.to_degrees()));
                 ui.label(format!(
-                    "Elevation: {:.1}°",
+                    "Azimuth: {:.1}\u{00b0}",
+                    self.camera.azimuth.to_degrees()
+                ));
+                ui.label(format!(
+                    "Elevation: {:.1}\u{00b0}",
                     self.camera.elevation.to_degrees()
                 ));
-                ui.label(format!("FOV: {:.1}°", self.camera.fov.to_degrees()));
+                ui.label(format!("FOV: {:.1}\u{00b0}", self.camera.fov.to_degrees()));
                 if ui.button("Reset view").clicked() {
                     self.camera.reset();
                 }
@@ -614,11 +755,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("3D Viewport PoC — Phase 139"),
+            .with_title("Structural Analysis \u{2014} Phase 142"),
         ..Default::default()
     };
     eframe::run_native(
-        "3D Viewport PoC",
+        "structural-analysis-gui",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
