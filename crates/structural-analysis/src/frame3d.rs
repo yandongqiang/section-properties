@@ -614,6 +614,133 @@ impl Dof3D {
 }
 
 // ---------------------------------------------------------------------------
+// Member loads
+// ---------------------------------------------------------------------------
+
+/// A distributed member load for a 3D frame element.
+///
+/// All intensities are in **local** member coordinates. Positive intensity
+/// follows the positive local axis direction.
+///
+/// # Sign conventions
+///
+/// - **Axial** (`q_x`): positive in local +x.
+/// - **Transverse y** (`q_y`): positive in local +y. Bending about local z
+///   with `θ_z = +dv/dx`. Consistent moments: `+qL²/12` at i, `−qL²/12` at j.
+/// - **Transverse z** (`q_z`): positive in local +z. Bending about local y
+///   with `θ_y = −dw/dx`. Consistent moments: `−qL²/12` at i, `+qL²/12` at j
+///   (signs flipped relative to `q_y` due to the right-hand rule).
+///
+/// For linearly varying loads, `q_i` is the intensity at node i (x=0) and
+/// `q_j` at node j (x=L).
+#[derive(Debug, Clone, Copy)]
+pub enum FrameMemberLoad {
+    /// Uniform distributed force along local x (axial). `q_x` in N/m.
+    UniformAxial {
+        /// Member index.
+        member_idx: usize,
+        /// Force per unit length (N/m), positive in local +x.
+        q_x: f64,
+    },
+    /// Uniform distributed force along local y. `q_y` in N/m.
+    UniformY {
+        /// Member index.
+        member_idx: usize,
+        /// Force per unit length (N/m), positive in local +y.
+        q_y: f64,
+    },
+    /// Uniform distributed force along local z. `q_z` in N/m.
+    UniformZ {
+        /// Member index.
+        member_idx: usize,
+        /// Force per unit length (N/m), positive in local +z.
+        q_z: f64,
+    },
+    /// Linearly varying distributed force along local y.
+    /// `q_i` at node i (x=0), `q_j` at node j (x=L). N/m.
+    LinearY {
+        /// Member index.
+        member_idx: usize,
+        /// Intensity at node i (N/m).
+        q_i: f64,
+        /// Intensity at node j (N/m).
+        q_j: f64,
+    },
+    /// Linearly varying distributed force along local z.
+    /// `q_i` at node i (x=0), `q_j` at node j (x=L). N/m.
+    LinearZ {
+        /// Member index.
+        member_idx: usize,
+        /// Intensity at node i (N/m).
+        q_i: f64,
+        /// Intensity at node j (N/m).
+        q_j: f64,
+    },
+}
+
+impl FrameMemberLoad {
+    /// Return the member index referenced by this load.
+    pub fn member_idx(&self) -> usize {
+        match *self {
+            FrameMemberLoad::UniformAxial { member_idx, .. }
+            | FrameMemberLoad::UniformY { member_idx, .. }
+            | FrameMemberLoad::UniformZ { member_idx, .. }
+            | FrameMemberLoad::LinearY { member_idx, .. }
+            | FrameMemberLoad::LinearZ { member_idx, .. } => member_idx,
+        }
+    }
+
+    /// Compute the 12-component equivalent nodal load vector in **local**
+    /// coordinates.
+    ///
+    /// Derived from the Euler–Bernoulli consistent load formulation
+    /// (shape-function integration). For uniform loads the familiar
+    /// `qL/2` force and `qL²/12` moment coefficients appear. For linearly
+    /// varying loads the exact consistent vector is used (no averaging).
+    ///
+    /// # Bending sign conventions
+    ///
+    /// - **Bending about z** (local y load): `θ_z = +dv/dx`, moments
+    ///   `+qL²/12` at i, `−qL²/12` at j.
+    /// - **Bending about y** (local z load): `θ_y = −dw/dx`, moments
+    ///   `−qL²/12` at i, `+qL²/12` at j.
+    pub fn equivalent_nodal_loads_local(&self, L: f64) -> [f64; 12] {
+        let mut f = [0.0f64; 12];
+        match *self {
+            FrameMemberLoad::UniformAxial { q_x, .. } => {
+                f[0] = q_x * L / 2.0;
+                f[6] = q_x * L / 2.0;
+            }
+            FrameMemberLoad::UniformY { q_y, .. } => {
+                f[1] = q_y * L / 2.0;
+                f[5] = q_y * L * L / 12.0;
+                f[7] = q_y * L / 2.0;
+                f[11] = -q_y * L * L / 12.0;
+            }
+            FrameMemberLoad::UniformZ { q_z, .. } => {
+                f[2] = q_z * L / 2.0;
+                f[4] = -q_z * L * L / 12.0;
+                f[8] = q_z * L / 2.0;
+                f[10] = q_z * L * L / 12.0;
+            }
+            FrameMemberLoad::LinearY { q_i, q_j, .. } => {
+                f[1] = L * (7.0 * q_i + 3.0 * q_j) / 20.0;
+                f[5] = L * L * (3.0 * q_i + 2.0 * q_j) / 60.0;
+                f[7] = L * (3.0 * q_i + 7.0 * q_j) / 20.0;
+                f[11] = -L * L * (2.0 * q_i + 3.0 * q_j) / 60.0;
+            }
+            FrameMemberLoad::LinearZ { q_i, q_j, .. } => {
+                f[2] = L * (7.0 * q_i + 3.0 * q_j) / 20.0;
+                f[4] = -L * L * (3.0 * q_i + 2.0 * q_j) / 60.0;
+                f[8] = L * (3.0 * q_i + 7.0 * q_j) / 20.0;
+                f[10] = L * L * (2.0 * q_i + 3.0 * q_j) / 60.0;
+            }
+        }
+        f
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Node
 // ---------------------------------------------------------------------------
 
@@ -673,6 +800,8 @@ pub struct FrameModel3D {
     pub nodal_forces: Vec<(usize, usize, f64)>,
     /// Fixed DOFs: `(node_idx, dof, prescribed_value)`.
     pub fixed_dofs: Vec<(usize, usize, f64)>,
+    /// Distributed member loads.
+    pub member_loads: Vec<FrameMemberLoad>,
 }
 
 impl Default for FrameModel3D {
@@ -689,6 +818,7 @@ impl FrameModel3D {
             members: Vec::new(),
             nodal_forces: Vec::new(),
             fixed_dofs: Vec::new(),
+            member_loads: Vec::new(),
         }
     }
 
@@ -836,6 +966,108 @@ impl FrameModel3D {
         self.fix_dof(node_idx, Dof3D::Uz, 0.0)
     }
 
+    // --- Member loads -------------------------------------------------------
+
+    /// Add a uniform distributed axial force (local x) to a member.
+    ///
+    /// `q_x` is in N/m, positive in local +x. Multiple calls accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if `q_x` is non-finite.
+    pub fn add_uniform_axial(&mut self, member_idx: usize, q_x: f64) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[q_x])?;
+        self.member_loads
+            .push(FrameMemberLoad::UniformAxial { member_idx, q_x });
+        Ok(())
+    }
+
+    /// Add a uniform distributed transverse force (local y) to a member.
+    ///
+    /// `q_y` is in N/m, positive in local +y. Multiple calls accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if `q_y` is non-finite.
+    pub fn add_uniform_y(&mut self, member_idx: usize, q_y: f64) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[q_y])?;
+        self.member_loads
+            .push(FrameMemberLoad::UniformY { member_idx, q_y });
+        Ok(())
+    }
+
+    /// Add a uniform distributed transverse force (local z) to a member.
+    ///
+    /// `q_z` is in N/m, positive in local +z. Multiple calls accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if `q_z` is non-finite.
+    pub fn add_uniform_z(&mut self, member_idx: usize, q_z: f64) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[q_z])?;
+        self.member_loads
+            .push(FrameMemberLoad::UniformZ { member_idx, q_z });
+        Ok(())
+    }
+
+    /// Add a linearly varying distributed transverse force (local y).
+    ///
+    /// `q_i` at node i (x=0), `q_j` at node j (x=L), in N/m. Multiple calls
+    /// accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if any intensity is non-finite.
+    pub fn add_linear_y(&mut self, member_idx: usize, q_i: f64, q_j: f64) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[q_i, q_j])?;
+        self.member_loads.push(FrameMemberLoad::LinearY {
+            member_idx,
+            q_i,
+            q_j,
+        });
+        Ok(())
+    }
+
+    /// Add a linearly varying distributed transverse force (local z).
+    ///
+    /// `q_i` at node i (x=0), `q_j` at node j (x=L), in N/m. Multiple calls
+    /// accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if any intensity is non-finite.
+    pub fn add_linear_z(&mut self, member_idx: usize, q_i: f64, q_j: f64) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[q_i, q_j])?;
+        self.member_loads.push(FrameMemberLoad::LinearZ {
+            member_idx,
+            q_i,
+            q_j,
+        });
+        Ok(())
+    }
+
+    fn validate_member_load(&self, member_idx: usize, intensities: &[f64]) -> Result<(), FemError> {
+        if member_idx >= self.members.len() {
+            return Err(FemError::InvalidMember(format!(
+                "member index {member_idx} out of bounds (max {})",
+                self.members.len().saturating_sub(1)
+            )));
+        }
+        for &q in intensities {
+            if !q.is_finite() {
+                return Err(FemError::InvalidInput(format!(
+                    "load intensity must be finite, got {q}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Total number of DOFs.
     pub fn n_dof(&self) -> usize {
         self.nodes.len() * 6
@@ -879,6 +1111,7 @@ pub struct FrameSolver3D {
     n_dof: usize,
     model: FrameModel3D,
     solver_selection: SolverSelection,
+    member_equiv_loads: Vec<[f64; 12]>,
 }
 
 impl FrameSolver3D {
@@ -957,6 +1190,53 @@ impl FrameSolver3D {
             f_global[idx] += value;
         }
 
+        // Compute equivalent nodal loads for member loads and add to global RHS.
+        // Also store per-member local equivalent loads for end-force recovery.
+        let mut member_equiv_loads = vec![[0.0f64; 12]; model.members.len()];
+        for load in &model.member_loads {
+            let mid = load.member_idx();
+            if mid >= model.members.len() {
+                return Err(FemError::InvalidMember(format!(
+                    "member load references member {mid} out of bounds (max {})",
+                    model.members.len().saturating_sub(1)
+                )));
+            }
+            let m = &model.members[mid];
+            let pi = model.nodes[m.node_i].coords();
+            let pj = model.nodes[m.node_j].coords();
+            let L = m.length(pi, pj);
+            let f_eq_local = load.equivalent_nodal_loads_local(L);
+
+            // Accumulate local equivalent loads for end-force recovery
+            for i in 0..12 {
+                member_equiv_loads[mid][i] += f_eq_local[i];
+            }
+
+            // Transform to global: f_eq_global = Tᵀ · f_eq_local, then scatter
+            let T = m.transformation_matrix(pi, pj)?;
+            let dof_map = [
+                model.dof_index(m.node_i, 0),
+                model.dof_index(m.node_i, 1),
+                model.dof_index(m.node_i, 2),
+                model.dof_index(m.node_i, 3),
+                model.dof_index(m.node_i, 4),
+                model.dof_index(m.node_i, 5),
+                model.dof_index(m.node_j, 0),
+                model.dof_index(m.node_j, 1),
+                model.dof_index(m.node_j, 2),
+                model.dof_index(m.node_j, 3),
+                model.dof_index(m.node_j, 4),
+                model.dof_index(m.node_j, 5),
+            ];
+            for a in 0..12 {
+                let mut f_global_a = 0.0;
+                for b in 0..12 {
+                    f_global_a += T[b][a] * f_eq_local[b];
+                }
+                f_global[dof_map[a]] += f_global_a;
+            }
+        }
+
         // Apply boundary conditions
         let mut fixed_dofs = vec![false; n_dof];
         let mut prescribed_values = vec![None; n_dof];
@@ -977,6 +1257,7 @@ impl FrameSolver3D {
             n_dof,
             model: model.clone(),
             solver_selection: SolverSelection::Auto,
+            member_equiv_loads,
         })
     }
 
@@ -1086,7 +1367,7 @@ impl FrameSolver3D {
 
         // Recover member end forces (local coordinates)
         let mut member_end_forces = Vec::with_capacity(self.model.members.len());
-        for m in &self.model.members {
+        for (member_idx, m) in self.model.members.iter().enumerate() {
             let pi = self.model.nodes[m.node_i].coords();
             let pj = self.model.nodes[m.node_j].coords();
             let k_local = m.local_stiffness(pi, pj)?;
@@ -1116,12 +1397,16 @@ impl FrameSolver3D {
                 }
             }
 
-            // Local end forces: f_local = K_local · u_local
+            // Local end forces: f_local = K_local · u_local − f_eq_local
+            // The equivalent load correction accounts for distributed member
+            // loads. Without member loads f_eq_local = 0 and this reduces to
+            // the Phase 134 formula.
             let mut f_local = [0.0f64; 12];
             for i in 0..12 {
                 for j in 0..12 {
                     f_local[i] += k_local[i][j] * u_local[j];
                 }
+                f_local[i] -= self.member_equiv_loads[member_idx][i];
             }
 
             member_end_forces.push(f_local);
@@ -1192,8 +1477,9 @@ impl FrameSolver3D {
 /// (transformed to local axes). At a!loaded node, they match the applied
 /// loads (transformed to local axes).
 ///
-/// Computed as `f_local = K_local · T · u_global` (no fixed-end force terms
-/// — this phase has no distributed member loads).
+/// Computed as `f_local = K_local · T · u_global − f_eq_local`, where
+/// `f_eq_local` is the local equivalent nodal load vector from distributed
+/// member loads (zero if no member loads are applied).
 #[derive(Debug, Clone)]
 pub struct FrameAnalysisResult3D {
     /// Full displacement vector `[ux, uy, uz, rx, ry, rz]` per node.

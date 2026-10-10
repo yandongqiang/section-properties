@@ -136,8 +136,8 @@ pub use crate::frame::{
     PreparedFrameAnalysis, StructuralDiagnostic,
 };
 pub use crate::frame3d::{
-    Dof3D, FrameAnalysisResult3D, FrameElement3D, FrameModel3D, FrameNode3D, FrameSection3D,
-    FrameSolver3D,
+    Dof3D, FrameAnalysisResult3D, FrameElement3D, FrameMemberLoad, FrameModel3D, FrameNode3D,
+    FrameSection3D, FrameSolver3D,
 };
 pub use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource};
 pub use crate::postprocessing::{

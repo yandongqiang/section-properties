@@ -7,7 +7,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::needless_range_loop)]
 
-use structural_analysis::{Dof3D, FemError, FrameElement3D, FrameModel3D, FrameSection3D};
+use structural_analysis::{
+    Dof3D, FemError, FrameElement3D, FrameMemberLoad, FrameModel3D, FrameSection3D,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1513,4 +1515,973 @@ fn phase134_result_access_errors() {
     assert!(result.displacement(99, Dof3D::Ux).is_err());
     assert!(result.reaction(99, Dof3D::Ux).is_err());
     assert!(result.member_end_forces(99).is_err());
+}
+
+// ===========================================================================
+// Phase 135: Member loads and equivalent nodal loads tests
+// ===========================================================================
+
+const Q135: f64 = 1e3;
+
+// ---------------------------------------------------------------------------
+// A. Equivalent nodal load vectors (local)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_equiv_load_uniform_axial() {
+    let L = L134;
+    let q = Q135;
+    let load = FrameMemberLoad::UniformAxial {
+        member_idx: 0,
+        q_x: q,
+    };
+    let f = load.equivalent_nodal_loads_local(L);
+    let half = q * L / 2.0;
+    assert!(
+        (f[0] - half).abs() < 1e-12,
+        "f[0]: got {}, expected {}",
+        f[0],
+        half
+    );
+    assert!(
+        (f[6] - half).abs() < 1e-12,
+        "f[6]: got {}, expected {}",
+        f[6],
+        half
+    );
+    for i in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11] {
+        assert!(f[i].abs() < 1e-15, "f[{i}] should be zero, got {}", f[i]);
+    }
+}
+
+#[test]
+fn phase135_equiv_load_uniform_y() {
+    let L = L134;
+    let q = Q135;
+    let load = FrameMemberLoad::UniformY {
+        member_idx: 0,
+        q_y: q,
+    };
+    let f = load.equivalent_nodal_loads_local(L);
+    let half = q * L / 2.0;
+    let mom = q * L * L / 12.0;
+    assert!(
+        (f[1] - half).abs() < 1e-12,
+        "f[1]: got {}, expected {}",
+        f[1],
+        half
+    );
+    assert!(
+        (f[5] - mom).abs() < 1e-12,
+        "f[5]: got {}, expected {}",
+        f[5],
+        mom
+    );
+    assert!(
+        (f[7] - half).abs() < 1e-12,
+        "f[7]: got {}, expected {}",
+        f[7],
+        half
+    );
+    assert!(
+        (f[11] + mom).abs() < 1e-12,
+        "f[11]: got {}, expected {}",
+        f[11],
+        -mom
+    );
+    for i in [0, 2, 3, 4, 6, 8, 9, 10] {
+        assert!(f[i].abs() < 1e-15, "f[{i}] should be zero, got {}", f[i]);
+    }
+}
+
+#[test]
+fn phase135_equiv_load_uniform_z() {
+    let L = L134;
+    let q = Q135;
+    let load = FrameMemberLoad::UniformZ {
+        member_idx: 0,
+        q_z: q,
+    };
+    let f = load.equivalent_nodal_loads_local(L);
+    let half = q * L / 2.0;
+    let mom = q * L * L / 12.0;
+    assert!(
+        (f[2] - half).abs() < 1e-12,
+        "f[2]: got {}, expected {}",
+        f[2],
+        half
+    );
+    assert!(
+        (f[4] + mom).abs() < 1e-12,
+        "f[4]: got {}, expected {}",
+        f[4],
+        -mom
+    );
+    assert!(
+        (f[8] - half).abs() < 1e-12,
+        "f[8]: got {}, expected {}",
+        f[8],
+        half
+    );
+    assert!(
+        (f[10] - mom).abs() < 1e-12,
+        "f[10]: got {}, expected {}",
+        f[10],
+        mom
+    );
+    for i in [0, 1, 3, 5, 6, 7, 9, 11] {
+        assert!(f[i].abs() < 1e-15, "f[{i}] should be zero, got {}", f[i]);
+    }
+}
+
+#[test]
+fn phase135_equiv_load_linear_y() {
+    let L = L134;
+    let qi = Q135;
+    let qj = 0.5 * Q135;
+    let load = FrameMemberLoad::LinearY {
+        member_idx: 0,
+        q_i: qi,
+        q_j: qj,
+    };
+    let f = load.equivalent_nodal_loads_local(L);
+    let fi = L * (7.0 * qi + 3.0 * qj) / 20.0;
+    let mi = L * L * (3.0 * qi + 2.0 * qj) / 60.0;
+    let fj = L * (3.0 * qi + 7.0 * qj) / 20.0;
+    let mj = L * L * (2.0 * qi + 3.0 * qj) / 60.0;
+    assert!(
+        (f[1] - fi).abs() < 1e-12,
+        "f[1]: got {}, expected {}",
+        f[1],
+        fi
+    );
+    assert!(
+        (f[5] - mi).abs() < 1e-12,
+        "f[5]: got {}, expected {}",
+        f[5],
+        mi
+    );
+    assert!(
+        (f[7] - fj).abs() < 1e-12,
+        "f[7]: got {}, expected {}",
+        f[7],
+        fj
+    );
+    assert!(
+        (f[11] + mj).abs() < 1e-12,
+        "f[11]: got {}, expected {}",
+        f[11],
+        -mj
+    );
+    for i in [0, 2, 3, 4, 6, 8, 9, 10] {
+        assert!(f[i].abs() < 1e-15, "f[{i}] should be zero, got {}", f[i]);
+    }
+}
+
+#[test]
+fn phase135_equiv_load_linear_z() {
+    let L = L134;
+    let qi = Q135;
+    let qj = 0.5 * Q135;
+    let load = FrameMemberLoad::LinearZ {
+        member_idx: 0,
+        q_i: qi,
+        q_j: qj,
+    };
+    let f = load.equivalent_nodal_loads_local(L);
+    let fi = L * (7.0 * qi + 3.0 * qj) / 20.0;
+    let mi = L * L * (3.0 * qi + 2.0 * qj) / 60.0;
+    let fj = L * (3.0 * qi + 7.0 * qj) / 20.0;
+    let mj = L * L * (2.0 * qi + 3.0 * qj) / 60.0;
+    assert!(
+        (f[2] - fi).abs() < 1e-12,
+        "f[2]: got {}, expected {}",
+        f[2],
+        fi
+    );
+    assert!(
+        (f[4] + mi).abs() < 1e-12,
+        "f[4]: got {}, expected {}",
+        f[4],
+        -mi
+    );
+    assert!(
+        (f[8] - fj).abs() < 1e-12,
+        "f[8]: got {}, expected {}",
+        f[8],
+        fj
+    );
+    assert!(
+        (f[10] - mj).abs() < 1e-12,
+        "f[10]: got {}, expected {}",
+        f[10],
+        mj
+    );
+    for i in [0, 1, 3, 5, 6, 7, 9, 11] {
+        assert!(f[i].abs() < 1e-15, "f[{i}] should be zero, got {}", f[i]);
+    }
+}
+
+#[test]
+fn phase135_equiv_load_member_idx_and_zero() {
+    let load = FrameMemberLoad::UniformAxial {
+        member_idx: 3,
+        q_x: 0.0,
+    };
+    assert_eq!(load.member_idx(), 3);
+    let f = load.equivalent_nodal_loads_local(L134);
+    for i in 0..12 {
+        assert!(
+            f[i].abs() < 1e-15,
+            "zero load f[{i}] should be zero, got {}",
+            f[i]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B. Cantilever benchmarks (exact for single Euler-Bernoulli element)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_cantilever_uniform_axial() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_axial(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = Q135 * L134 * L134 / (2.0 * E134 * A134);
+    let ux = result.displacement(n1, Dof3D::Ux).unwrap();
+    assert!(
+        (ux - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "axial tip disp: got {ux:.6e}, expected {delta:.6e}"
+    );
+
+    let rx = result.reaction(n0, Dof3D::Ux).unwrap();
+    let expected_rx = -Q135 * L134;
+    assert!(
+        (rx - expected_rx).abs() < 1e-6 * Q135,
+        "axial reaction: got {rx:.6e}, expected {expected_rx:.6e}"
+    );
+}
+
+#[test]
+fn phase135_cantilever_uniform_y() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = Q135 * L134.powi(4) / (8.0 * E134 * IZ134);
+    let theta = Q135 * L134.powi(3) / (6.0 * E134 * IZ134);
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "cantilever uy: got {uy:.6e}, expected {delta:.6e}"
+    );
+
+    let rz = result.displacement(n1, Dof3D::Rz).unwrap();
+    assert!(
+        (rz - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "cantilever rz: got {rz:.6e}, expected {theta:.6e}"
+    );
+
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    assert!(
+        (ry + Q135 * L134).abs() < 1e-6 * Q135,
+        "reaction Ry: got {ry:.6e}, expected {}",
+        -Q135 * L134
+    );
+
+    let mz = result.reaction(n0, Dof3D::Rz).unwrap();
+    let expected_mz = -Q135 * L134 * L134 / 2.0;
+    assert!(
+        (mz - expected_mz).abs() < 1e-6 * Q135 * L134,
+        "reaction Mz: got {mz:.6e}, expected {expected_mz:.6e}"
+    );
+}
+
+#[test]
+fn phase135_cantilever_uniform_z() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_z(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = Q135 * L134.powi(4) / (8.0 * E134 * IY134);
+    let theta = -Q135 * L134.powi(3) / (6.0 * E134 * IY134);
+
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+    assert!(
+        (uz - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "cantilever uz: got {uz:.6e}, expected {delta:.6e}"
+    );
+
+    let ry = result.displacement(n1, Dof3D::Ry).unwrap();
+    assert!(
+        (ry - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "cantilever ry: got {ry:.6e}, expected {theta:.6e}"
+    );
+
+    let rz = result.reaction(n0, Dof3D::Uz).unwrap();
+    assert!(
+        (rz + Q135 * L134).abs() < 1e-6 * Q135,
+        "reaction Rz: got {rz:.6e}, expected {}",
+        -Q135 * L134
+    );
+
+    let my = result.reaction(n0, Dof3D::Ry).unwrap();
+    let expected_my = Q135 * L134 * L134 / 2.0;
+    assert!(
+        (my - expected_my).abs() < 1e-6 * Q135 * L134,
+        "reaction My: got {my:.6e}, expected {expected_my:.6e}"
+    );
+}
+
+#[test]
+fn phase135_cantilever_linear_y() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_linear_y(m0, Q135, 0.0).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = Q135 * L134.powi(4) / (30.0 * E134 * IZ134);
+    let theta = Q135 * L134.powi(3) / (24.0 * E134 * IZ134);
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "linear cantilever uy: got {uy:.6e}, expected {delta:.6e}"
+    );
+
+    let rz = result.displacement(n1, Dof3D::Rz).unwrap();
+    assert!(
+        (rz - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "linear cantilever rz: got {rz:.6e}, expected {theta:.6e}"
+    );
+
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    assert!(
+        (ry + Q135 * L134 / 2.0).abs() < 1e-6 * Q135,
+        "reaction Ry: got {ry:.6e}, expected {}",
+        -Q135 * L134 / 2.0
+    );
+
+    let mz = result.reaction(n0, Dof3D::Rz).unwrap();
+    let expected_mz = -Q135 * L134 * L134 / 6.0;
+    assert!(
+        (mz - expected_mz).abs() < 1e-6 * Q135 * L134,
+        "reaction Mz: got {mz:.6e}, expected {expected_mz:.6e}"
+    );
+}
+
+#[test]
+fn phase135_cantilever_linear_z() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_linear_z(m0, Q135, 0.0).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = Q135 * L134.powi(4) / (30.0 * E134 * IY134);
+    let theta = -Q135 * L134.powi(3) / (24.0 * E134 * IY134);
+
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+    assert!(
+        (uz - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "linear cantilever uz: got {uz:.6e}, expected {delta:.6e}"
+    );
+
+    let ry = result.displacement(n1, Dof3D::Ry).unwrap();
+    assert!(
+        (ry - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "linear cantilever ry: got {ry:.6e}, expected {theta:.6e}"
+    );
+
+    let rz = result.reaction(n0, Dof3D::Uz).unwrap();
+    assert!(
+        (rz + Q135 * L134 / 2.0).abs() < 1e-6 * Q135,
+        "reaction Rz: got {rz:.6e}, expected {}",
+        -Q135 * L134 / 2.0
+    );
+
+    let my = result.reaction(n0, Dof3D::Ry).unwrap();
+    let expected_my = Q135 * L134 * L134 / 6.0;
+    assert!(
+        (my - expected_my).abs() < 1e-6 * Q135 * L134,
+        "reaction My: got {my:.6e}, expected {expected_my:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C. Fixed-fixed beam
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_fixed_fixed_uniform_y() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.fix_node(n1).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    for dof in Dof3D::ALL {
+        let d0 = result.displacement(n0, dof).unwrap();
+        let d1 = result.displacement(n1, dof).unwrap();
+        assert!(d0.abs() < 1e-12, "disp at n0 {:?}: got {d0:.6e}", dof);
+        assert!(d1.abs() < 1e-12, "disp at n1 {:?}: got {d1:.6e}", dof);
+    }
+
+    let ry0 = result.reaction(n0, Dof3D::Uy).unwrap();
+    let ry1 = result.reaction(n1, Dof3D::Uy).unwrap();
+    let expected_ry = -Q135 * L134 / 2.0;
+    assert!(
+        (ry0 - expected_ry).abs() < 1e-6 * Q135,
+        "Ry0: got {ry0:.6e}, expected {expected_ry:.6e}"
+    );
+    assert!(
+        (ry1 - expected_ry).abs() < 1e-6 * Q135,
+        "Ry1: got {ry1:.6e}, expected {expected_ry:.6e}"
+    );
+
+    let mz0 = result.reaction(n0, Dof3D::Rz).unwrap();
+    let mz1 = result.reaction(n1, Dof3D::Rz).unwrap();
+    let expected_mz0 = -Q135 * L134 * L134 / 12.0;
+    let expected_mz1 = Q135 * L134 * L134 / 12.0;
+    assert!(
+        (mz0 - expected_mz0).abs() < 1e-6 * Q135 * L134,
+        "Mz0: got {mz0:.6e}, expected {expected_mz0:.6e}"
+    );
+    assert!(
+        (mz1 - expected_mz1).abs() < 1e-6 * Q135 * L134,
+        "Mz1: got {mz1:.6e}, expected {expected_mz1:.6e}"
+    );
+
+    let f = result.member_end_forces(m0).unwrap();
+    assert!(
+        (f[1] - expected_ry).abs() < 1e-6 * Q135,
+        "f[1]: got {}, expected {expected_ry}",
+        f[1]
+    );
+    assert!(
+        (f[5] - expected_mz0).abs() < 1e-6 * Q135 * L134,
+        "f[5]: got {}, expected {expected_mz0}",
+        f[5]
+    );
+    assert!(
+        (f[7] - expected_ry).abs() < 1e-6 * Q135,
+        "f[7]: got {}, expected {expected_ry}",
+        f[7]
+    );
+    assert!(
+        (f[11] - expected_mz1).abs() < 1e-6 * Q135 * L134,
+        "f[11]: got {}, expected {expected_mz1}",
+        f[11]
+    );
+}
+
+#[test]
+fn phase135_fixed_fixed_uniform_z() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.fix_node(n1).unwrap();
+    model.add_uniform_z(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let rz0 = result.reaction(n0, Dof3D::Uz).unwrap();
+    let rz1 = result.reaction(n1, Dof3D::Uz).unwrap();
+    let expected_rz = -Q135 * L134 / 2.0;
+    assert!(
+        (rz0 - expected_rz).abs() < 1e-6 * Q135,
+        "Rz0: got {rz0:.6e}, expected {expected_rz:.6e}"
+    );
+    assert!(
+        (rz1 - expected_rz).abs() < 1e-6 * Q135,
+        "Rz1: got {rz1:.6e}, expected {expected_rz:.6e}"
+    );
+
+    let my0 = result.reaction(n0, Dof3D::Ry).unwrap();
+    let my1 = result.reaction(n1, Dof3D::Ry).unwrap();
+    let expected_my0 = Q135 * L134 * L134 / 12.0;
+    let expected_my1 = -Q135 * L134 * L134 / 12.0;
+    assert!(
+        (my0 - expected_my0).abs() < 1e-6 * Q135 * L134,
+        "My0: got {my0:.6e}, expected {expected_my0:.6e}"
+    );
+    assert!(
+        (my1 - expected_my1).abs() < 1e-6 * Q135 * L134,
+        "My1: got {my1:.6e}, expected {expected_my1:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D. Simply supported beam (rotations exact for single element)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_simply_supported_uniform_y() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.pin_node(n0).unwrap();
+    model.pin_node(n1).unwrap();
+    model.fix_dof(n0, Dof3D::Rx, 0.0).unwrap();
+    model.fix_dof(n1, Dof3D::Rx, 0.0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let theta_i = Q135 * L134.powi(3) / (24.0 * E134 * IZ134);
+    let theta_j = -theta_i;
+
+    let rz0 = result.displacement(n0, Dof3D::Rz).unwrap();
+    let rz1 = result.displacement(n1, Dof3D::Rz).unwrap();
+    assert!(
+        (rz0 - theta_i).abs() < 1e-10 * (1.0 + theta_i.abs()),
+        "rotation at i: got {rz0:.6e}, expected {theta_i:.6e}"
+    );
+    assert!(
+        (rz1 - theta_j).abs() < 1e-10 * (1.0 + theta_j.abs()),
+        "rotation at j: got {rz1:.6e}, expected {theta_j:.6e}"
+    );
+
+    let ry0 = result.reaction(n0, Dof3D::Uy).unwrap();
+    let ry1 = result.reaction(n1, Dof3D::Uy).unwrap();
+    let expected_ry = -Q135 * L134 / 2.0;
+    assert!(
+        (ry0 - expected_ry).abs() < 1e-6 * Q135,
+        "Ry0: got {ry0:.6e}, expected {expected_ry:.6e}"
+    );
+    assert!(
+        (ry1 - expected_ry).abs() < 1e-6 * Q135,
+        "Ry1: got {ry1:.6e}, expected {expected_ry:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E. Oblique member — local-to-global transformation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_oblique_cantilever_uniform_y() {
+    let s2 = 2.0_f64.sqrt();
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134 / s2, L134 / s2, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 0.0, 1.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta_z = Q135 * L134.powi(4) / (8.0 * E134 * IZ134);
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+    assert!(
+        (uz - delta_z).abs() < 1e-10 * (1.0 + delta_z.abs()),
+        "oblique tip uz: got {uz:.6e}, expected {delta_z:.6e}"
+    );
+
+    let rx = result.reaction(n0, Dof3D::Ux).unwrap();
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    let rz = result.reaction(n0, Dof3D::Uz).unwrap();
+    assert!(rx.abs() < 1e-6 * Q135, "Rx should be zero, got {rx:.6e}");
+    assert!(ry.abs() < 1e-6 * Q135, "Ry should be zero, got {ry:.6e}");
+    assert!(
+        (rz + Q135 * L134).abs() < 1e-6 * Q135,
+        "Rz: got {rz:.6e}, expected {}",
+        -Q135 * L134
+    );
+
+    let mx = result.reaction(n0, Dof3D::Rx).unwrap();
+    let my = result.reaction(n0, Dof3D::Ry).unwrap();
+    let mz = result.reaction(n0, Dof3D::Rz).unwrap();
+    let expected_mx = -Q135 * L134 * L134 / (2.0 * s2);
+    let expected_my = Q135 * L134 * L134 / (2.0 * s2);
+    assert!(
+        (mx - expected_mx).abs() < 1e-6 * Q135 * L134,
+        "Mx: got {mx:.6e}, expected {expected_mx:.6e}"
+    );
+    assert!(
+        (my - expected_my).abs() < 1e-6 * Q135 * L134,
+        "My: got {my:.6e}, expected {expected_my:.6e}"
+    );
+    assert!(
+        mz.abs() < 1e-6 * Q135 * L134,
+        "Mz should be zero, got {mz:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F. End-force recovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_end_forces_cantilever_y() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+    let f = result.member_end_forces(m0).unwrap();
+
+    assert!(
+        (f[1] + Q135 * L134).abs() < 1e-6 * Q135,
+        "f[1] (shear at i): got {}, expected {}",
+        f[1],
+        -Q135 * L134
+    );
+    assert!(
+        (f[5] + Q135 * L134 * L134 / 2.0).abs() < 1e-6 * Q135 * L134,
+        "f[5] (moment at i): got {}, expected {}",
+        f[5],
+        -Q135 * L134 * L134 / 2.0
+    );
+    assert!(
+        f[7].abs() < 1e-6 * Q135,
+        "f[7] (shear at j): got {}, expected 0",
+        f[7]
+    );
+    assert!(
+        f[11].abs() < 1e-6 * Q135 * L134,
+        "f[11] (moment at j): got {}, expected 0",
+        f[11]
+    );
+
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    let mz = result.reaction(n0, Dof3D::Rz).unwrap();
+    assert!((f[1] - ry).abs() < 1e-10, "f[1] should match Ry reaction");
+    assert!((f[5] - mz).abs() < 1e-10, "f[5] should match Mz reaction");
+}
+
+#[test]
+fn phase135_end_forces_cantilever_z() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_z(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+    let f = result.member_end_forces(m0).unwrap();
+
+    assert!(
+        (f[2] + Q135 * L134).abs() < 1e-6 * Q135,
+        "f[2] (shear at i): got {}, expected {}",
+        f[2],
+        -Q135 * L134
+    );
+    assert!(
+        (f[4] - Q135 * L134 * L134 / 2.0).abs() < 1e-6 * Q135 * L134,
+        "f[4] (moment at i): got {}, expected {}",
+        f[4],
+        Q135 * L134 * L134 / 2.0
+    );
+    assert!(
+        f[8].abs() < 1e-6 * Q135,
+        "f[8] (shear at j): got {}, expected 0",
+        f[8]
+    );
+    assert!(
+        f[10].abs() < 1e-6 * Q135 * L134,
+        "f[10] (moment at j): got {}, expected 0",
+        f[10]
+    );
+
+    let rz = result.reaction(n0, Dof3D::Uz).unwrap();
+    let my = result.reaction(n0, Dof3D::Ry).unwrap();
+    assert!((f[2] - rz).abs() < 1e-10, "f[2] should match Rz reaction");
+    assert!((f[4] - my).abs() < 1e-10, "f[4] should match My reaction");
+}
+
+// ---------------------------------------------------------------------------
+// G. Edge cases and regression
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase135_zero_member_load_regression() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = p * L134.powi(3) / (3.0 * E134 * IZ134);
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "regression uy: got {uy:.6e}, expected {delta:.6e}"
+    );
+
+    let f = result.member_end_forces(m0).unwrap();
+    assert!(
+        (f[1] + p).abs() < 1e-6 * p,
+        "f[1]: got {}, expected {}",
+        f[1],
+        -p
+    );
+    assert!(
+        (f[5] + p * L134).abs() < 1e-6 * p,
+        "f[5]: got {}, expected {}",
+        f[5],
+        -p * L134
+    );
+    assert!(
+        (f[7] - p).abs() < 1e-6 * p,
+        "f[7]: got {}, expected {p}",
+        f[7]
+    );
+    assert!(f[11].abs() < 1e-6 * p, "f[11]: got {}, expected 0", f[11]);
+}
+
+#[test]
+fn phase135_multiple_additive_loads() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.fix_node(n1).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+    model.add_uniform_y(m0, 2.0 * Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let q_total = 3.0 * Q135;
+    let ry0 = result.reaction(n0, Dof3D::Uy).unwrap();
+    let expected_ry = -q_total * L134 / 2.0;
+    assert!(
+        (ry0 - expected_ry).abs() < 1e-6 * q_total,
+        "additive Ry0: got {ry0:.6e}, expected {expected_ry:.6e}"
+    );
+
+    let mz0 = result.reaction(n0, Dof3D::Rz).unwrap();
+    let expected_mz = -q_total * L134 * L134 / 12.0;
+    assert!(
+        (mz0 - expected_mz).abs() < 1e-6 * q_total * L134,
+        "additive Mz0: got {mz0:.6e}, expected {expected_mz:.6e}"
+    );
+}
+
+#[test]
+fn phase135_invalid_member_idx() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+
+    assert!(model.add_uniform_axial(99, Q135).is_err());
+    assert!(model.add_uniform_y(99, Q135).is_err());
+    assert!(model.add_uniform_z(99, Q135).is_err());
+    assert!(model.add_linear_y(99, Q135, 0.0).is_err());
+    assert!(model.add_linear_z(99, Q135, 0.0).is_err());
+}
+
+#[test]
+fn phase135_nan_intensity_rejected() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+
+    assert!(model.add_uniform_axial(m0, f64::NAN).is_err());
+    assert!(model.add_uniform_y(m0, f64::NAN).is_err());
+    assert!(model.add_uniform_z(m0, f64::NAN).is_err());
+    assert!(model.add_linear_y(m0, f64::NAN, 0.0).is_err());
+    assert!(model.add_linear_y(m0, 0.0, f64::NAN).is_err());
+    assert!(model.add_linear_z(m0, f64::INFINITY, 0.0).is_err());
+}
+
+#[test]
+fn phase135_repeated_solve() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let solver = structural_analysis::FrameSolver3D::from_model(&model).unwrap();
+    let r1 = solver.solve().unwrap();
+    let r2 = solver.solve().unwrap();
+
+    let uy1 = r1.displacement(n1, Dof3D::Uy).unwrap();
+    let uy2 = r2.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy1 - uy2).abs() < 1e-15,
+        "repeated solve mismatch: {uy1:.6e} vs {uy2:.6e}"
+    );
+
+    let f1 = r1.member_end_forces(m0).unwrap();
+    let f2 = r2.member_end_forces(m0).unwrap();
+    for i in 0..12 {
+        assert!((f1[i] - f2[i]).abs() < 1e-15, "end force {i} mismatch");
+    }
+}
+
+#[test]
+fn phase135_mixed_nodal_and_member_load() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 500.0_f64;
+    model
+        .add_nodal_load(n1, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta_p = p * L134.powi(3) / (3.0 * E134 * IZ134);
+    let delta_q = Q135 * L134.powi(4) / (8.0 * E134 * IZ134);
+    let delta = delta_p + delta_q;
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "mixed uy: got {uy:.6e}, expected {delta:.6e}"
+    );
+
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    let expected_ry = -(p + Q135 * L134);
+    assert!(
+        (ry - expected_ry).abs() < 1e-6 * (p + Q135),
+        "mixed Ry: got {ry:.6e}, expected {expected_ry:.6e}"
+    );
+}
+
+#[test]
+fn phase135_both_planes_and_scale() {
+    let L = 2.0_f64;
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L, 0.0, 0.0).unwrap();
+    let m0 = model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.add_uniform_y(m0, Q135).unwrap();
+    model.add_uniform_z(m0, Q135).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta_y = Q135 * L.powi(4) / (8.0 * E134 * IZ134);
+    let theta_z = Q135 * L.powi(3) / (6.0 * E134 * IZ134);
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta_y).abs() < 1e-10 * (1.0 + delta_y.abs()),
+        "both planes uy: got {uy:.6e}, expected {delta_y:.6e}"
+    );
+
+    let rz = result.displacement(n1, Dof3D::Rz).unwrap();
+    assert!(
+        (rz - theta_z).abs() < 1e-10 * (1.0 + theta_z.abs()),
+        "both planes rz: got {rz:.6e}, expected {theta_z:.6e}"
+    );
+
+    let delta_z = Q135 * L.powi(4) / (8.0 * E134 * IY134);
+    let theta_y = -Q135 * L.powi(3) / (6.0 * E134 * IY134);
+
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+    assert!(
+        (uz - delta_z).abs() < 1e-10 * (1.0 + delta_z.abs()),
+        "both planes uz: got {uz:.6e}, expected {delta_z:.6e}"
+    );
+
+    let ry = result.displacement(n1, Dof3D::Ry).unwrap();
+    assert!(
+        (ry - theta_y).abs() < 1e-10 * (1.0 + theta_y.abs()),
+        "both planes ry: got {ry:.6e}, expected {theta_y:.6e}"
+    );
+
+    let r_y = result.reaction(n0, Dof3D::Uy).unwrap();
+    let r_z = result.reaction(n0, Dof3D::Uz).unwrap();
+    let m_y = result.reaction(n0, Dof3D::Ry).unwrap();
+    let m_z = result.reaction(n0, Dof3D::Rz).unwrap();
+    assert!((r_y + Q135 * L).abs() < 1e-6 * Q135, "Ry: got {r_y:.6e}");
+    assert!((r_z + Q135 * L).abs() < 1e-6 * Q135, "Rz: got {r_z:.6e}");
+    assert!(
+        (m_y - Q135 * L * L / 2.0).abs() < 1e-6 * Q135 * L,
+        "My: got {m_y:.6e}"
+    );
+    assert!(
+        (m_z + Q135 * L * L / 2.0).abs() < 1e-6 * Q135 * L,
+        "Mz: got {m_z:.6e}"
+    );
 }
