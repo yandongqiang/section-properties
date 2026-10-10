@@ -1,9 +1,4 @@
 //! Performance: measure projection cost for small and medium synthetic models.
-//!
-//! This test prints results with `--nocapture`.  It does NOT claim to measure
-//! full frame rendering time (which includes egui painting, input handling,
-//! and compositing).  It measures only the 3-D-to-2-D projection cost, which
-//! is the viewport-specific portion of the render loop.
 
 use std::time::Instant;
 use viewport_poc::{camera::Camera3D, model, scene::ViewportScene};
@@ -16,9 +11,8 @@ fn projection_performance() {
     println!("  Rendering mode: software projection via egui 2D painter (no custom GPU shaders)\n");
 
     for n in [1, 2, 3, 5, 8, 10] {
-        let m = model::build_grid_frame(n, n);
-        let result = m.solve().expect("solve");
-        let scene = ViewportScene::from_result(&result);
+        let m = model::build_grid_edit(n, n);
+        let scene = ViewportScene::from_edit_model(&m);
         let (min, max) = scene.bounding_box();
         let cam = Camera3D::fit(min, max);
         let w = 1200.0;

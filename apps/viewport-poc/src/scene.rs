@@ -1,34 +1,53 @@
-//! Display geometry extracted from the solver result.
+//! Display geometry extracted from the editable model.
 //!
-//! The scene stores only what the renderer needs: node positions and member
-//! connectivity.  It never holds a reference to the solver or model, so camera
-//! and selection operations cannot mutate the analysis data.
+//! The scene stores only what the renderer needs: node positions, member
+//! connectivity, and stable ID mappings for selection.  It never holds a
+//! reference to the solver or model, so camera and selection operations
+//! cannot mutate the analysis data.
 
+use crate::edit_model::{EditModel, MemberId, NodeId};
 use crate::project::Vec3;
-use structural_analysis::FrameAnalysisResult3D;
 
 /// Stable display geometry.
 #[derive(Debug, Clone)]
 pub struct ViewportScene {
     /// Node positions in world coordinates.
     pub node_positions: Vec<Vec3>,
+    /// Stable node ID for each entry (parallel to `node_positions`).
+    pub node_ids: Vec<NodeId>,
     /// Member connectivity as `(node_i_idx, node_j_idx)`.
     pub member_nodes: Vec<(usize, usize)>,
+    /// Stable member ID for each entry (parallel to `member_nodes`).
+    pub member_ids: Vec<MemberId>,
     /// Member reference vectors (one per member).
     pub member_ref_vecs: Vec<Vec3>,
 }
 
 impl ViewportScene {
-    /// Build from an analysis result.
-    pub fn from_result(result: &FrameAnalysisResult3D) -> Self {
+    /// Build from an [`EditModel`].
+    pub fn from_edit_model(model: &EditModel) -> Self {
+        let node_positions: Vec<Vec3> = model.nodes().iter().map(|n| [n.x, n.y, n.z]).collect();
+        let node_ids: Vec<NodeId> = model.nodes().iter().map(|n| n.id).collect();
+
+        let member_nodes: Vec<(usize, usize)> = model
+            .members()
+            .iter()
+            .map(|m| {
+                (
+                    model.node_index(m.node_i).unwrap_or(usize::MAX),
+                    model.node_index(m.node_j).unwrap_or(usize::MAX),
+                )
+            })
+            .collect();
+        let member_ids: Vec<MemberId> = model.members().iter().map(|m| m.id).collect();
+        let member_ref_vecs: Vec<Vec3> = model.members().iter().map(|m| m.ref_vec).collect();
+
         Self {
-            node_positions: result
-                .node_coords
-                .iter()
-                .map(|(x, y, z)| [*x, *y, *z])
-                .collect(),
-            member_nodes: result.member_nodes.clone(),
-            member_ref_vecs: result.member_ref_vecs.clone(),
+            node_positions,
+            node_ids,
+            member_nodes,
+            member_ids,
+            member_ref_vecs,
         }
     }
 
@@ -40,6 +59,16 @@ impl ViewportScene {
     /// Number of members.
     pub fn n_members(&self) -> usize {
         self.member_nodes.len()
+    }
+
+    /// Look up the Vec index for a stable node ID.
+    pub fn node_index(&self, id: NodeId) -> Option<usize> {
+        self.node_ids.iter().position(|&nid| nid == id)
+    }
+
+    /// Look up the Vec index for a stable member ID.
+    pub fn member_index(&self, id: MemberId) -> Option<usize> {
+        self.member_ids.iter().position(|&mid| mid == id)
     }
 
     /// Axis-aligned bounding box of the node positions.
@@ -121,7 +150,9 @@ mod tests {
     fn dummy_scene() -> ViewportScene {
         ViewportScene {
             node_positions: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]],
+            node_ids: vec![NodeId(0), NodeId(1), NodeId(2)],
             member_nodes: vec![(0, 1), (0, 2)],
+            member_ids: vec![MemberId(0), MemberId(1)],
             member_ref_vecs: vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
         }
     }
@@ -138,7 +169,9 @@ mod tests {
     fn empty_bounding_box() {
         let s = ViewportScene {
             node_positions: vec![],
+            node_ids: vec![],
             member_nodes: vec![],
+            member_ids: vec![],
             member_ref_vecs: vec![],
         };
         let (min, max) = s.bounding_box();
@@ -213,5 +246,20 @@ mod tests {
         let s = dummy_scene();
         assert!((s.member_length(0).unwrap() - 2.0).abs() < 1e-15);
         assert!((s.member_length(1).unwrap() - 3.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn node_index_lookup() {
+        let s = dummy_scene();
+        assert_eq!(s.node_index(NodeId(0)), Some(0));
+        assert_eq!(s.node_index(NodeId(2)), Some(2));
+        assert_eq!(s.node_index(NodeId(99)), None);
+    }
+
+    #[test]
+    fn member_index_lookup() {
+        let s = dummy_scene();
+        assert_eq!(s.member_index(MemberId(0)), Some(0));
+        assert_eq!(s.member_index(MemberId(99)), None);
     }
 }

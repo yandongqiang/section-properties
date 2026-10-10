@@ -9,6 +9,7 @@ use viewport_poc::{
     app_state::{AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
+    edit_model::{EditModel, NodeId},
     model, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -38,6 +39,11 @@ struct ViewportApp {
     selection: SelectionState,
     display: ResultDisplayState,
     messages: Vec<AppMessage>,
+    new_node_x: String,
+    new_node_y: String,
+    new_node_z: String,
+    new_member_i: String,
+    new_member_j: String,
 }
 
 impl ViewportApp {
@@ -51,6 +57,11 @@ impl ViewportApp {
             messages: vec![AppMessage::info(
                 "Application started. Select a model from the browser.",
             )],
+            new_node_x: String::new(),
+            new_node_y: String::new(),
+            new_node_z: String::new(),
+            new_member_i: String::new(),
+            new_member_j: String::new(),
         }
     }
 
@@ -62,11 +73,25 @@ impl ViewportApp {
     /// Load a preset model and immediately solve it.
     fn load_preset(&mut self, preset: model::PresetModel) {
         let name = preset.name().to_string();
-        let m = preset.build();
+        let m = preset.build_edit();
         self.project.load_model(name, m);
         self.messages
             .push(AppMessage::info(format!("Loaded '{}'", preset.name())));
+        self.rebuild_scene();
         self.run_solve();
+    }
+
+    /// Rebuild the viewport scene from the current edit model.
+    fn rebuild_scene(&mut self) {
+        if let Some(ref model) = self.project.model {
+            self.scene = Some(ViewportScene::from_edit_model(model));
+            if let Some(ref s) = self.scene {
+                let (min, max) = s.bounding_box();
+                self.camera = Camera3D::fit(min, max);
+            }
+        } else {
+            self.scene = None;
+        }
     }
 
     /// Run the FEM analysis and rebuild the viewport scene.
@@ -76,20 +101,11 @@ impl ViewportApp {
     fn run_solve(&mut self) {
         match self.project.solve() {
             Ok(()) => {
-                if let Some(ref analysis) = self.project.analysis {
-                    self.scene = Some(ViewportScene::from_result(&analysis.result));
-                    if let Some(ref s) = self.scene {
-                        let (min, max) = s.bounding_box();
-                        self.camera = Camera3D::fit(min, max);
-                    }
-                }
-                self.selection = SelectionState::None;
                 self.messages.push(AppMessage::info("Analysis complete."));
             }
             Err(e) => {
                 self.messages
                     .push(AppMessage::error(format!("Analysis failed: {e}")));
-                self.scene = None;
             }
         }
     }
@@ -106,10 +122,10 @@ impl ViewportApp {
     fn validate_selection(&mut self) {
         if let Some(ref scene) = self.scene {
             match self.selection {
-                SelectionState::Node(i) if i >= scene.n_nodes() => {
+                SelectionState::Node(id) if scene.node_index(id).is_none() => {
                     self.selection = SelectionState::None;
                 }
-                SelectionState::Member(i) if i >= scene.n_members() => {
+                SelectionState::Member(id) if scene.member_index(id).is_none() => {
                     self.selection = SelectionState::None;
                 }
                 _ => {}
@@ -158,13 +174,13 @@ impl ViewportApp {
         match (best_node, best_mem) {
             (Some((ni, nd)), Some((mi, md))) => {
                 if nd < md {
-                    SelectionState::Node(ni)
+                    SelectionState::Node(scene.node_ids[ni])
                 } else {
-                    SelectionState::Member(mi)
+                    SelectionState::Member(scene.member_ids[mi])
                 }
             }
-            (Some((ni, _)), None) => SelectionState::Node(ni),
-            (None, Some((mi, _))) => SelectionState::Member(mi),
+            (Some((ni, _)), None) => SelectionState::Node(scene.node_ids[ni]),
+            (None, Some((mi, _))) => SelectionState::Member(scene.member_ids[mi]),
             (None, None) => SelectionState::None,
         }
     }
@@ -176,7 +192,14 @@ impl eframe::App for ViewportApp {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New (empty)").clicked() {
+                    if ui.button("New (empty model)").clicked() {
+                        self.project.load_model("Untitled".into(), EditModel::new());
+                        self.rebuild_scene();
+                        self.selection = SelectionState::None;
+                        self.messages.push(AppMessage::info("Created empty model."));
+                        ui.close_menu();
+                    }
+                    if ui.button("Clear project").clicked() {
                         self.clear_project();
                         ui.close_menu();
                     }
@@ -256,6 +279,12 @@ impl eframe::App for ViewportApp {
                     }
                 }
                 ui.separator();
+                if ui.button("New empty model").clicked() {
+                    self.project.load_model("Untitled".into(), EditModel::new());
+                    self.rebuild_scene();
+                    self.selection = SelectionState::None;
+                    self.messages.push(AppMessage::info("Created empty model."));
+                }
                 if ui.button("Clear project").clicked() {
                     self.clear_project();
                 }
@@ -267,6 +296,8 @@ impl eframe::App for ViewportApp {
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.show_edit_section(ui);
+                    self.show_model_contents_section(ui);
                     self.show_display_section(ui);
                     self.show_selection_section(ui);
                     self.show_camera_section(ui);
@@ -400,7 +431,7 @@ impl eframe::App for ViewportApp {
                     let Some(pb) = self.camera.project(pj, w, h) else {
                         continue;
                     };
-                    let is_sel = self.selection == SelectionState::Member(mi);
+                    let is_sel = self.selection == SelectionState::Member(scene.member_ids[mi]);
                     let (wd, col) = if is_sel {
                         (4.0, SELECTED_C)
                     } else {
@@ -419,7 +450,7 @@ impl eframe::App for ViewportApp {
                     let Some(p) = self.camera.project(pos, w, h) else {
                         continue;
                     };
-                    let is_sel = self.selection == SelectionState::Node(i);
+                    let is_sel = self.selection == SelectionState::Node(scene.node_ids[i]);
                     let r = if is_sel { 7.0 } else { 5.0 };
                     let col = if is_sel { SELECTED_C } else { NODE_C };
                     painter.circle_filled(scr(&p, rect), r, col);
@@ -456,22 +487,24 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw local axes for selected member ──
-            if let (SelectionState::Member(mi), Some(result)) =
+            if let (SelectionState::Member(mid), Some(result)) =
                 (self.selection, self.analysis_result())
             {
                 if self.display.show_local_axes {
-                    if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
-                        if let Some(mid) = scene.member_midpoint(mi) {
-                            draw_local_axes(
-                                &self.camera,
-                                w,
-                                h,
-                                rect,
-                                &painter,
-                                mid,
-                                [xh, yh, zh],
-                                0.5,
-                            );
+                    if let Some(mi) = scene.member_index(mid) {
+                        if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
+                            if let Some(mpos) = scene.member_midpoint(mi) {
+                                draw_local_axes(
+                                    &self.camera,
+                                    w,
+                                    h,
+                                    rect,
+                                    &painter,
+                                    mpos,
+                                    [xh, yh, zh],
+                                    0.5,
+                                );
+                            }
                         }
                     }
                 }
@@ -486,7 +519,7 @@ impl eframe::App for ViewportApp {
                     painter.text(
                         scr(&p, rect) + egui::vec2(8.0, 0.0),
                         egui::Align2::LEFT_CENTER,
-                        format!("N{i}"),
+                        format!("N{}", scene.node_ids[i].0),
                         egui::FontId::proportional(10.0),
                         LABEL_C,
                     );
@@ -609,82 +642,319 @@ impl ViewportApp {
             });
     }
 
-    fn show_selection_section(&self, ui: &mut egui::Ui) {
+    fn show_selection_section(&mut self, ui: &mut egui::Ui) {
+        let sel = self.selection;
         egui::CollapsingHeader::new("Selection")
             .default_open(true)
-            .show(ui, |ui| match self.selection {
+            .show(ui, |ui| match sel {
                 SelectionState::None => {
                     ui.label("Nothing selected. Click a node or member.");
                 }
-                SelectionState::Node(idx) => {
-                    ui.strong(format!("Node N{idx}"));
-                    if let Some(s) = &self.scene {
-                        if let Some(&p) = s.node_positions.get(idx) {
-                            ui.label(format!(
-                                "Position: ({:.3}, {:.3}, {:.3}) m",
-                                p[0], p[1], p[2]
-                            ));
+                SelectionState::Node(id) => {
+                    ui.strong(format!("Node N{}", id.0));
+
+                    let mut changed = false;
+                    let mut new_coords = (0.0, 0.0, 0.0);
+                    if let Some(model) = self.project.model.as_ref() {
+                        if let Some(node) = model.node(id) {
+                            let mut x = node.x;
+                            let mut y = node.y;
+                            let mut z = node.z;
+                            ui.horizontal(|ui| {
+                                ui.label("x:");
+                                ui.add(egui::DragValue::new(&mut x).speed(0.1).range(-1e6..=1e6));
+                                ui.label("y:");
+                                ui.add(egui::DragValue::new(&mut y).speed(0.1).range(-1e6..=1e6));
+                                ui.label("z:");
+                                ui.add(egui::DragValue::new(&mut z).speed(0.1).range(-1e6..=1e6));
+                            });
+                            if (x, y, z) != (node.x, node.y, node.z) {
+                                changed = true;
+                                new_coords = (x, y, z);
+                            }
                         }
                     }
-                    if let Some(r) = self.analysis_result() {
-                        let disp = Dof3D::ALL.map(|d| r.displacement(idx, d).unwrap_or(0.0));
-                        ui.label("Displacement:");
-                        ui.label(format!(
-                            "  u = ({}, {}, {})",
-                            fmt(disp[0]),
-                            fmt(disp[1]),
-                            fmt(disp[2])
-                        ));
-                        ui.label(format!(
-                            "  \u{03b8} = ({}, {}, {})",
-                            fmt(disp[3]),
-                            fmt(disp[4]),
-                            fmt(disp[5])
-                        ));
-                        let reac = Dof3D::ALL.map(|d| r.reaction(idx, d).unwrap_or(0.0));
-                        ui.label("Reaction:");
-                        ui.label(format!(
-                            "  R = ({}, {}, {})",
-                            fmt(reac[0]),
-                            fmt(reac[1]),
-                            fmt(reac[2])
-                        ));
-                        ui.label(format!(
-                            "  M = ({}, {}, {})",
-                            fmt(reac[3]),
-                            fmt(reac[4]),
-                            fmt(reac[5])
-                        ));
+                    if changed {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.update_node(id, new_coords.0, new_coords.1, new_coords.2) {
+                                Ok(()) => {
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
+                    }
+
+                    if let Some(s) = &self.scene {
+                        if let Some(idx) = s.node_index(id) {
+                            if let Some(&p) = s.node_positions.get(idx) {
+                                ui.label(format!(
+                                    "Position: ({:.3}, {:.3}, {:.3}) m",
+                                    p[0], p[1], p[2]
+                                ));
+                            }
+                            if let Some(r) = self.analysis_result() {
+                                let disp =
+                                    Dof3D::ALL.map(|d| r.displacement(idx, d).unwrap_or(0.0));
+                                ui.label("Displacement:");
+                                ui.label(format!(
+                                    "  u = ({}, {}, {})",
+                                    fmt(disp[0]),
+                                    fmt(disp[1]),
+                                    fmt(disp[2])
+                                ));
+                                ui.label(format!(
+                                    "  \u{03b8} = ({}, {}, {})",
+                                    fmt(disp[3]),
+                                    fmt(disp[4]),
+                                    fmt(disp[5])
+                                ));
+                                let reac = Dof3D::ALL.map(|d| r.reaction(idx, d).unwrap_or(0.0));
+                                ui.label("Reaction:");
+                                ui.label(format!(
+                                    "  R = ({}, {}, {})",
+                                    fmt(reac[0]),
+                                    fmt(reac[1]),
+                                    fmt(reac[2])
+                                ));
+                                ui.label(format!(
+                                    "  M = ({}, {}, {})",
+                                    fmt(reac[3]),
+                                    fmt(reac[4]),
+                                    fmt(reac[5])
+                                ));
+                            }
+                        }
+                    }
+
+                    if ui.button("Delete node").clicked() {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.delete_node(id) {
+                                Ok(()) => {
+                                    self.selection = SelectionState::None;
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                    self.messages
+                                        .push(AppMessage::info(format!("Deleted node N{}", id.0)));
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
                     }
                 }
-                SelectionState::Member(idx) => {
-                    ui.strong(format!("Member M{idx}"));
+                SelectionState::Member(id) => {
+                    ui.strong(format!("Member M{}", id.0));
                     if let Some(s) = &self.scene {
-                        if let Some(&(ni, nj)) = s.member_nodes.get(idx) {
-                            ui.label(format!("Nodes: N{ni} \u{2192} N{nj}"));
-                        }
-                        if let Some(len) = s.member_length(idx) {
-                            ui.label(format!("Length: {:.4} m", len));
+                        if let Some(idx) = s.member_index(id) {
+                            if let Some(&(ni, nj)) = s.member_nodes.get(idx) {
+                                ui.label(format!(
+                                    "Nodes: N{} \u{2192} N{}",
+                                    s.node_ids[ni].0, s.node_ids[nj].0
+                                ));
+                            }
+                            if let Some(len) = s.member_length(idx) {
+                                ui.label(format!("Length: {:.4} m", len));
+                            }
+                            if let Some(r) = self.analysis_result() {
+                                if let Ok(f) = r.member_end_forces(idx) {
+                                    ui.label("Local end forces:");
+                                    forces_grid(ui, "local", f);
+                                }
+                                if let Ok(f) = r.member_end_forces_global(idx) {
+                                    ui.label("Global end forces:");
+                                    forces_grid(ui, "global", &f);
+                                }
+                                if let Ok((x, y, z)) = r.member_local_axes(idx) {
+                                    ui.label("Local axes (in global coords):");
+                                    ui.label(format!(
+                                        "  x = ({:.4}, {:.4}, {:.4})",
+                                        x[0], x[1], x[2]
+                                    ));
+                                    ui.label(format!(
+                                        "  y = ({:.4}, {:.4}, {:.4})",
+                                        y[0], y[1], y[2]
+                                    ));
+                                    ui.label(format!(
+                                        "  z = ({:.4}, {:.4}, {:.4})",
+                                        z[0], z[1], z[2]
+                                    ));
+                                }
+                            }
                         }
                     }
-                    if let Some(r) = self.analysis_result() {
-                        if let Ok(f) = r.member_end_forces(idx) {
-                            ui.label("Local end forces:");
-                            forces_grid(ui, "local", f);
-                        }
-                        if let Ok(f) = r.member_end_forces_global(idx) {
-                            ui.label("Global end forces:");
-                            forces_grid(ui, "global", &f);
-                        }
-                        if let Ok((x, y, z)) = r.member_local_axes(idx) {
-                            ui.label("Local axes (in global coords):");
-                            ui.label(format!("  x = ({:.4}, {:.4}, {:.4})", x[0], x[1], x[2]));
-                            ui.label(format!("  y = ({:.4}, {:.4}, {:.4})", y[0], y[1], y[2]));
-                            ui.label(format!("  z = ({:.4}, {:.4}, {:.4})", z[0], z[1], z[2]));
+
+                    if ui.button("Delete member").clicked() {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.delete_member(id) {
+                                Ok(()) => {
+                                    self.selection = SelectionState::None;
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                    self.messages.push(AppMessage::info(format!(
+                                        "Deleted member M{}",
+                                        id.0
+                                    )));
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
                         }
                     }
                 }
             });
+    }
+
+    fn show_edit_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Add")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Add node:");
+                ui.horizontal(|ui| {
+                    ui.label("x:");
+                    ui.text_edit_singleline(&mut self.new_node_x);
+                    ui.label("y:");
+                    ui.text_edit_singleline(&mut self.new_node_y);
+                    ui.label("z:");
+                    ui.text_edit_singleline(&mut self.new_node_z);
+                    if ui.button("Add node").clicked() {
+                        self.add_node_from_input();
+                    }
+                });
+
+                ui.separator();
+
+                ui.label("Add member:");
+                ui.horizontal(|ui| {
+                    ui.label("N i:");
+                    ui.text_edit_singleline(&mut self.new_member_i);
+                    ui.label("N j:");
+                    ui.text_edit_singleline(&mut self.new_member_j);
+                    if ui.button("Add member").clicked() {
+                        self.add_member_from_input();
+                    }
+                });
+            });
+    }
+
+    fn show_model_contents_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Model contents")
+            .default_open(false)
+            .show(ui, |ui| {
+                if let Some(model) = self.project.model.as_ref() {
+                    ui.label(format!("Nodes ({}):", model.n_nodes()));
+                    for node in model.nodes() {
+                        let is_sel = self.selection == SelectionState::Node(node.id);
+                        if ui
+                            .selectable_label(
+                                is_sel,
+                                format!(
+                                    "N{} ({:.1}, {:.1}, {:.1})",
+                                    node.id.0, node.x, node.y, node.z
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.selection = SelectionState::Node(node.id);
+                        }
+                    }
+                    ui.separator();
+                    ui.label(format!("Members ({}):", model.n_members()));
+                    for member in model.members() {
+                        let is_sel = self.selection == SelectionState::Member(member.id);
+                        if ui
+                            .selectable_label(
+                                is_sel,
+                                format!(
+                                    "M{}: N{} \u{2192} N{}",
+                                    member.id.0, member.node_i.0, member.node_j.0
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.selection = SelectionState::Member(member.id);
+                        }
+                    }
+                }
+            });
+    }
+
+    fn add_node_from_input(&mut self) {
+        let x: f64 = match self.new_node_x.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.messages
+                    .push(AppMessage::error("Invalid x coordinate"));
+                return;
+            }
+        };
+        let y: f64 = match self.new_node_y.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.messages
+                    .push(AppMessage::error("Invalid y coordinate"));
+                return;
+            }
+        };
+        let z: f64 = match self.new_node_z.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.messages
+                    .push(AppMessage::error("Invalid z coordinate"));
+                return;
+            }
+        };
+        let Some(model) = self.project.model.as_mut() else {
+            self.messages.push(AppMessage::error("No model loaded"));
+            return;
+        };
+        match model.add_node(x, y, z) {
+            Ok(id) => {
+                self.project.mark_analysis_stale();
+                self.rebuild_scene();
+                self.messages.push(AppMessage::info(format!(
+                    "Added node N{} at ({}, {}, {})",
+                    id.0, x, y, z
+                )));
+                self.new_node_x.clear();
+                self.new_node_y.clear();
+                self.new_node_z.clear();
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
+    }
+
+    fn add_member_from_input(&mut self) {
+        let ni: u32 = match self.new_member_i.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.messages.push(AppMessage::error("Invalid node i ID"));
+                return;
+            }
+        };
+        let nj: u32 = match self.new_member_j.trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.messages.push(AppMessage::error("Invalid node j ID"));
+                return;
+            }
+        };
+        let Some(model) = self.project.model.as_mut() else {
+            self.messages.push(AppMessage::error("No model loaded"));
+            return;
+        };
+        match model.add_member(NodeId(ni), NodeId(nj)) {
+            Ok(id) => {
+                self.project.mark_analysis_stale();
+                self.rebuild_scene();
+                self.messages.push(AppMessage::info(format!(
+                    "Added member M{} (N{} \u{2192} N{})",
+                    id.0, ni, nj
+                )));
+                self.new_member_i.clear();
+                self.new_member_j.clear();
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
     }
 
     fn show_camera_section(&mut self, ui: &mut egui::Ui) {
@@ -755,7 +1025,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 142"),
+            .with_title("Structural Analysis \u{2014} Phase 143"),
         ..Default::default()
     };
     eframe::run_native(

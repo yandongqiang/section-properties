@@ -2,6 +2,8 @@
 
 use structural_analysis::{Dof3D, FrameModel3D, FrameSection3D};
 
+use crate::edit_model::EditModel;
+
 /// Available preset models for the model browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetModel {
@@ -43,6 +45,17 @@ impl PresetModel {
             PresetModel::Grid1x1 => build_grid_frame(1, 1),
             PresetModel::Grid3x3 => build_grid_frame(3, 3),
             PresetModel::Grid10x10 => build_grid_frame(10, 10),
+        }
+    }
+
+    /// Build the editable model.
+    pub fn build_edit(&self) -> EditModel {
+        match self {
+            PresetModel::Portal => build_portal_edit(),
+            PresetModel::Inclined => build_inclined_edit(),
+            PresetModel::Grid1x1 => build_grid_edit(1, 1),
+            PresetModel::Grid3x3 => build_grid_edit(3, 3),
+            PresetModel::Grid10x10 => build_grid_edit(10, 10),
         }
     }
 }
@@ -175,6 +188,105 @@ pub fn build_grid_frame(nx: usize, nz: usize) -> FrameModel3D {
     m
 }
 
+/// Build a deterministic 3-member portal frame as an editable model.
+pub fn build_portal_edit() -> EditModel {
+    let mut m = EditModel::new();
+    let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let n2 = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let n3 = m.add_node(4.0, 3.0, 0.0).unwrap();
+
+    m.add_member(n0, n2).unwrap();
+    m.add_member(n2, n3).unwrap();
+    m.add_member(n1, n3).unwrap();
+
+    m.fix_node(n0).unwrap();
+    m.fix_node(n1).unwrap();
+
+    m.add_nodal_load(n2, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0])
+        .unwrap();
+
+    m
+}
+
+/// Build an inclined frame as an editable model.
+pub fn build_inclined_edit() -> EditModel {
+    let mut m = EditModel::new();
+    let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let n2 = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let n3 = m.add_node(4.0, 3.0, 0.0).unwrap();
+    let n4 = m.add_node(5.0, 0.0, 1.0).unwrap();
+
+    m.add_member(n0, n2).unwrap();
+    m.add_member(n2, n3).unwrap();
+    m.add_member(n1, n3).unwrap();
+    let m4 = m.add_member(n1, n4).unwrap();
+    m.set_member_ref_vec(m4, [0.3, 0.7, 0.5]).unwrap();
+
+    m.fix_node(n0).unwrap();
+    m.fix_node(n1).unwrap();
+    m.fix_dof(n4, Dof3D::Ux).unwrap();
+    m.fix_dof(n4, Dof3D::Uy).unwrap();
+    m.fix_dof(n4, Dof3D::Uz).unwrap();
+
+    m.add_nodal_load(n2, [3e3, -2e3, 0.0, 0.0, 0.0, 0.0])
+        .unwrap();
+
+    m
+}
+
+/// Build a grid frame as an editable model.
+pub fn build_grid_edit(nx: usize, nz: usize) -> EditModel {
+    use crate::edit_model::NodeId;
+
+    let mut m = EditModel::new();
+    let bay = 4.0;
+    let height = 3.0;
+
+    let mut bottom = vec![vec![NodeId(0); nz + 1]; nx + 1];
+    let mut top = vec![vec![NodeId(0); nz + 1]; nx + 1];
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            let x = i as f64 * bay;
+            let z = k as f64 * bay;
+            bottom[i][k] = m.add_node(x, 0.0, z).unwrap();
+            top[i][k] = m.add_node(x, height, z).unwrap();
+        }
+    }
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            m.add_member(bottom[i][k], top[i][k]).unwrap();
+        }
+    }
+    for i in 0..nx {
+        for k in 0..=nz {
+            m.add_member(top[i][k], top[i + 1][k]).unwrap();
+        }
+    }
+    for i in 0..=nx {
+        for k in 0..nz {
+            let mid = m.add_member(top[i][k], top[i][k + 1]).unwrap();
+            m.set_member_ref_vec(mid, [1.0, 0.0, 0.0]).unwrap();
+        }
+    }
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            m.fix_node(bottom[i][k]).unwrap();
+        }
+    }
+
+    if nx > 0 && nz > 0 {
+        m.add_nodal_load(top[0][0], [1e3, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .unwrap();
+    }
+
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +366,73 @@ mod tests {
     #[test]
     fn preset_grid_10x10_node_count() {
         let m = PresetModel::Grid10x10.build();
+        assert_eq!(m.n_nodes(), 242);
+        assert_eq!(m.n_members(), 341);
+    }
+
+    #[test]
+    fn portal_edit_structure() {
+        let m = build_portal_edit();
+        assert_eq!(m.n_nodes(), 4);
+        assert_eq!(m.n_members(), 3);
+    }
+
+    #[test]
+    fn inclined_edit_structure() {
+        let m = build_inclined_edit();
+        assert_eq!(m.n_nodes(), 5);
+        assert_eq!(m.n_members(), 4);
+    }
+
+    #[test]
+    fn grid_edit_node_count() {
+        let m = build_grid_edit(2, 2);
+        assert_eq!(m.n_nodes(), 18);
+        assert!(m.n_members() > 0);
+    }
+
+    #[test]
+    fn portal_edit_solves() {
+        let m = build_portal_edit();
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
+    }
+
+    #[test]
+    fn inclined_edit_solves() {
+        let m = build_inclined_edit();
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
+    }
+
+    #[test]
+    fn grid_edit_solves() {
+        let m = build_grid_edit(2, 2);
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
+    }
+
+    #[test]
+    fn preset_all_builds_edit_solve() {
+        for &preset in PresetModel::all() {
+            let m = preset.build_edit();
+            let fm = m.to_frame_model().unwrap_or_else(|e| {
+                panic!(
+                    "build_edit to_frame_model failed for '{}': {e:?}",
+                    preset.name()
+                )
+            });
+            assert!(
+                fm.solve().is_ok(),
+                "preset '{}' build_edit should solve",
+                preset.name()
+            );
+        }
+    }
+
+    #[test]
+    fn preset_grid_10x10_edit_node_count() {
+        let m = PresetModel::Grid10x10.build_edit();
         assert_eq!(m.n_nodes(), 242);
         assert_eq!(m.n_members(), 341);
     }

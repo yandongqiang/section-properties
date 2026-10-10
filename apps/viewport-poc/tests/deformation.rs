@@ -5,9 +5,10 @@ use viewport_poc::{model, scene::ViewportScene};
 
 #[test]
 fn deformed_positions_match_formula() {
-    let m = model::build_portal_frame();
-    let result = m.solve().expect("portal frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_portal_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame solves");
     let scale = 50.0;
 
     let deformed = scene.deformed_positions(&result.displacements, scale);
@@ -35,9 +36,10 @@ fn deformed_positions_match_formula() {
 
 #[test]
 fn zero_scale_gives_original() {
-    let m = model::build_portal_frame();
-    let result = m.solve().expect("portal frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_portal_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame solves");
 
     let deformed = scene.deformed_positions(&result.displacements, 0.0);
     assert_eq!(deformed, scene.node_positions);
@@ -45,9 +47,10 @@ fn zero_scale_gives_original() {
 
 #[test]
 fn scaling_does_not_modify_displacements() {
-    let m = model::build_portal_frame();
-    let result = m.solve().expect("portal frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_portal_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame solves");
 
     let disp_before = result.displacements.clone();
     let _ = scene.deformed_positions(&result.displacements, 999.0);
@@ -59,9 +62,10 @@ fn scaling_does_not_modify_displacements() {
 
 #[test]
 fn scaling_does_not_modify_scene_positions() {
-    let m = model::build_portal_frame();
-    let result = m.solve().expect("portal frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_portal_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame solves");
 
     let pos_before = scene.node_positions.clone();
     let _ = scene.deformed_positions(&result.displacements, 999.0);
@@ -73,14 +77,14 @@ fn scaling_does_not_modify_scene_positions() {
 
 #[test]
 fn different_scales_give_different_positions() {
-    let m = model::build_portal_frame();
-    let result = m.solve().expect("portal frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_portal_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame solves");
 
     let d1 = scene.deformed_positions(&result.displacements, 10.0);
     let d2 = scene.deformed_positions(&result.displacements, 100.0);
 
-    // At least one node should have different positions (the loaded node)
     let mut any_diff = false;
     for i in 0..scene.n_nodes() {
         if d1[i] != d2[i] {
@@ -96,14 +100,14 @@ fn different_scales_give_different_positions() {
 
 #[test]
 fn deformed_positions_with_inclined_frame() {
-    let m = model::build_inclined_frame();
-    let result = m.solve().expect("inclined frame solves");
-    let scene = ViewportScene::from_result(&result);
+    let m = model::build_inclined_edit();
+    let scene = ViewportScene::from_edit_model(&m);
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("inclined frame solves");
 
     let deformed = scene.deformed_positions(&result.displacements, 100.0);
     assert_eq!(deformed.len(), scene.n_nodes());
 
-    // Verify formula for each node
     for i in 0..scene.n_nodes() {
         let orig = scene.node_positions[i];
         let ux = result.displacement(i, Dof3D::Ux).unwrap();

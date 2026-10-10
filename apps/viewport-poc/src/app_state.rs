@@ -5,7 +5,9 @@
 //! analysis results directly; solving is an explicit operation via
 //! [`Project::solve`].
 
-use structural_analysis::{FrameAnalysisResult3D, FrameModel3D};
+use structural_analysis::FrameAnalysisResult3D;
+
+use crate::edit_model::EditModel;
 
 // ── Messages ───────────────────────────────────────────────────────────
 
@@ -81,7 +83,7 @@ impl AnalysisResult {
 /// to (re-)run the analysis.
 pub struct Project {
     pub name: String,
-    pub model: Option<FrameModel3D>,
+    pub model: Option<EditModel>,
     pub analysis: Option<AnalysisResult>,
 }
 
@@ -121,7 +123,7 @@ impl Project {
     /// Existing analysis results are marked **stale** (not discarded) so the
     /// UI can inform the user that the displayed results correspond to the
     /// previous model.
-    pub fn load_model(&mut self, name: String, model: FrameModel3D) {
+    pub fn load_model(&mut self, name: String, model: EditModel) {
         if let Some(ref mut a) = self.analysis {
             a.mark_stale();
         }
@@ -134,10 +136,18 @@ impl Project {
     /// On success, stores a fresh (non-stale) result.  This is the only way
     /// to produce a new analysis result — the GUI must not fabricate results.
     pub fn solve(&mut self) -> Result<(), String> {
-        let model = self.model.as_ref().ok_or("No model loaded")?;
-        let result = model.solve().map_err(|e| format!("{e:?}"))?;
+        let edit = self.model.as_ref().ok_or("No model loaded")?;
+        let frame_model = edit.to_frame_model().map_err(|e| e.message())?;
+        let result = frame_model.solve().map_err(|e| format!("{e:?}"))?;
         self.analysis = Some(AnalysisResult::fresh(result));
         Ok(())
+    }
+
+    /// Mark the analysis result as stale (e.g. after a model edit).
+    pub fn mark_analysis_stale(&mut self) {
+        if let Some(ref mut a) = self.analysis {
+            a.mark_stale();
+        }
     }
 
     /// Clear the project to the empty state.
@@ -170,11 +180,11 @@ mod tests {
     #[test]
     fn load_model_marks_existing_results_stale() {
         let mut p = Project::empty();
-        p.load_model("Portal".into(), model::build_portal_frame());
+        p.load_model("Portal".into(), model::build_portal_edit());
         p.solve().unwrap();
         assert!(!p.results_are_stale());
 
-        p.load_model("Inclined".into(), model::build_inclined_frame());
+        p.load_model("Inclined".into(), model::build_inclined_edit());
         assert!(p.results_are_stale());
         assert!(p.has_results());
     }
@@ -182,7 +192,7 @@ mod tests {
     #[test]
     fn load_model_without_prior_result_does_not_mark_stale() {
         let mut p = Project::empty();
-        p.load_model("Portal".into(), model::build_portal_frame());
+        p.load_model("Portal".into(), model::build_portal_edit());
         assert!(!p.results_are_stale());
         assert!(!p.has_results());
     }
@@ -190,7 +200,7 @@ mod tests {
     #[test]
     fn solve_produces_fresh_result() {
         let mut p = Project::empty();
-        p.load_model("Portal".into(), model::build_portal_frame());
+        p.load_model("Portal".into(), model::build_portal_edit());
         p.solve().unwrap();
         assert!(p.has_results());
         assert!(!p.results_are_stale());
@@ -199,9 +209,9 @@ mod tests {
     #[test]
     fn solve_after_stale_produces_fresh() {
         let mut p = Project::empty();
-        p.load_model("Portal".into(), model::build_portal_frame());
+        p.load_model("Portal".into(), model::build_portal_edit());
         p.solve().unwrap();
-        p.load_model("Inclined".into(), model::build_inclined_frame());
+        p.load_model("Inclined".into(), model::build_inclined_edit());
         assert!(p.results_are_stale());
         p.solve().unwrap();
         assert!(!p.results_are_stale());
@@ -216,7 +226,7 @@ mod tests {
     #[test]
     fn clear_resets_to_empty() {
         let mut p = Project::empty();
-        p.load_model("Portal".into(), model::build_portal_frame());
+        p.load_model("Portal".into(), model::build_portal_edit());
         p.solve().unwrap();
         p.clear();
         assert!(p.is_empty());

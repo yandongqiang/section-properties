@@ -2,6 +2,7 @@
 
 use viewport_poc::{
     app_state::{AppMessage, MessageLevel, Project},
+    edit_model::NodeId,
     model::{self, PresetModel},
     scene::ViewportScene,
     selection::SelectionState,
@@ -15,35 +16,31 @@ fn empty_project_has_no_scene() {
 }
 
 #[test]
-fn load_and_solve_produces_scene() {
+fn load_and_solve_produces_result() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(p.has_results());
-
-    let result = p.analysis.as_ref().unwrap();
-    let scene = ViewportScene::from_result(&result.result);
-    assert!(scene.n_nodes() > 0);
-    assert!(scene.n_members() > 0);
+    assert!(p.analysis.as_ref().unwrap().result.displacements.len() > 0);
 }
 
 #[test]
 fn switching_model_marks_results_stale() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(!p.results_are_stale());
 
-    p.load_model("Inclined".into(), model::build_inclined_frame());
+    p.load_model("Inclined".into(), model::build_inclined_edit());
     assert!(p.results_are_stale());
 }
 
 #[test]
 fn stale_results_still_accessible() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
-    p.load_model("Inclined".into(), model::build_inclined_frame());
+    p.load_model("Inclined".into(), model::build_inclined_edit());
 
     assert!(p.results_are_stale());
     let analysis = p.analysis.as_ref().unwrap();
@@ -53,9 +50,9 @@ fn stale_results_still_accessible() {
 #[test]
 fn re_solve_clears_staleness() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
-    p.load_model("Inclined".into(), model::build_inclined_frame());
+    p.load_model("Inclined".into(), model::build_inclined_edit());
     assert!(p.results_are_stale());
 
     p.solve().unwrap();
@@ -65,55 +62,45 @@ fn re_solve_clears_staleness() {
 #[test]
 fn selection_validation_clears_invalid_node() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    let m = model::build_portal_edit();
+    p.load_model("Portal".into(), m);
     p.solve().unwrap();
 
-    let result = p.analysis.as_ref().unwrap();
-    let scene = ViewportScene::from_result(&result.result);
+    let model = p.model.as_ref().unwrap();
+    let scene = ViewportScene::from_edit_model(model);
     let n = scene.n_nodes();
 
-    let sel = SelectionState::Node(n + 100);
-    match sel {
-        SelectionState::Node(i) if i >= scene.n_nodes() => {}
-        _ => panic!("invalid selection should be detected"),
-    }
+    let sel = SelectionState::Node(NodeId(n as u32 + 100));
+    assert!(scene.node_index(sel.node_id().unwrap()).is_none());
 }
 
 #[test]
 fn selection_validation_clears_invalid_member() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    let m = model::build_portal_edit();
+    p.load_model("Portal".into(), m);
     p.solve().unwrap();
 
-    let result = p.analysis.as_ref().unwrap();
-    let scene = ViewportScene::from_result(&result.result);
-    let m = scene.n_members();
+    let model = p.model.as_ref().unwrap();
+    let scene = ViewportScene::from_edit_model(model);
+    let m_count = scene.n_members();
 
-    let sel = SelectionState::Member(m + 100);
-    match sel {
-        SelectionState::Member(i) if i >= scene.n_members() => {}
-        _ => panic!("invalid selection should be detected"),
-    }
+    let sel = SelectionState::Member(viewport_poc::edit_model::MemberId(m_count as u32 + 100));
+    assert!(scene.member_index(sel.member_id().unwrap()).is_none());
 }
 
 #[test]
-fn all_presets_solve_and_produce_scenes() {
+fn all_presets_solve_and_produce_results() {
     for &preset in PresetModel::all() {
         let mut p = Project::empty();
-        p.load_model(preset.name().into(), preset.build());
+        p.load_model(preset.name().into(), preset.build_edit());
         p.solve()
             .unwrap_or_else(|e| panic!("preset '{}' solve failed: {e}", preset.name()));
 
         let result = p.analysis.as_ref().unwrap();
-        let scene = ViewportScene::from_result(&result.result);
         assert!(
-            scene.n_nodes() > 0,
-            "preset '{}' has no nodes",
-            preset.name()
-        );
-        assert!(
-            scene.n_members() > 0,
-            "preset '{}' has no members",
+            result.result.displacements.len() > 0,
+            "preset '{}' has no displacements",
             preset.name()
         );
     }
@@ -133,7 +120,7 @@ fn messages_accumulate() {
 #[test]
 fn project_clear_removes_everything() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(!p.is_empty());
     assert!(p.has_results());
@@ -147,12 +134,13 @@ fn project_clear_removes_everything() {
 #[test]
 fn deformation_scale_does_not_trigger_solve() {
     let mut p = Project::empty();
-    p.load_model("Portal".into(), model::build_portal_frame());
+    p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     let result_ref = p.analysis.as_ref().unwrap();
     let original_displacements = result_ref.result.displacements.clone();
 
-    let scene = ViewportScene::from_result(&result_ref.result);
+    let model = p.model.as_ref().unwrap();
+    let scene = ViewportScene::from_edit_model(model);
     let _deformed = scene.deformed_positions(&original_displacements, 500.0);
 
     let result_after = p.analysis.as_ref().unwrap();
@@ -160,5 +148,26 @@ fn deformation_scale_does_not_trigger_solve() {
         result_after.result.displacements, original_displacements,
         "deformation scale change must not modify analysis results"
     );
+    assert!(!p.results_are_stale());
+}
+
+#[test]
+fn mark_analysis_stale_works() {
+    let mut p = Project::empty();
+    p.load_model("Portal".into(), model::build_portal_edit());
+    p.solve().unwrap();
+    assert!(!p.results_are_stale());
+
+    p.mark_analysis_stale();
+    assert!(p.results_are_stale());
+}
+
+#[test]
+fn mark_analysis_stale_no_op_without_results() {
+    let mut p = Project::empty();
+    p.load_model("Portal".into(), model::build_portal_edit());
+    assert!(!p.has_results());
+
+    p.mark_analysis_stale();
     assert!(!p.results_are_stale());
 }

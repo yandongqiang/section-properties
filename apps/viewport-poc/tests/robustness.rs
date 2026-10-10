@@ -1,12 +1,17 @@
 //! Robustness: non-finite data, empty models, zero-length display bounds.
 
-use viewport_poc::{camera::Camera3D, project, scene::ViewportScene, selection::SelectionState};
+use viewport_poc::{
+    camera::Camera3D, edit_model::MemberId, project, scene::ViewportScene,
+    selection::SelectionState,
+};
 
 #[test]
 fn empty_scene_bounding_box() {
     let scene = ViewportScene {
         node_positions: vec![],
+        node_ids: vec![],
         member_nodes: vec![],
+        member_ids: vec![],
         member_ref_vecs: vec![],
     };
     let (min, max) = scene.bounding_box();
@@ -18,7 +23,9 @@ fn empty_scene_bounding_box() {
 fn empty_scene_deformed_positions() {
     let scene = ViewportScene {
         node_positions: vec![],
+        node_ids: vec![],
         member_nodes: vec![],
+        member_ids: vec![],
         member_ref_vecs: vec![],
     };
     let deformed = scene.deformed_positions(&[], 100.0);
@@ -29,7 +36,9 @@ fn empty_scene_deformed_positions() {
 fn single_node_scene() {
     let scene = ViewportScene {
         node_positions: vec![[1.0, 2.0, 3.0]],
+        node_ids: vec![viewport_poc::edit_model::NodeId(0)],
         member_nodes: vec![],
+        member_ids: vec![],
         member_ref_vecs: vec![],
     };
     let (min, max) = scene.bounding_box();
@@ -45,14 +54,19 @@ fn single_node_scene() {
 fn coincident_nodes_bounding_box() {
     let scene = ViewportScene {
         node_positions: vec![[2.0, 2.0, 2.0], [2.0, 2.0, 2.0], [2.0, 2.0, 2.0]],
+        node_ids: vec![
+            viewport_poc::edit_model::NodeId(0),
+            viewport_poc::edit_model::NodeId(1),
+            viewport_poc::edit_model::NodeId(2),
+        ],
         member_nodes: vec![(0, 1), (1, 2)],
+        member_ids: vec![MemberId(0), MemberId(1)],
         member_ref_vecs: vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
     };
     let (min, max) = scene.bounding_box();
     assert_eq!(min, [2.0, 2.0, 2.0]);
     assert_eq!(max, [2.0, 2.0, 2.0]);
 
-    // Camera should still work with zero-size bounding box
     let cam = Camera3D::fit(min, max);
     let p = cam.project([2.0, 2.0, 2.0], 800.0, 600.0);
     assert!(p.is_some(), "coincident nodes should still be projectable");
@@ -62,7 +76,12 @@ fn coincident_nodes_bounding_box() {
 fn non_finite_displacement_returns_original() {
     let scene = ViewportScene {
         node_positions: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        node_ids: vec![
+            viewport_poc::edit_model::NodeId(0),
+            viewport_poc::edit_model::NodeId(1),
+        ],
         member_nodes: vec![],
+        member_ids: vec![],
         member_ref_vecs: vec![],
     };
     let disp = vec![
@@ -103,7 +122,12 @@ fn non_finite_node_position_projects_to_none() {
 fn zero_length_member() {
     let scene = ViewportScene {
         node_positions: vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+        node_ids: vec![
+            viewport_poc::edit_model::NodeId(0),
+            viewport_poc::edit_model::NodeId(1),
+        ],
         member_nodes: vec![(0, 1)],
+        member_ids: vec![MemberId(0)],
         member_ref_vecs: vec![[0.0, 0.0, 1.0]],
     };
     let len = scene.member_length(0).unwrap();
@@ -132,9 +156,19 @@ fn camera_clamps_distance() {
 
 #[test]
 fn selection_equality() {
-    assert_eq!(SelectionState::Node(1), SelectionState::Node(1));
-    assert_ne!(SelectionState::Node(1), SelectionState::Node(2));
-    assert_ne!(SelectionState::Node(1), SelectionState::Member(1));
+    use viewport_poc::edit_model::NodeId;
+    assert_eq!(
+        SelectionState::Node(NodeId(1)),
+        SelectionState::Node(NodeId(1))
+    );
+    assert_ne!(
+        SelectionState::Node(NodeId(1)),
+        SelectionState::Node(NodeId(2))
+    );
+    assert_ne!(
+        SelectionState::Node(NodeId(1)),
+        SelectionState::Member(MemberId(1))
+    );
     assert_eq!(SelectionState::None, SelectionState::None);
 }
 

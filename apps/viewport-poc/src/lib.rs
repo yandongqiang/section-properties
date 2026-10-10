@@ -7,6 +7,7 @@
 pub mod app_state;
 pub mod camera;
 pub mod display;
+pub mod edit_model;
 pub mod model;
 pub mod project;
 pub mod scene;
@@ -15,5 +16,6 @@ pub mod selection;
 pub use app_state::{AppMessage, MessageLevel, Project};
 pub use camera::Camera3D;
 pub use display::ResultDisplayState;
+pub use edit_model::{EditError, EditMember, EditModel, EditNode, MemberId, NodeId};
 pub use scene::ViewportScene;
 pub use selection::SelectionState;
