@@ -100,6 +100,39 @@
 //! All quantities use a consistent unit system supplied by the caller. No
 //! implicit unit conversion is performed. Typical SI: `E`, `G` in Pa;
 //! `A` in m²; `Iy`, `Iz`, `J` in m⁴; coordinates in m.
+//!
+//! # API invariants and validation (Phase 136)
+//!
+//! All structural types (`FrameSection3D`, `FrameElement3D`, `FrameNode3D`,
+//! `FrameModel3D`) encapsulate their fields as **private**. External code
+//! reads values through getter methods (`E()`, `G()`, `area()`, …) and
+//! modifies them through validated setters (`set_E()`, `set_G()`, …) that
+//! enforce the same constraints as the constructor. This prevents
+//! post-construction mutation to NaN, infinity, or non-positive values.
+//!
+//! ## Numerical robustness
+//!
+//! - `local_stiffness` validates coordinate finiteness **before** computing
+//!   the element length, so NaN coordinates cannot bypass the `L > 0` check
+//!   (because `NaN <= 0.0` is `false` in IEEE 754).
+//! - Element length and axis norms use `f64::hypot` for improved numerical
+//!   stability against intermediate overflow/underflow.
+//! - Every entry of the local stiffness matrix is checked for finiteness
+//!   before returning.
+//!
+//! ## Constraint semantics
+//!
+//! `fix_dof` detects duplicate constraints on the same DOF:
+//! - Re-fixing the same DOF to the **same** value is a no-op (idempotent).
+//! - Re-fixing to a **different** value returns [`FemError::InvalidInput`].
+//!
+//! ## Solver-boundary re-validation
+//!
+//! `FrameAnalysisResult3D::from_model` re-validates all model data at the
+//! solver boundary: node coordinates, nodal-load indices and values, fixed-DOF
+//! indices and values, section parameters, and member-load equivalent forces.
+//! This provides defense-in-depth against any future code path that might
+//! bypass the encapsulated validation.
 
 #![allow(non_snake_case)]
 
@@ -122,7 +155,9 @@ use section_properties::fea::{
 /// # Validation
 ///
 /// All six scalars must be finite and strictly positive. The constructor
-/// rejects zero, negative, NaN, or infinite values.
+/// rejects zero, negative, NaN, or infinite values. Fields are private;
+/// use the getter methods (`E()`, `G()`, `area()`, `iy()`, `iz()`, `j()`)
+/// to read and the validated setters (`set_E()`, …) to modify.
 ///
 /// # Euler–Bernoulli assumptions
 ///
@@ -137,18 +172,12 @@ use section_properties::fea::{
 /// (e.g. `WarpingProperties.j`).
 #[derive(Debug, Clone, Copy)]
 pub struct FrameSection3D {
-    /// Young's modulus `E` (Pa in SI).
-    pub E: f64,
-    /// Shear modulus `G` (Pa in SI).
-    pub G: f64,
-    /// Cross-sectional area `A` (m² in SI).
-    pub area: f64,
-    /// Second moment of area about the local y-axis `Iy` (m⁴ in SI).
-    pub iy: f64,
-    /// Second moment of area about the local z-axis `Iz` (m⁴ in SI).
-    pub iz: f64,
-    /// Saint-Venant torsional constant `J` (m⁴ in SI).
-    pub j: f64,
+    E: f64,
+    G: f64,
+    area: f64,
+    iy: f64,
+    iz: f64,
+    j: f64,
 }
 
 impl FrameSection3D {
@@ -159,6 +188,25 @@ impl FrameSection3D {
     /// Returns [`FemError::InvalidInput`] if any parameter is non-finite or
     /// non-positive.
     pub fn new(E: f64, G: f64, area: f64, iy: f64, iz: f64, j: f64) -> Result<Self, FemError> {
+        Self::validate_params(E, G, area, iy, iz, j)?;
+        Ok(Self {
+            E,
+            G,
+            area,
+            iy,
+            iz,
+            j,
+        })
+    }
+
+    fn validate_params(
+        E: f64,
+        G: f64,
+        area: f64,
+        iy: f64,
+        iz: f64,
+        j: f64,
+    ) -> Result<(), FemError> {
         for (label, val) in [
             ("Young's modulus E", E),
             ("shear modulus G", G),
@@ -178,14 +226,74 @@ impl FrameSection3D {
                 )));
             }
         }
-        Ok(Self {
-            E,
-            G,
-            area,
-            iy,
-            iz,
-            j,
-        })
+        Ok(())
+    }
+
+    /// Re-validate all parameters (solver-boundary defense).
+    pub(crate) fn validate(&self) -> Result<(), FemError> {
+        Self::validate_params(self.E, self.G, self.area, self.iy, self.iz, self.j)
+    }
+
+    /// Young's modulus `E`.
+    pub fn E(&self) -> f64 {
+        self.E
+    }
+    /// Shear modulus `G`.
+    pub fn G(&self) -> f64 {
+        self.G
+    }
+    /// Cross-sectional area `A`.
+    pub fn area(&self) -> f64 {
+        self.area
+    }
+    /// Second moment of area about local y `Iy`.
+    pub fn iy(&self) -> f64 {
+        self.iy
+    }
+    /// Second moment of area about local z `Iz`.
+    pub fn iz(&self) -> f64 {
+        self.iz
+    }
+    /// Saint-Venant torsional constant `J`.
+    pub fn j(&self) -> f64 {
+        self.j
+    }
+
+    /// Set Young's modulus with validation.
+    pub fn set_E(&mut self, E: f64) -> Result<(), FemError> {
+        Self::validate_params(E, self.G, self.area, self.iy, self.iz, self.j)?;
+        self.E = E;
+        Ok(())
+    }
+    /// Set shear modulus with validation.
+    pub fn set_G(&mut self, G: f64) -> Result<(), FemError> {
+        Self::validate_params(self.E, G, self.area, self.iy, self.iz, self.j)?;
+        self.G = G;
+        Ok(())
+    }
+    /// Set cross-sectional area with validation.
+    pub fn set_area(&mut self, area: f64) -> Result<(), FemError> {
+        Self::validate_params(self.E, self.G, area, self.iy, self.iz, self.j)?;
+        self.area = area;
+        Ok(())
+    }
+    /// Set `Iy` with validation.
+    pub fn set_iy(&mut self, iy: f64) -> Result<(), FemError> {
+        Self::validate_params(self.E, self.G, self.area, iy, self.iz, self.j)?;
+        self.iy = iy;
+        Ok(())
+    }
+    /// Set `Iz` with validation.
+    pub fn set_iz(&mut self, iz: f64) -> Result<(), FemError> {
+        Self::validate_params(self.E, self.G, self.area, self.iy, iz, self.j)?;
+        self.iz = iz;
+        Ok(())
+    }
+    /// Set `J` with validation.
+    pub fn set_j(&mut self, j: f64) -> Result<(), FemError> {
+        Self::validate_params(self.E, self.G, self.area, self.iy, self.iz, j)?;
+        self.j = j;
+        Ok(())
     }
 }
 
@@ -219,17 +327,15 @@ const PARALLEL_TOL: f64 = 1e-8;
 ///
 /// The reference vector must not be parallel (or nearly parallel) to the
 /// member axis.
+///
+/// Fields are private; use getter methods (`node_i()`, `node_j()`,
+/// `section()`, `ref_vec()`) to read.
 #[derive(Debug, Clone)]
 pub struct FrameElement3D {
-    /// Index of the first (start) node.
-    pub node_i: usize,
-    /// Index of the second (end) node.
-    pub node_j: usize,
-    /// Section and material parameters.
-    pub section: FrameSection3D,
-    /// Reference vector for local-axis orientation. Need not be unit length;
-    /// will be normalized internally. Must not be parallel to the member axis.
-    pub ref_vec: [f64; 3],
+    node_i: usize,
+    node_j: usize,
+    section: FrameSection3D,
+    ref_vec: [f64; 3],
 }
 
 impl FrameElement3D {
@@ -257,8 +363,7 @@ impl FrameElement3D {
                 ref_vec[0], ref_vec[1], ref_vec[2]
             )));
         }
-        let ref_norm =
-            (ref_vec[0] * ref_vec[0] + ref_vec[1] * ref_vec[1] + ref_vec[2] * ref_vec[2]).sqrt();
+        let ref_norm = ref_vec[0].hypot(ref_vec[1]).hypot(ref_vec[2]);
         if ref_norm == 0.0 {
             return Err(FemError::InvalidInput(
                 "ref_vec must be nonzero".to_string(),
@@ -272,12 +377,29 @@ impl FrameElement3D {
         })
     }
 
+    /// Start node index.
+    pub fn node_i(&self) -> usize {
+        self.node_i
+    }
+    /// End node index.
+    pub fn node_j(&self) -> usize {
+        self.node_j
+    }
+    /// Section parameters.
+    pub fn section(&self) -> &FrameSection3D {
+        &self.section
+    }
+    /// Reference vector (orientation).
+    pub fn ref_vec(&self) -> [f64; 3] {
+        self.ref_vec
+    }
+
     /// Element length from node coordinates.
     pub fn length(&self, pi: (f64, f64, f64), pj: (f64, f64, f64)) -> f64 {
         let dx = pj.0 - pi.0;
         let dy = pj.1 - pi.1;
         let dz = pj.2 - pi.2;
-        (dx * dx + dy * dy + dz * dz).sqrt()
+        dx.hypot(dy).hypot(dz)
     }
 
     /// Compute the orthonormal local-axis triple `(x_hat, y_hat, z_hat)`.
@@ -327,12 +449,11 @@ impl FrameElement3D {
             x_hat[2] * self.ref_vec[0] - x_hat[0] * self.ref_vec[2],
             x_hat[0] * self.ref_vec[1] - x_hat[1] * self.ref_vec[0],
         ];
-        let cross_norm = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+        let cross_norm = cross[0].hypot(cross[1]).hypot(cross[2]);
 
-        let ref_norm = (self.ref_vec[0] * self.ref_vec[0]
-            + self.ref_vec[1] * self.ref_vec[1]
-            + self.ref_vec[2] * self.ref_vec[2])
-            .sqrt();
+        let ref_norm = self.ref_vec[0]
+            .hypot(self.ref_vec[1])
+            .hypot(self.ref_vec[2]);
 
         // sin(angle) between x_hat and ref
         let sin_angle = cross_norm / ref_norm;
@@ -376,23 +497,25 @@ impl FrameElement3D {
         pi: (f64, f64, f64),
         pj: (f64, f64, f64),
     ) -> Result<[[f64; 12]; 12], FemError> {
+        if !pi.0.is_finite() || !pi.1.is_finite() || !pi.2.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "node i coordinates must be finite, got ({}, {}, {})",
+                pi.0, pi.1, pi.2
+            )));
+        }
+        if !pj.0.is_finite() || !pj.1.is_finite() || !pj.2.is_finite() {
+            return Err(FemError::InvalidInput(format!(
+                "node j coordinates must be finite, got ({}, {}, {})",
+                pj.0, pj.1, pj.2
+            )));
+        }
+
         let L = self.length(pi, pj);
         if L <= 0.0 {
-            if !pi.0.is_finite() || !pi.1.is_finite() || !pi.2.is_finite() {
-                return Err(FemError::InvalidInput(format!(
-                    "node i coordinates must be finite, got ({}, {}, {})",
-                    pi.0, pi.1, pi.2
-                )));
-            }
-            if !pj.0.is_finite() || !pj.1.is_finite() || !pj.2.is_finite() {
-                return Err(FemError::InvalidInput(format!(
-                    "node j coordinates must be finite, got ({}, {}, {})",
-                    pj.0, pj.1, pj.2
-                )));
-            }
-            return Err(FemError::ZeroLengthMember(
-                "element has zero length".to_string(),
-            ));
+            return Err(FemError::ZeroLengthMember(format!(
+                "element from ({}, {}, {}) to ({}, {}, {}) has zero length",
+                pi.0, pi.1, pi.2, pj.0, pj.1, pj.2
+            )));
         }
 
         let E = self.section.E;
@@ -470,6 +593,18 @@ impl FrameElement3D {
         k[10][4] = 2.0 * EIy_L;
         k[10][8] = 6.0 * EIy_L2;
         k[10][10] = 4.0 * EIy_L;
+
+        for i in 0..12 {
+            for j in 0..12 {
+                if !k[i][j].is_finite() {
+                    return Err(FemError::InvalidInput(format!(
+                        "stiffness matrix entry [{i}][{j}] is non-finite: {} \
+                         (E={E}, G={G}, A={A}, Iy={Iy}, Iz={Iz}, J={J}, L={L})",
+                        k[i][j]
+                    )));
+                }
+            }
+        }
 
         Ok(k)
     }
@@ -745,16 +880,15 @@ impl FrameMemberLoad {
 // ---------------------------------------------------------------------------
 
 /// 3D frame node with 6 DOF: `[ux, uy, uz, rx, ry, rz]`.
+///
+/// Fields are private; use getter methods (`id()`, `x()`, `y()`, `z()`)
+/// to read.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameNode3D {
-    /// Node index (position in the model's node list).
-    pub id: usize,
-    /// X coordinate `m`.
-    pub x: f64,
-    /// Y coordinate `m`.
-    pub y: f64,
-    /// Z coordinate `m`.
-    pub z: f64,
+    id: usize,
+    x: f64,
+    y: f64,
+    z: f64,
 }
 
 impl FrameNode3D {
@@ -763,6 +897,22 @@ impl FrameNode3D {
         Self { id, x, y, z }
     }
 
+    /// Node index.
+    pub fn id(&self) -> usize {
+        self.id
+    }
+    /// X coordinate.
+    pub fn x(&self) -> f64 {
+        self.x
+    }
+    /// Y coordinate.
+    pub fn y(&self) -> f64 {
+        self.y
+    }
+    /// Z coordinate.
+    pub fn z(&self) -> f64 {
+        self.z
+    }
     /// Return coordinates as `(x, y, z)`.
     pub fn coords(&self) -> (f64, f64, f64) {
         (self.x, self.y, self.z)
@@ -785,6 +935,11 @@ impl FrameNode3D {
 /// - Nodal loads are in **global** coordinates.
 /// - Prescribed DOFs are enforced by static condensation (no penalty).
 /// - Multiple loads at the same node/DOF **accumulate**.
+/// - `fix_dof` is **idempotent** for the same value; re-fixing the same DOF
+///   to a different value returns [`FemError::InvalidInput`].
+///
+/// Fields are private; use accessor methods (`n_nodes()`, `n_members()`,
+/// `node()`, `member()`, …) to read.
 ///
 /// # Snapshot semantics
 ///
@@ -792,16 +947,11 @@ impl FrameNode3D {
 /// after building a solver does not affect that solver.
 #[derive(Debug, Clone)]
 pub struct FrameModel3D {
-    /// Nodes.
-    pub nodes: Vec<FrameNode3D>,
-    /// Members (each is a validated `FrameElement3D`).
-    pub members: Vec<FrameElement3D>,
-    /// Nodal forces: `(node_idx, dof, value)` where `dof` is 0–5.
-    pub nodal_forces: Vec<(usize, usize, f64)>,
-    /// Fixed DOFs: `(node_idx, dof, prescribed_value)`.
-    pub fixed_dofs: Vec<(usize, usize, f64)>,
-    /// Distributed member loads.
-    pub member_loads: Vec<FrameMemberLoad>,
+    nodes: Vec<FrameNode3D>,
+    members: Vec<FrameElement3D>,
+    nodal_forces: Vec<(usize, usize, f64)>,
+    fixed_dofs: Vec<(usize, usize, f64)>,
+    member_loads: Vec<FrameMemberLoad>,
 }
 
 impl Default for FrameModel3D {
@@ -820,6 +970,23 @@ impl FrameModel3D {
             fixed_dofs: Vec::new(),
             member_loads: Vec::new(),
         }
+    }
+
+    /// Number of nodes.
+    pub fn n_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+    /// Number of members.
+    pub fn n_members(&self) -> usize {
+        self.members.len()
+    }
+    /// Borrow node at `idx`, or `None` if out of bounds.
+    pub fn node(&self, idx: usize) -> Option<&FrameNode3D> {
+        self.nodes.get(idx)
+    }
+    /// Borrow member at `idx`, or `None` if out of bounds.
+    pub fn member(&self, idx: usize) -> Option<&FrameElement3D> {
+        self.members.get(idx)
     }
 
     /// Add a node at `(x, y, z)` and return its index.
@@ -923,10 +1090,18 @@ impl FrameModel3D {
 
     /// Restrain a single DOF of a node to a prescribed `value` (usually 0.0).
     ///
+    /// # Duplicate constraints
+    ///
+    /// If the same `(node_idx, dof)` is constrained again with the **same**
+    /// value, the call is a no-op (idempotent). If the value **differs**, an
+    /// [`FemError::InvalidInput`] is returned to prevent contradictory
+    /// constraints.
+    ///
     /// # Errors
     ///
     /// [`FemError::InvalidNode`] if `node_idx` is out of bounds.
-    /// [`FemError::InvalidInput`] if `value` is non-finite.
+    /// [`FemError::InvalidInput`] if `value` is non-finite or conflicts with
+    /// an existing constraint on the same DOF.
     pub fn fix_dof(&mut self, node_idx: usize, dof: Dof3D, value: f64) -> Result<(), FemError> {
         if node_idx >= self.nodes.len() {
             return Err(FemError::InvalidNode(format!(
@@ -939,7 +1114,20 @@ impl FrameModel3D {
                 "prescribed value must be finite, got {value}"
             )));
         }
-        self.fixed_dofs.push((node_idx, dof.index(), value));
+        let dof_idx = dof.index();
+        for &(n, d, v) in &self.fixed_dofs {
+            if n == node_idx && d == dof_idx {
+                if v == value {
+                    return Ok(());
+                }
+                return Err(FemError::InvalidInput(format!(
+                    "conflicting constraint at node {node_idx}, dof {}: \
+                     existing value {v}, new value {value}",
+                    dof.name()
+                )));
+            }
+        }
+        self.fixed_dofs.push((node_idx, dof_idx, value));
         Ok(())
     }
 
@@ -1131,7 +1319,47 @@ impl FrameSolver3D {
             return Err(FemError::InvalidModel("model has no nodes".to_string()));
         }
 
-        // Validate members
+        // Solver-boundary re-validation: node coordinates
+        for (idx, n) in model.nodes.iter().enumerate() {
+            if !n.x.is_finite() || !n.y.is_finite() || !n.z.is_finite() {
+                return Err(FemError::InvalidInput(format!(
+                    "node {idx} has non-finite coordinates ({}, {}, {})",
+                    n.x, n.y, n.z
+                )));
+            }
+        }
+
+        // Solver-boundary re-validation: nodal loads
+        for &(node_idx, dof, value) in &model.nodal_forces {
+            if node_idx >= model.nodes.len() {
+                return Err(FemError::InvalidNode(format!(
+                    "nodal load references node {node_idx} out of bounds (max {})",
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            if !value.is_finite() {
+                return Err(FemError::InvalidInput(format!(
+                    "nodal load at node {node_idx}, dof {dof} is non-finite: {value}"
+                )));
+            }
+        }
+
+        // Solver-boundary re-validation: fixed DOFs
+        for &(node_idx, dof, value) in &model.fixed_dofs {
+            if node_idx >= model.nodes.len() {
+                return Err(FemError::InvalidNode(format!(
+                    "fixed dof references node {node_idx} out of bounds (max {})",
+                    model.nodes.len().saturating_sub(1)
+                )));
+            }
+            if !value.is_finite() {
+                return Err(FemError::InvalidInput(format!(
+                    "fixed dof at node {node_idx}, dof {dof} is non-finite: {value}"
+                )));
+            }
+        }
+
+        // Validate members (including solver-boundary section re-validation)
         for (idx, m) in model.members.iter().enumerate() {
             if m.node_i >= model.nodes.len() {
                 return Err(FemError::InvalidModel(format!(
@@ -1147,9 +1375,9 @@ impl FrameSolver3D {
                     model.nodes.len().saturating_sub(1)
                 )));
             }
+            m.section.validate()?;
             let pi = model.nodes[m.node_i].coords();
             let pj = model.nodes[m.node_j].coords();
-            // Validate geometry + orientation by computing local axes
             m.local_axes(pi, pj)?;
         }
 
@@ -1206,6 +1434,15 @@ impl FrameSolver3D {
             let pj = model.nodes[m.node_j].coords();
             let L = m.length(pi, pj);
             let f_eq_local = load.equivalent_nodal_loads_local(L);
+            for i in 0..12 {
+                if !f_eq_local[i].is_finite() {
+                    return Err(FemError::InvalidInput(format!(
+                        "member load on member {mid} produced non-finite \
+                         equivalent load at DOF {i}: {}",
+                        f_eq_local[i]
+                    )));
+                }
+            }
 
             // Accumulate local equivalent loads for end-force recovery
             for i in 0..12 {

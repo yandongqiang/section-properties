@@ -75,12 +75,12 @@ mod section_validation {
         let s = FrameSection3D::new(200e9, 80e9, 1e-3, 1e-6, 2e-6, 3e-6);
         assert!(s.is_ok());
         let s = s.unwrap();
-        assert!((s.E - 200e9).abs() < 1e-3);
-        assert!((s.G - 80e9).abs() < 1e-3);
-        assert!((s.area - 1e-3).abs() < 1e-15);
-        assert!((s.iy - 1e-6).abs() < 1e-18);
-        assert!((s.iz - 2e-6).abs() < 1e-18);
-        assert!((s.j - 3e-6).abs() < 1e-18);
+        assert!((s.E() - 200e9).abs() < 1e-3);
+        assert!((s.G() - 80e9).abs() < 1e-3);
+        assert!((s.area() - 1e-3).abs() < 1e-15);
+        assert!((s.iy() - 1e-6).abs() < 1e-18);
+        assert!((s.iz() - 2e-6).abs() < 1e-18);
+        assert!((s.j() - 3e-6).abs() < 1e-18);
     }
 
     #[test]
@@ -381,7 +381,7 @@ mod local_stiffness {
         let L = 2.0;
         let k = e.local_stiffness((0.0, 0.0, 0.0), (L, 0.0, 0.0)).unwrap();
         let s = steel_section();
-        let EA_L = s.E * s.area / L;
+        let EA_L = s.E() * s.area() / L;
 
         assert!(
             (k[0][0] - EA_L).abs() < 1e-3,
@@ -415,7 +415,7 @@ mod local_stiffness {
         let L = 2.0;
         let k = e.local_stiffness((0.0, 0.0, 0.0), (L, 0.0, 0.0)).unwrap();
         let s = steel_section();
-        let GJ_L = s.G * s.j / L;
+        let GJ_L = s.G() * s.j() / L;
 
         assert!(
             (k[3][3] - GJ_L).abs() < 1e-3,
@@ -450,9 +450,9 @@ mod local_stiffness {
         let L = 2.0;
         let k = e.local_stiffness((0.0, 0.0, 0.0), (L, 0.0, 0.0)).unwrap();
         let s = steel_section();
-        let EIz_L3 = s.E * s.iz / L.powi(3);
-        let EIz_L2 = s.E * s.iz / L.powi(2);
-        let EIz_L = s.E * s.iz / L;
+        let EIz_L3 = s.E() * s.iz() / L.powi(3);
+        let EIz_L2 = s.E() * s.iz() / L.powi(2);
+        let EIz_L = s.E() * s.iz() / L;
 
         // Independent reference: standard 2D beam stiffness
         assert!((k[1][1] - 12.0 * EIz_L3).abs() < 1e-3);
@@ -478,9 +478,9 @@ mod local_stiffness {
         let L = 2.0;
         let k = e.local_stiffness((0.0, 0.0, 0.0), (L, 0.0, 0.0)).unwrap();
         let s = steel_section();
-        let EIy_L3 = s.E * s.iy / L.powi(3);
-        let EIy_L2 = s.E * s.iy / L.powi(2);
-        let EIy_L = s.E * s.iy / L;
+        let EIy_L3 = s.E() * s.iy() / L.powi(3);
+        let EIy_L2 = s.E() * s.iy() / L.powi(2);
+        let EIy_L = s.E() * s.iy() / L;
 
         // Independent reference: x-z plane bending with right-hand rule
         assert!((k[2][2] - 12.0 * EIy_L3).abs() < 1e-3);
@@ -590,7 +590,7 @@ mod local_stiffness {
         let e2 = FrameElement3D::new(
             0,
             1,
-            FrameSection3D::new(s.E * 10.0, s.G, s.area, s.iy, s.iz, s.j).unwrap(),
+            FrameSection3D::new(s.E() * 10.0, s.G(), s.area(), s.iy(), s.iz(), s.j()).unwrap(),
             default_ref(),
         )
         .unwrap();
@@ -627,7 +627,7 @@ mod local_stiffness {
         let e2 = FrameElement3D::new(
             0,
             1,
-            FrameSection3D::new(s.E, s.G * 5.0, s.area, s.iy, s.iz, s.j).unwrap(),
+            FrameSection3D::new(s.E(), s.G() * 5.0, s.area(), s.iy(), s.iz(), s.j()).unwrap(),
             default_ref(),
         )
         .unwrap();
@@ -660,8 +660,8 @@ mod local_stiffness {
 
         let s = steel_section();
         // Axial: EA/L → halving when L doubles
-        let EA_L1 = s.E * s.area / 1.0;
-        let EA_L2 = s.E * s.area / 2.0;
+        let EA_L1 = s.E() * s.area() / 1.0;
+        let EA_L2 = s.E() * s.area() / 2.0;
         assert!((k1[0][0] - EA_L1).abs() < 1e-3);
         assert!((k2[0][0] - EA_L2).abs() < 1e-3);
 
@@ -680,7 +680,15 @@ mod local_stiffness {
         let e2 = FrameElement3D::new(
             0,
             1,
-            FrameSection3D::new(s.E, s.G, s.area * 3.0, s.iy * 5.0, s.iz * 7.0, s.j * 2.0).unwrap(),
+            FrameSection3D::new(
+                s.E(),
+                s.G(),
+                s.area() * 3.0,
+                s.iy() * 5.0,
+                s.iz() * 7.0,
+                s.j() * 2.0,
+            )
+            .unwrap(),
             default_ref(),
         )
         .unwrap();
@@ -2484,4 +2492,385 @@ fn phase135_both_planes_and_scale() {
         (m_z + Q135 * L * L / 2.0).abs() < 1e-6 * Q135 * L,
         "Mz: got {m_z:.6e}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 136: API invariants and numerical robustness
+// ---------------------------------------------------------------------------
+
+mod phase136 {
+    use super::*;
+
+    // --- local_stiffness: NaN / infinity coordinate rejection ---
+
+    #[test]
+    fn local_stiffness_rejects_nan_pi() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((f64::NAN, 0.0, 0.0), (1.0, 0.0, 0.0));
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn local_stiffness_rejects_nan_pj() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((0.0, 0.0, 0.0), (1.0, f64::NAN, 0.0));
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn local_stiffness_rejects_inf_pi() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((f64::INFINITY, 0.0, 0.0), (1.0, 0.0, 0.0));
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn local_stiffness_rejects_inf_pj() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((0.0, 0.0, 0.0), (1.0, 0.0, f64::INFINITY));
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn local_stiffness_rejects_neg_inf() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((f64::NEG_INFINITY, 0.0, 0.0), (1.0, 0.0, 0.0));
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    // --- local_stiffness: zero / near-zero length ---
+
+    #[test]
+    fn local_stiffness_rejects_zero_length() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((1.0, 2.0, 3.0), (1.0, 2.0, 3.0));
+        assert!(matches!(err, Err(FemError::ZeroLengthMember(_))));
+    }
+
+    #[test]
+    fn local_stiffness_rejects_near_zero_length_overflow() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_stiffness((0.0, 0.0, 0.0), (1e-200, 0.0, 0.0));
+        assert!(
+            err.is_err(),
+            "near-zero length causing overflow must be rejected"
+        );
+    }
+
+    // --- local_stiffness: extreme but finite coordinates ---
+
+    #[test]
+    fn local_stiffness_extreme_coordinates_finite() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let k = e.local_stiffness((0.0, 0.0, 0.0), (1e150, 0.0, 0.0));
+        assert!(k.is_ok(), "extreme finite coordinates should not fail");
+        let k = k.unwrap();
+        for i in 0..12 {
+            for j in 0..12 {
+                assert!(k[i][j].is_finite(), "entry [{i}][{j}] not finite");
+            }
+        }
+    }
+
+    #[test]
+    fn local_stiffness_all_entries_finite() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let k = e.local_stiffness((0.0, 0.0, 0.0), (3.0, 4.0, 0.0)).unwrap();
+        for i in 0..12 {
+            for j in 0..12 {
+                assert!(k[i][j].is_finite(), "entry [{i}][{j}] not finite");
+            }
+        }
+    }
+
+    // --- local_axes: NaN / infinity rejection ---
+
+    #[test]
+    fn local_axes_rejects_nan() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_axes((f64::NAN, 0.0, 0.0), (1.0, 0.0, 0.0));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn local_axes_rejects_inf() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let err = e.local_axes((0.0, 0.0, 0.0), (1.0, f64::INFINITY, 0.0));
+        assert!(err.is_err());
+    }
+
+    // --- FrameSection3D setters: reject invalid values ---
+
+    #[test]
+    fn section_setter_rejects_nan() {
+        let mut s = steel_section();
+        assert!(s.set_E(f64::NAN).is_err());
+        assert!(s.set_G(f64::NAN).is_err());
+        assert!(s.set_area(f64::NAN).is_err());
+        assert!(s.set_iy(f64::NAN).is_err());
+        assert!(s.set_iz(f64::NAN).is_err());
+        assert!(s.set_j(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn section_setter_rejects_zero() {
+        let mut s = steel_section();
+        assert!(s.set_E(0.0).is_err());
+        assert!(s.set_G(0.0).is_err());
+        assert!(s.set_area(0.0).is_err());
+        assert!(s.set_iy(0.0).is_err());
+        assert!(s.set_iz(0.0).is_err());
+        assert!(s.set_j(0.0).is_err());
+    }
+
+    #[test]
+    fn section_setter_rejects_negative() {
+        let mut s = steel_section();
+        assert!(s.set_E(-1.0).is_err());
+        assert!(s.set_G(-1.0).is_err());
+        assert!(s.set_area(-1.0).is_err());
+        assert!(s.set_iy(-1.0).is_err());
+        assert!(s.set_iz(-1.0).is_err());
+        assert!(s.set_j(-1.0).is_err());
+    }
+
+    #[test]
+    fn section_setter_rejects_inf() {
+        let mut s = steel_section();
+        assert!(s.set_E(f64::INFINITY).is_err());
+        assert!(s.set_G(f64::INFINITY).is_err());
+        assert!(s.set_area(f64::INFINITY).is_err());
+        assert!(s.set_iy(f64::INFINITY).is_err());
+        assert!(s.set_iz(f64::INFINITY).is_err());
+        assert!(s.set_j(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn section_setter_updates_correctly() {
+        let mut s = steel_section();
+        s.set_E(210e9).unwrap();
+        assert!((s.E() - 210e9).abs() < 1e-3);
+        s.set_area(2e-3).unwrap();
+        assert!((s.area() - 2e-3).abs() < 1e-15);
+        s.set_j(5e-6).unwrap();
+        assert!((s.j() - 5e-6).abs() < 1e-18);
+    }
+
+    #[test]
+    fn section_setter_rejects_neg_inf() {
+        let mut s = steel_section();
+        assert!(s.set_E(f64::NEG_INFINITY).is_err());
+    }
+
+    // --- FrameModel3D::add_node: NaN / infinity rejection ---
+
+    #[test]
+    fn add_node_rejects_nan() {
+        let mut m = FrameModel3D::new();
+        assert!(m.add_node(f64::NAN, 0.0, 0.0).is_err());
+        assert!(m.add_node(0.0, f64::NAN, 0.0).is_err());
+        assert!(m.add_node(0.0, 0.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn add_node_rejects_inf() {
+        let mut m = FrameModel3D::new();
+        assert!(m.add_node(f64::INFINITY, 0.0, 0.0).is_err());
+        assert!(m.add_node(0.0, f64::NEG_INFINITY, 0.0).is_err());
+    }
+
+    // --- FrameModel3D::add_nodal_load: invalid index / non-finite ---
+
+    #[test]
+    fn add_nodal_load_rejects_invalid_node() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        let err = m.add_nodal_load(99, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(matches!(err, Err(FemError::InvalidNode(_))));
+    }
+
+    #[test]
+    fn add_nodal_load_rejects_nan_force() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        let err = m.add_nodal_load(0, f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+        let err = m.add_nodal_load(0, 0.0, 0.0, 0.0, 0.0, 0.0, f64::INFINITY);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    // --- FrameModel3D member loads: invalid index / non-finite ---
+
+    #[test]
+    fn add_member_load_rejects_invalid_member() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.add_node(1.0, 0.0, 0.0).unwrap();
+        m.add_member(0, 1, steel_section(), default_ref()).unwrap();
+        let err = m.add_uniform_y(99, 1.0);
+        assert!(matches!(err, Err(FemError::InvalidMember(_))));
+    }
+
+    #[test]
+    fn add_member_load_rejects_nan_intensity() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.add_node(1.0, 0.0, 0.0).unwrap();
+        m.add_member(0, 1, steel_section(), default_ref()).unwrap();
+        assert!(m.add_uniform_y(0, f64::NAN).is_err());
+        assert!(m.add_uniform_axial(0, f64::INFINITY).is_err());
+        assert!(m.add_linear_y(0, f64::NAN, 1.0).is_err());
+        assert!(m.add_linear_z(0, 1.0, f64::NEG_INFINITY).is_err());
+    }
+
+    // --- fix_dof: constraint semantics ---
+
+    #[test]
+    fn fix_dof_idempotent_same_value() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Ux, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Ux, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Uy, 1.5).unwrap();
+        m.fix_dof(0, Dof3D::Uy, 1.5).unwrap();
+    }
+
+    #[test]
+    fn fix_dof_conflicting_values() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Ux, 0.0).unwrap();
+        let err = m.fix_dof(0, Dof3D::Ux, 1.0);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn fix_dof_rejects_nan_value() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        let err = m.fix_dof(0, Dof3D::Ux, f64::NAN);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn fix_dof_rejects_inf_value() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        let err = m.fix_dof(0, Dof3D::Ux, f64::INFINITY);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+        let err = m.fix_dof(0, Dof3D::Ux, f64::NEG_INFINITY);
+        assert!(matches!(err, Err(FemError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn fix_dof_rejects_invalid_node() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        let err = m.fix_dof(99, Dof3D::Ux, 0.0);
+        assert!(matches!(err, Err(FemError::InvalidNode(_))));
+    }
+
+    #[test]
+    fn fix_dof_different_dofs_same_node_ok() {
+        let mut m = FrameModel3D::new();
+        m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Ux, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Uy, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Uz, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Rx, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Ry, 0.0).unwrap();
+        m.fix_dof(0, Dof3D::Rz, 0.0).unwrap();
+    }
+
+    // --- Solver: empty model rejection ---
+
+    #[test]
+    fn solver_rejects_empty_model() {
+        let m = FrameModel3D::new();
+        assert!(m.solve().is_err());
+    }
+
+    // --- Solver: well-posed model produces finite solution ---
+
+    #[test]
+    fn solver_produces_finite_solution() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(2.0, 0.0, 0.0).unwrap();
+        m.add_member(n0, n1, steel_section(), default_ref())
+            .unwrap();
+        m.fix_node(n0).unwrap();
+        m.fix_dof(n1, Dof3D::Uy, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Uz, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Rx, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Ry, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Rz, 0.0).unwrap();
+        m.add_nodal_load(n1, 1e3, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        let result = m.solve().unwrap();
+        for i in 0..2 {
+            for &dof in Dof3D::ALL.iter() {
+                let d = result.displacement(i, dof).unwrap();
+                assert!(
+                    d.is_finite(),
+                    "displacement node {i} dof {:?} not finite",
+                    dof
+                );
+            }
+        }
+    }
+
+    // --- FrameSection3D getters: verify encapsulation ---
+
+    #[test]
+    fn section_getters_match_constructor() {
+        let s = steel_section();
+        assert!(s.E() > 0.0 && s.E().is_finite());
+        assert!(s.G() > 0.0 && s.G().is_finite());
+        assert!(s.area() > 0.0 && s.area().is_finite());
+        assert!(s.iy() > 0.0 && s.iy().is_finite());
+        assert!(s.iz() > 0.0 && s.iz().is_finite());
+        assert!(s.j() > 0.0 && s.j().is_finite());
+    }
+
+    // --- FrameElement3D getters ---
+
+    #[test]
+    fn element_getters_match_constructor() {
+        let s = steel_section();
+        let e = FrameElement3D::new(2, 5, s, [0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(e.node_i(), 2);
+        assert_eq!(e.node_j(), 5);
+        assert_eq!(e.ref_vec(), [0.0, 1.0, 0.0]);
+    }
+
+    // --- FrameModel3D accessors ---
+
+    #[test]
+    fn model_accessors() {
+        let mut m = FrameModel3D::new();
+        assert_eq!(m.n_nodes(), 0);
+        assert_eq!(m.n_members(), 0);
+        let n0 = m.add_node(1.0, 2.0, 3.0).unwrap();
+        let n1 = m.add_node(4.0, 5.0, 6.0).unwrap();
+        assert_eq!(m.n_nodes(), 2);
+        m.add_member(n0, n1, steel_section(), default_ref())
+            .unwrap();
+        assert_eq!(m.n_members(), 1);
+        let node = m.node(n0).unwrap();
+        assert!((node.x() - 1.0).abs() < 1e-15);
+        assert!((node.y() - 2.0).abs() < 1e-15);
+        assert!((node.z() - 3.0).abs() < 1e-15);
+        assert_eq!(node.id(), 0);
+    }
+
+    // --- length() uses hypot for overflow resistance ---
+
+    #[test]
+    fn length_hypot_overflow_resistance() {
+        let e = FrameElement3D::new(0, 1, steel_section(), default_ref()).unwrap();
+        let big = 1e300;
+        let l = e.length((0.0, 0.0, 0.0), (big, big, 0.0));
+        assert!(l.is_finite(), "hypot should avoid overflow");
+        assert!((l - big * 2.0_f64.sqrt()).abs() / l < 1e-10);
+    }
 }
