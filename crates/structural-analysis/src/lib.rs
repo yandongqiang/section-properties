@@ -120,6 +120,7 @@
 
 pub mod beam_fem;
 pub mod frame;
+pub mod frame3d;
 pub mod load;
 pub mod mechanism;
 pub mod postprocessing;
@@ -134,6 +135,7 @@ pub use crate::frame::{
     EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,
     PreparedFrameAnalysis, StructuralDiagnostic,
 };
+pub use crate::frame3d::{FrameElement3D, FrameSection3D};
 pub use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource};
 pub use crate::postprocessing::{
     Envelope, EnvelopeSample, Extremum, NodeDisplacementSample, NodeReactionSample,
