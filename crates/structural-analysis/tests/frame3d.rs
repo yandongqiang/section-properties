@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::needless_range_loop)]
 
-use structural_analysis::{FemError, FrameElement3D, FrameSection3D};
+use structural_analysis::{Dof3D, FemError, FrameElement3D, FrameModel3D, FrameSection3D};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -894,4 +894,623 @@ mod transformation {
             );
         }
     }
+}
+
+// ===========================================================================
+// Phase 134: Global model, solver, and analysis result tests
+// ===========================================================================
+
+/// Phase 134 section: E=200 GPa, G=80 GPa, A=1e-3, Iy=2e-6, Iz=1e-6, J=3e-6.
+fn phase134_section() -> FrameSection3D {
+    FrameSection3D::new(200e9, 80e9, 1e-3, 2e-6, 1e-6, 3e-6).unwrap()
+}
+
+const E134: f64 = 200e9;
+const G134: f64 = 80e9;
+const A134: f64 = 1e-3;
+const IY134: f64 = 2e-6;
+const IZ134: f64 = 1e-6;
+const J134: f64 = 3e-6;
+const L134: f64 = 1.0;
+
+// ---------------------------------------------------------------------------
+// Analytical benchmarks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase134_axial_bar_displacement() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, p, 0.0, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = p * L134 / (E134 * A134);
+    let ux = result.displacement(n1, Dof3D::Ux).unwrap();
+    assert!(
+        (ux - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "axial displacement: got {ux:.6e}, expected {delta:.6e}"
+    );
+
+    let rx = result.reaction(n0, Dof3D::Ux).unwrap();
+    assert!(
+        (rx + p).abs() < 1e-6 * p,
+        "axial reaction: got {rx:.6e}, expected {}",
+        -p
+    );
+}
+
+#[test]
+fn phase134_torsion_displacement() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let t = 1e2_f64;
+    model
+        .add_nodal_load(n1, 0.0, 0.0, 0.0, t, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let theta = t * L134 / (G134 * J134);
+    let rx = result.displacement(n1, Dof3D::Rx).unwrap();
+    assert!(
+        (rx - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "torsion rotation: got {rx:.6e}, expected {theta:.6e}"
+    );
+
+    let mrx = result.reaction(n0, Dof3D::Rx).unwrap();
+    assert!(
+        (mrx + t).abs() < 1e-6 * t,
+        "torsion reaction: got {mrx:.6e}, expected {}",
+        -t
+    );
+}
+
+#[test]
+fn phase134_cantilever_bending_xy() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = p * L134.powi(3) / (3.0 * E134 * IZ134);
+    let theta = p * L134.powi(2) / (2.0 * E134 * IZ134);
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        (uy - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "bending XY displacement: got {uy:.6e}, expected {delta:.6e}"
+    );
+
+    let rz = result.displacement(n1, Dof3D::Rz).unwrap();
+    assert!(
+        (rz - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "bending XY rotation: got {rz:.6e}, expected {theta:.6e}"
+    );
+
+    let ry = result.reaction(n0, Dof3D::Uy).unwrap();
+    assert!(
+        (ry + p).abs() < 1e-6 * p,
+        "bending XY reaction force: got {ry:.6e}, expected {}",
+        -p
+    );
+
+    let mz = result.reaction(n0, Dof3D::Rz).unwrap();
+    let expected_mz = -p * L134;
+    assert!(
+        (mz - expected_mz).abs() < 1e-6 * p * L134,
+        "bending XY reaction moment: got {mz:.6e}, expected {expected_mz:.6e}"
+    );
+}
+
+#[test]
+fn phase134_cantilever_bending_xz() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, 0.0, 0.0, p, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = p * L134.powi(3) / (3.0 * E134 * IY134);
+    let theta = -p * L134.powi(2) / (2.0 * E134 * IY134);
+
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+    assert!(
+        (uz - delta).abs() < 1e-10 * (1.0 + delta.abs()),
+        "bending XZ displacement: got {uz:.6e}, expected {delta:.6e}"
+    );
+
+    let ry = result.displacement(n1, Dof3D::Ry).unwrap();
+    assert!(
+        (ry - theta).abs() < 1e-10 * (1.0 + theta.abs()),
+        "bending XZ rotation: got {ry:.6e}, expected {theta:.6e}"
+    );
+
+    let rz = result.reaction(n0, Dof3D::Uz).unwrap();
+    assert!(
+        (rz + p).abs() < 1e-6 * p,
+        "bending XZ reaction force: got {rz:.6e}, expected {}",
+        -p
+    );
+
+    let my = result.reaction(n0, Dof3D::Ry).unwrap();
+    let expected_my = p * L134;
+    assert!(
+        (my - expected_my).abs() < 1e-6 * p * L134,
+        "bending XZ reaction moment: got {my:.6e}, expected {expected_my:.6e}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase134_oblique_member_axial() {
+    let s = L134 / 2f64.sqrt();
+
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(s, s, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 0.0, 1.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    let px = p / 2f64.sqrt();
+    model
+        .add_nodal_load(n1, px, px, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let delta = p * L134 / (E134 * A134);
+    let expected = delta / 2f64.sqrt();
+
+    let ux = result.displacement(n1, Dof3D::Ux).unwrap();
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    let uz = result.displacement(n1, Dof3D::Uz).unwrap();
+
+    assert!(
+        (ux - expected).abs() < 1e-10 * (1.0 + expected.abs()),
+        "oblique ux: got {ux:.6e}, expected {expected:.6e}"
+    );
+    assert!(
+        (uy - expected).abs() < 1e-10 * (1.0 + expected.abs()),
+        "oblique uy: got {uy:.6e}, expected {expected:.6e}"
+    );
+    assert!(uz.abs() < 1e-12, "oblique uz should be zero, got {uz:.6e}");
+}
+
+#[test]
+fn phase134_two_member_L_frame() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(1.0, 0.0, 0.0).unwrap();
+    let n2 = model.add_node(1.0, 0.0, 1.0).unwrap();
+
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model
+        .add_member(n1, n2, phase134_section(), [1.0, 0.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n2, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let uy = result.displacement(n2, Dof3D::Uy).unwrap();
+    assert!(
+        uy > 0.0,
+        "tip displacement should be positive, got {uy:.6e}"
+    );
+
+    let mut sum_fy = 0.0;
+    let mut sum_mz = 0.0;
+    for i in 0..result.n_nodes {
+        sum_fy += result.reactions[i * 6 + 1];
+        let (x, _y, z) = result.node_coords[i];
+        let fy = result.reactions[i * 6 + 1];
+        let mz = result.reactions[i * 6 + 5];
+        sum_mz += mz + x * fy;
+        let _ = z;
+    }
+    sum_fy += p;
+    sum_mz += 1.0 * p;
+
+    assert!(
+        sum_fy.abs() < 1e-6 * p,
+        "force equilibrium: sum_fy = {sum_fy:.6e}"
+    );
+    assert!(
+        sum_mz.abs() < 1e-6 * p,
+        "moment equilibrium: sum_mz = {sum_mz:.6e}"
+    );
+}
+
+#[test]
+fn phase134_prescribed_nonzero_displacement() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+
+    let delta0 = 5e-4_f64;
+    model.fix_dof(n0, Dof3D::Ux, delta0).unwrap();
+    model.fix_dof(n0, Dof3D::Uy, 0.0).unwrap();
+    model.fix_dof(n0, Dof3D::Uz, 0.0).unwrap();
+    model.fix_dof(n0, Dof3D::Rx, 0.0).unwrap();
+    model.fix_dof(n0, Dof3D::Ry, 0.0).unwrap();
+    model.fix_dof(n0, Dof3D::Rz, 0.0).unwrap();
+
+    let result = model.solve().unwrap();
+
+    let ux0 = result.displacement(n0, Dof3D::Ux).unwrap();
+    let ux1 = result.displacement(n1, Dof3D::Ux).unwrap();
+    assert!(
+        (ux0 - delta0).abs() < 1e-15,
+        "prescribed ux0: got {ux0:.6e}"
+    );
+    assert!(
+        (ux1 - delta0).abs() < 1e-12,
+        "rigid translation ux1: got {ux1:.6e}, expected {delta0:.6e}"
+    );
+
+    for dof in Dof3D::ALL {
+        let d = result.displacement(n1, dof).unwrap();
+        if dof == Dof3D::Ux {
+            continue;
+        }
+        assert!(
+            d.abs() < 1e-12,
+            "DOF {:?} at n1 should be zero, got {d:.6e}",
+            dof
+        );
+    }
+
+    for i in 0..result.reactions.len() {
+        assert!(
+            result.reactions[i].abs() < 1e-6,
+            "reaction {i} should be zero, got {}",
+            result.reactions[i]
+        );
+    }
+}
+
+#[test]
+fn phase134_fully_constrained() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.fix_node(n1).unwrap();
+
+    let result = model.solve().unwrap();
+
+    for i in 0..result.displacements.len() {
+        assert!(
+            result.displacements[i].abs() < 1e-15,
+            "displacement {i} should be zero"
+        );
+    }
+    for i in 0..result.reactions.len() {
+        assert!(
+            result.reactions[i].abs() < 1e-15,
+            "reaction {i} should be zero"
+        );
+    }
+}
+
+#[test]
+fn phase134_mechanism_singular() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+
+    model
+        .add_nodal_load(n1, 1e3, 0.0, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve();
+    assert!(result.is_err(), "unconstrained model should fail");
+}
+
+#[test]
+fn phase134_no_load_zero_displacement() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let result = model.solve().unwrap();
+
+    for i in 0..result.displacements.len() {
+        assert!(
+            result.displacements[i].abs() < 1e-15,
+            "displacement {i} should be zero"
+        );
+    }
+    for i in 0..result.reactions.len() {
+        assert!(
+            result.reactions[i].abs() < 1e-15,
+            "reaction {i} should be zero"
+        );
+    }
+}
+
+#[test]
+fn phase134_solve_twice() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model
+        .add_nodal_load(n1, 0.0, 1e3, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let r1 = model.solve().unwrap();
+    let r2 = model.solve().unwrap();
+
+    for i in 0..r1.displacements.len() {
+        assert!(
+            (r1.displacements[i] - r2.displacements[i]).abs() < 1e-15,
+            "displacement mismatch at DOF {i}"
+        );
+    }
+    for i in 0..r1.reactions.len() {
+        assert!(
+            (r1.reactions[i] - r2.reactions[i]).abs() < 1e-15,
+            "reaction mismatch at DOF {i}"
+        );
+    }
+}
+
+#[test]
+fn phase134_member_end_forces_axial() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, p, 0.0, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+    let f = result.member_end_forces(0).unwrap();
+
+    assert!(
+        (f[0] + p).abs() < 1e-6 * p,
+        "axial end force at i: got {:.6e}, expected {}",
+        f[0],
+        -p
+    );
+    assert!(
+        (f[6] - p).abs() < 1e-6 * p,
+        "axial end force at j: got {:.6e}, expected {}",
+        f[6],
+        p
+    );
+    for idx in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11] {
+        assert!(
+            f[idx].abs() < 1e-6 * p,
+            "non-axial end force {idx} should be zero, got {:.6e}",
+            f[idx]
+        );
+    }
+}
+
+#[test]
+fn phase134_member_end_forces_bending() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+    let f = result.member_end_forces(0).unwrap();
+
+    assert!(
+        (f[1] + p).abs() < 1e-6 * p,
+        "bending end force at i (fy): got {:.6e}, expected {}",
+        f[1],
+        -p
+    );
+    assert!(
+        (f[7] - p).abs() < 1e-6 * p,
+        "bending end force at j (fy): got {:.6e}, expected {}",
+        f[7],
+        p
+    );
+    let expected_mz_i = -p * L134;
+    assert!(
+        (f[5] - expected_mz_i).abs() < 1e-6 * p * L134,
+        "bending end moment at i (mz): got {:.6e}, expected {expected_mz_i:.6e}",
+        f[5]
+    );
+    assert!(
+        f[11].abs() < 1e-6 * p * L134,
+        "bending end moment at j (mz) should be zero, got {:.6e}",
+        f[11]
+    );
+}
+
+#[test]
+fn phase134_pin_node() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    let n2 = model.add_node(2.0 * L134, 0.0, 0.0).unwrap();
+
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model
+        .add_member(n1, n2, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model.pin_node(n2).unwrap();
+
+    let p = 1e3_f64;
+    model
+        .add_nodal_load(n1, 0.0, p, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    let uy = result.displacement(n1, Dof3D::Uy).unwrap();
+    assert!(
+        uy > 0.0,
+        "mid-span displacement should be positive, got {uy:.6e}"
+    );
+
+    let uy2 = result.displacement(n2, Dof3D::Uy).unwrap();
+    assert!(
+        uy2.abs() < 1e-10,
+        "pinned node y-disp should be zero, got {uy2:.6e}"
+    );
+}
+
+#[test]
+fn phase134_solver_selection() {
+    use section_properties::fea::solver::SolverSelection;
+
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model
+        .add_nodal_load(n1, 1e3, 0.0, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let solver = structural_analysis::FrameSolver3D::from_model(&model).unwrap();
+    let result_auto = solver.solve().unwrap();
+
+    let mut solver2 = structural_analysis::FrameSolver3D::from_model(&model).unwrap();
+    solver2.set_solver(SolverSelection::dense());
+    let result_dense = solver2.solve().unwrap();
+
+    let ux_auto = result_auto.displacement(n1, Dof3D::Ux).unwrap();
+    let ux_dense = result_dense.displacement(n1, Dof3D::Ux).unwrap();
+    assert!(
+        (ux_auto - ux_dense).abs() < 1e-10 * (1.0 + ux_auto.abs()),
+        "solver selection mismatch: auto={ux_auto:.6e}, dense={ux_dense:.6e}"
+    );
+}
+
+#[test]
+fn phase134_model_validation_errors() {
+    let empty = FrameModel3D::new();
+    assert!(empty.solve().is_err(), "empty model should fail");
+
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let _n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    assert!(
+        model
+            .add_member(n0, 99, phase134_section(), [0.0, 1.0, 0.0])
+            .is_err(),
+        "out-of-bounds node_j should fail"
+    );
+
+    assert!(
+        model
+            .add_nodal_load(99, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            .is_err(),
+        "out-of-bounds nodal load should fail"
+    );
+
+    assert!(
+        model.fix_dof(99, Dof3D::Ux, 0.0).is_err(),
+        "out-of-bounds fix_dof should fail"
+    );
+}
+
+#[test]
+fn phase134_result_access_errors() {
+    let mut model = FrameModel3D::new();
+    let n0 = model.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = model.add_node(L134, 0.0, 0.0).unwrap();
+    model
+        .add_member(n0, n1, phase134_section(), [0.0, 1.0, 0.0])
+        .unwrap();
+    model.fix_node(n0).unwrap();
+    model
+        .add_nodal_load(n1, 1e3, 0.0, 0.0, 0.0, 0.0, 0.0)
+        .unwrap();
+
+    let result = model.solve().unwrap();
+
+    assert!(result.displacement(99, Dof3D::Ux).is_err());
+    assert!(result.reaction(99, Dof3D::Ux).is_err());
+    assert!(result.member_end_forces(99).is_err());
 }

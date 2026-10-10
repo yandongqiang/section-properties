@@ -135,7 +135,10 @@ pub use crate::frame::{
     EquilibriumReport, FrameAnalysisResult, FrameModel, FrameSolver, MemberHandle, NodeHandle,
     PreparedFrameAnalysis, StructuralDiagnostic,
 };
-pub use crate::frame3d::{FrameElement3D, FrameSection3D};
+pub use crate::frame3d::{
+    Dof3D, FrameAnalysisResult3D, FrameElement3D, FrameModel3D, FrameNode3D, FrameSection3D,
+    FrameSolver3D,
+};
 pub use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource};
 pub use crate::postprocessing::{
     Envelope, EnvelopeSample, Extremum, NodeDisplacementSample, NodeReactionSample,
