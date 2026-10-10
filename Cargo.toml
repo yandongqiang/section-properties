@@ -3,5 +3,6 @@ members = [
     "crates/section-properties",
     "crates/structural-analysis",
     "apps/viewport-poc",
+    "apps/tauri-viewport-poc/src-tauri",
 ]
 resolver = "2"
