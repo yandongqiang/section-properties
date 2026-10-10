@@ -3153,3 +3153,296 @@ mod phase137 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 138: global end-force recovery and orientation preservation
+// ---------------------------------------------------------------------------
+
+mod phase138 {
+    use super::*;
+
+    /// Helper: build a cantilever from (0,0,0) to `endpoint` with `ref_vec`,
+    /// apply axial force P at the free end along global X, and return result.
+    fn cantilever_solve(
+        endpoint: (f64, f64, f64),
+        ref_vec: [f64; 3],
+        p: f64,
+    ) -> structural_analysis::FrameAnalysisResult3D {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(endpoint.0, endpoint.1, endpoint.2).unwrap();
+        m.add_member(n0, n1, steel_section(), ref_vec).unwrap();
+        m.fix_node(n0).unwrap();
+        m.add_nodal_load(n1, p, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+        m.solve().unwrap()
+    }
+
+    /// Member along global X — local axes align with global for ref=[0,0,1].
+    /// Global end forces should equal local end forces.
+    #[test]
+    fn global_forces_aligned_x() {
+        let result = cantilever_solve((2.0, 0.0, 0.0), [0.0, 0.0, 1.0], 5e3);
+        let f_local = result.member_end_forces(0).unwrap();
+        let f_global = result.member_end_forces_global(0).unwrap();
+
+        for i in 0..12 {
+            assert!(
+                (f_local[i] - f_global[i]).abs() < 1e-6 * (1.0 + f_local[i].abs()),
+                "[{i}]: local={:.6e}, global={:.6e}",
+                f_local[i],
+                f_global[i]
+            );
+        }
+    }
+
+    /// Member along global Y — local x = global Y, local y/z differ.
+    #[test]
+    fn global_forces_aligned_y() {
+        let result = cantilever_solve((0.0, 2.0, 0.0), [0.0, 0.0, 1.0], 5e3);
+        let f_global = result.member_end_forces_global(0).unwrap();
+
+        // Applied force is +P in global X. At free end (j), the member end
+        // force in global X should be +P (node-on-member). At fixed end (i),
+        // it should be -P.
+        let p = 5e3;
+        assert!(
+            (f_global[6] - p).abs() < 1e-3 * p,
+            "Fx at j: {:.6e}, expected {:.6e}",
+            f_global[6],
+            p
+        );
+        assert!(
+            (f_global[0] + p).abs() < 1e-3 * p,
+            "Fx at i: {:.6e}, expected {:.6e}",
+            f_global[0],
+            -p
+        );
+        // No global Y or Z force components
+        assert!(f_global[1].abs() < 1e-3 * p, "Fy at i: {:.6e}", f_global[1]);
+        assert!(f_global[2].abs() < 1e-3 * p, "Fz at i: {:.6e}", f_global[2]);
+        assert!(f_global[7].abs() < 1e-3 * p, "Fy at j: {:.6e}", f_global[7]);
+        assert!(f_global[8].abs() < 1e-3 * p, "Fz at j: {:.6e}", f_global[8]);
+    }
+
+    /// Inclined member with nontrivial ref_vec.
+    #[test]
+    fn global_forces_inclined() {
+        let result = cantilever_solve((1.5, 2.0, 0.8), [0.3, 0.7, 0.5], 5e3);
+        let f_global = result.member_end_forces_global(0).unwrap();
+        let f_local = result.member_end_forces(0).unwrap();
+
+        // The applied load is purely global X. At the free end, the global
+        // force should be (P, 0, 0) — the member pushes back with the
+        // applied load in global coordinates.
+        let p = 5e3;
+        assert!(
+            (f_global[6] - p).abs() < 1e-3 * p,
+            "Fx at j: {:.6e}, expected {:.6e}",
+            f_global[6],
+            p
+        );
+        assert!(f_global[7].abs() < 1e-3 * p, "Fy at j: {:.6e}", f_global[7]);
+        assert!(f_global[8].abs() < 1e-3 * p, "Fz at j: {:.6e}", f_global[8]);
+
+        // At fixed end, sum of global forces = 0
+        assert!(
+            (f_global[0] + f_global[6]).abs() < 1e-3 * p,
+            "ΣFx: {:.6e}",
+            f_global[0] + f_global[6]
+        );
+        assert!(
+            (f_global[1] + f_global[7]).abs() < 1e-3 * p,
+            "ΣFy: {:.6e}",
+            f_global[1] + f_global[7]
+        );
+        assert!(
+            (f_global[2] + f_global[8]).abs() < 1e-3 * p,
+            "ΣFz: {:.6e}",
+            f_global[2] + f_global[8]
+        );
+
+        // Verify local axial force is non-zero (load has a component along member)
+        let local_axial_j = f_local[6];
+        assert!(
+            local_axial_j.abs() > 0.1 * p,
+            "local axial at j should be nonzero"
+        );
+    }
+
+    /// General 3D member with all three translation directions involved.
+    #[test]
+    fn global_forces_general_3d() {
+        let result = cantilever_solve((1.0, 1.0, 1.0), [0.1, 0.9, 0.3], 3e3);
+        let f_global = result.member_end_forces_global(0).unwrap();
+        let p = 3e3;
+
+        // Applied load is global X = P at free end
+        assert!((f_global[6] - p).abs() < 1e-3 * p, "Fx at j");
+        assert!(f_global[7].abs() < 1e-3 * p, "Fy at j");
+        assert!(f_global[8].abs() < 1e-3 * p, "Fz at j");
+
+        // Force balance: f_i + f_j = 0 (no member loads)
+        for i in 0..3 {
+            assert!(
+                (f_global[i] + f_global[i + 6]).abs() < 1e-3 * p,
+                "force balance [{i}]"
+            );
+        }
+    }
+
+    /// Local → global → local round-trip must recover the original local forces.
+    #[test]
+    fn round_trip_local_global_local() {
+        let result = cantilever_solve((1.2, 0.5, 0.9), [0.2, 0.8, 0.4], 4e3);
+        let f_local_original = *result.member_end_forces(0).unwrap();
+        let f_global = result.member_end_forces_global(0).unwrap();
+
+        // Recover local from global: f_local = R · f_global
+        // (since f_global = R^T · f_local, so f_local = R · f_global)
+        let (x_hat, y_hat, z_hat) = result.member_local_axes(0).unwrap();
+        let mut f_local_recovered = [0.0f64; 12];
+        for block in 0..4 {
+            let off = block * 3;
+            // R · f_global: R[i][j] = local_axis_i[j]
+            f_local_recovered[off] = x_hat[0] * f_global[off]
+                + x_hat[1] * f_global[off + 1]
+                + x_hat[2] * f_global[off + 2];
+            f_local_recovered[off + 1] = y_hat[0] * f_global[off]
+                + y_hat[1] * f_global[off + 1]
+                + y_hat[2] * f_global[off + 2];
+            f_local_recovered[off + 2] = z_hat[0] * f_global[off]
+                + z_hat[1] * f_global[off + 1]
+                + z_hat[2] * f_global[off + 2];
+        }
+
+        for i in 0..12 {
+            assert!(
+                (f_local_original[i] - f_local_recovered[i]).abs()
+                    < 1e-10 * (1.0 + f_local_original[i].abs()),
+                "round-trip [{i}]: original={:.10e}, recovered={:.10e}",
+                f_local_original[i],
+                f_local_recovered[i]
+            );
+        }
+    }
+
+    /// Deterministic recovery: member_local_axes from result matches
+    /// FrameElement3D::local_axes from the original model.
+    #[test]
+    fn local_axes_match_element() {
+        let pi = (0.0, 0.0, 0.0);
+        let pj = (1.5, 2.0, 0.8);
+        let ref_vec = [0.3, 0.7, 0.5];
+
+        let e = FrameElement3D::new(0, 1, steel_section(), ref_vec).unwrap();
+        let (x1, y1, z1) = e.local_axes(pi, pj).unwrap();
+
+        let result = cantilever_solve(pj, ref_vec, 1e3);
+        let (x2, y2, z2) = result.member_local_axes(0).unwrap();
+
+        for i in 0..3 {
+            assert!((x1[i] - x2[i]).abs() < 1e-12, "x_hat[{i}]");
+            assert!((y1[i] - y2[i]).abs() < 1e-12, "y_hat[{i}]");
+            assert!((z1[i] - z2[i]).abs() < 1e-12, "z_hat[{i}]");
+        }
+    }
+
+    /// Global end forces at a free node match the applied nodal load.
+    #[test]
+    fn global_forces_match_applied_load() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(2.0, 1.0, 0.5).unwrap();
+        m.add_member(n0, n1, steel_section(), [0.0, 0.0, 1.0])
+            .unwrap();
+        m.fix_node(n0).unwrap();
+
+        let fx = 3e3;
+        let fy = -2e3;
+        let fz = 1e3;
+        let mx = 100.0;
+        let my = -50.0;
+        let mz = 200.0;
+        m.add_nodal_load(n1, fx, fy, fz, mx, my, mz).unwrap();
+
+        let result = m.solve().unwrap();
+        let f_global = result.member_end_forces_global(0).unwrap();
+
+        // At free end (j), global end forces = applied load
+        assert!((f_global[6] - fx).abs() < 1e-3 * fx.abs(), "Fx at j");
+        assert!((f_global[7] - fy).abs() < 1e-3 * fy.abs(), "Fy at j");
+        assert!((f_global[8] - fz).abs() < 1e-3 * fz.abs(), "Fz at j");
+        assert!((f_global[9] - mx).abs() < 1e-3 * mx.abs(), "Mx at j");
+        assert!((f_global[10] - my).abs() < 1e-3 * my.abs(), "My at j");
+        assert!((f_global[11] - mz).abs() < 1e-3 * mz.abs(), "Mz at j");
+
+        // At fixed end (i), global end forces = -applied load (equilibrium)
+        assert!((f_global[0] + fx).abs() < 1e-3 * fx.abs(), "Fx at i");
+        assert!((f_global[1] + fy).abs() < 1e-3 * fy.abs(), "Fy at i");
+        assert!((f_global[2] + fz).abs() < 1e-3 * fz.abs(), "Fz at i");
+    }
+
+    /// member_ref_vecs is populated correctly.
+    #[test]
+    fn ref_vecs_stored_correctly() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(1.0, 0.0, 0.0).unwrap();
+        let n2 = m.add_node(2.0, 1.0, 0.0).unwrap();
+        m.add_member(n0, n1, steel_section(), [0.0, 0.0, 1.0])
+            .unwrap();
+        m.add_member(n1, n2, steel_section(), [0.3, 0.7, 0.5])
+            .unwrap();
+        m.fix_node(n0).unwrap();
+        m.fix_dof(n1, Dof3D::Uy, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Uz, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Rx, 0.0).unwrap();
+        m.add_nodal_load(n2, 1e3, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+
+        let result = m.solve().unwrap();
+        assert_eq!(result.member_ref_vecs.len(), 2);
+        assert_eq!(result.member_ref_vecs[0], [0.0, 0.0, 1.0]);
+        assert_eq!(result.member_ref_vecs[1], [0.3, 0.7, 0.5]);
+    }
+
+    /// Invalid member_idx returns error.
+    #[test]
+    fn invalid_member_idx_errors() {
+        let result = cantilever_solve((2.0, 0.0, 0.0), [0.0, 0.0, 1.0], 1e3);
+        assert!(result.member_end_forces_global(99).is_err());
+        assert!(result.member_local_axes(99).is_err());
+    }
+
+    /// Local axes form an orthonormal right-handed basis.
+    #[test]
+    fn local_axes_orthonormal_from_result() {
+        let result = cantilever_solve((1.0, 2.0, 0.5), [0.2, 0.8, 0.4], 1e3);
+        let (x, y, z) = result.member_local_axes(0).unwrap();
+
+        // Unit length
+        let xn = x[0].hypot(x[1]).hypot(x[2]);
+        let yn = y[0].hypot(y[1]).hypot(y[2]);
+        let zn = z[0].hypot(z[1]).hypot(z[2]);
+        assert!((xn - 1.0).abs() < 1e-12, "|x| = {xn}");
+        assert!((yn - 1.0).abs() < 1e-12, "|y| = {yn}");
+        assert!((zn - 1.0).abs() < 1e-12, "|z| = {zn}");
+
+        // Orthogonal
+        let dot_xy = x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        let dot_xz = x[0] * z[0] + x[1] * z[1] + x[2] * z[2];
+        let dot_yz = y[0] * z[0] + y[1] * z[1] + y[2] * z[2];
+        assert!(dot_xy.abs() < 1e-12, "x·y = {dot_xy}");
+        assert!(dot_xz.abs() < 1e-12, "x·z = {dot_xz}");
+        assert!(dot_yz.abs() < 1e-12, "y·z = {dot_yz}");
+
+        // Right-handed: x × y = z
+        let cross = [
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        ];
+        assert!((cross[0] - z[0]).abs() < 1e-12, "(x×y)[0] != z[0]");
+        assert!((cross[1] - z[1]).abs() < 1e-12, "(x×y)[1] != z[1]");
+        assert!((cross[2] - z[2]).abs() < 1e-12, "(x×y)[2] != z[2]");
+    }
+}

@@ -1666,6 +1666,7 @@ impl FrameSolver3D {
             .iter()
             .map(|m| (m.node_i, m.node_j))
             .collect();
+        let member_ref_vecs: Vec<[f64; 3]> = self.model.members.iter().map(|m| m.ref_vec).collect();
 
         Ok(FrameAnalysisResult3D {
             displacements: u_global,
@@ -1673,6 +1674,7 @@ impl FrameSolver3D {
             member_end_forces,
             node_coords,
             member_nodes,
+            member_ref_vecs,
             constrained_dofs,
             n_nodes: self.model.nodes.len(),
             n_members: self.model.members.len(),
@@ -1711,12 +1713,25 @@ impl FrameSolver3D {
 ///
 /// These are the forces that the nodes exert **on the member** (element end
 /// actions). At a constrained node, they match the support reactions
-/// (transformed to local axes). At a!loaded node, they match the applied
+/// (transformed to local axes). At a loaded node, they match the applied
 /// loads (transformed to local axes).
 ///
 /// Computed as `f_local = K_local · T · u_global − f_eq_local`, where
 /// `f_eq_local` is the local equivalent nodal load vector from distributed
 /// member loads (zero if no member loads are applied).
+///
+/// Global end forces are available via
+/// [`member_end_forces_global`](Self::member_end_forces_global), which
+/// transforms local forces using the member's orientation data stored in
+/// [`member_ref_vecs`](Self::member_ref_vecs).
+///
+/// # Member orientation
+///
+/// Each member's reference orientation vector is retained in
+/// `member_ref_vecs`, enabling deterministic reconstruction of the local
+/// coordinate system via [`member_local_axes`](Self::member_local_axes).
+/// Combined with `node_coords` and `member_nodes`, this provides complete
+/// post-processing capability without requiring the original model.
 #[derive(Debug, Clone)]
 pub struct FrameAnalysisResult3D {
     /// Full displacement vector `[ux, uy, uz, rx, ry, rz]` per node.
@@ -1729,6 +1744,8 @@ pub struct FrameAnalysisResult3D {
     pub node_coords: Vec<(f64, f64, f64)>,
     /// Member node connectivity `(node_i, node_j)`.
     pub member_nodes: Vec<(usize, usize)>,
+    /// Member reference orientation vectors (one per member).
+    pub member_ref_vecs: Vec<[f64; 3]>,
     /// Constrained DOFs as `(node_idx, dof)`.
     pub constrained_dofs: Vec<(usize, usize)>,
     /// Number of nodes.
@@ -1781,5 +1798,120 @@ impl FrameAnalysisResult3D {
             )));
         }
         Ok(&self.member_end_forces[member_idx])
+    }
+
+    /// Compute the orthonormal local-axis triple `(x_hat, y_hat, z_hat)` for
+    /// `member_idx` from the stored node coordinates and reference vector.
+    ///
+    /// Uses the same convention as
+    /// [`FrameElement3D::local_axes`](crate::frame3d::FrameElement3D::local_axes):
+    ///
+    /// 1. `x_hat = (p_j − p_i) / L`
+    /// 2. `z_hat = (x_hat × ref) / |x_hat × ref|`
+    /// 3. `y_hat = z_hat × x_hat`
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::ZeroLengthMember`] if the member has zero length.
+    /// [`FemError::InvalidInput`] if the reference vector is parallel to the
+    /// member axis.
+    #[allow(clippy::type_complexity)]
+    pub fn member_local_axes(
+        &self,
+        member_idx: usize,
+    ) -> Result<([f64; 3], [f64; 3], [f64; 3]), FemError> {
+        if member_idx >= self.n_members {
+            return Err(FemError::InvalidMember(format!(
+                "member index {member_idx} out of bounds (max {})",
+                self.n_members.saturating_sub(1)
+            )));
+        }
+        let (ni, nj) = self.member_nodes[member_idx];
+        let pi = self.node_coords[ni];
+        let pj = self.node_coords[nj];
+        let ref_vec = self.member_ref_vecs[member_idx];
+
+        let dx = pj.0 - pi.0;
+        let dy = pj.1 - pi.1;
+        let dz = pj.2 - pi.2;
+        let l = dx.hypot(dy).hypot(dz);
+        if l <= 0.0 {
+            return Err(FemError::ZeroLengthMember(format!(
+                "member {member_idx} has zero length"
+            )));
+        }
+
+        let x_hat = [dx / l, dy / l, dz / l];
+
+        let cross = [
+            x_hat[1] * ref_vec[2] - x_hat[2] * ref_vec[1],
+            x_hat[2] * ref_vec[0] - x_hat[0] * ref_vec[2],
+            x_hat[0] * ref_vec[1] - x_hat[1] * ref_vec[0],
+        ];
+        let cross_norm = cross[0].hypot(cross[1]).hypot(cross[2]);
+        let ref_norm = ref_vec[0].hypot(ref_vec[1]).hypot(ref_vec[2]);
+        let sin_angle = cross_norm / ref_norm;
+        if sin_angle < PARALLEL_TOL {
+            return Err(FemError::InvalidInput(format!(
+                "ref_vec is parallel to member axis; sin(angle) = {sin_angle:.3e}"
+            )));
+        }
+
+        let z_hat = [
+            cross[0] / cross_norm,
+            cross[1] / cross_norm,
+            cross[2] / cross_norm,
+        ];
+        let y_hat = [
+            z_hat[1] * x_hat[2] - z_hat[2] * x_hat[1],
+            z_hat[2] * x_hat[0] - z_hat[0] * x_hat[2],
+            z_hat[0] * x_hat[1] - z_hat[1] * x_hat[0],
+        ];
+
+        Ok((x_hat, y_hat, z_hat))
+    }
+
+    /// Member end forces in **global** coordinates for `member_idx`.
+    ///
+    /// Returns 12 values:
+    /// `[Fx_i, Fy_i, Fz_i, Mx_i, My_i, Mz_i, Fx_j, Fy_j, Fz_j, Mx_j, My_j, Mz_j]`
+    /// in global axes.
+    ///
+    /// The transformation is `f_global = Rᵀ · f_local` applied independently
+    /// to each 3-component group (force and moment at each end), where `R` is
+    /// the 3×3 direction cosine matrix whose rows are the local axes in global
+    /// coordinates. Equivalently, each global 3-vector is the linear
+    /// combination `f[0]·x_hat + f[1]·y_hat + f[2]·z_hat`.
+    ///
+    /// # Local vs global
+    ///
+    /// - **Local** ([`member_end_forces`](Self::member_end_forces)):
+    ///   `fx` = axial, `fy`/`fz` = transverse shear, `mx` = torsion,
+    ///   `my`/`mz` = bending moments. Directly meaningful for engineering
+    ///   interpretation.
+    /// - **Global** (this method): forces and moments resolved along global
+    ///   X/Y/Z axes. Needed for nodal equilibrium checks and visualization.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::ZeroLengthMember`] or [`FemError::InvalidInput`] if the
+    /// stored geometry is degenerate (should not occur for a result from a
+    /// successful solve).
+    pub fn member_end_forces_global(&self, member_idx: usize) -> Result<[f64; 12], FemError> {
+        let f_local = self.member_end_forces(member_idx)?;
+        let (x_hat, y_hat, z_hat) = self.member_local_axes(member_idx)?;
+
+        let mut f_global = [0.0f64; 12];
+        for block in 0..4 {
+            let off = block * 3;
+            for i in 0..3 {
+                f_global[off + i] = f_local[off] * x_hat[i]
+                    + f_local[off + 1] * y_hat[i]
+                    + f_local[off + 2] * z_hat[i];
+            }
+        }
+        Ok(f_global)
     }
 }
