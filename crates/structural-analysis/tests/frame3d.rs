@@ -2874,3 +2874,282 @@ mod phase136 {
         assert!((l - big * 2.0_f64.sqrt()).abs() / l < 1e-10);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 137: independent equilibrium and numerical audit
+// ---------------------------------------------------------------------------
+
+mod phase137 {
+    use super::*;
+
+    /// Check all 6 global equilibrium equations for a solved model.
+    ///
+    /// `applied` is the total external force/moment vector `[Fx,Fy,Fz,Mx,My,Mz]`
+    /// applied at point `(px,py,pz)`.  Reactions come from `result.reactions`.
+    fn check_equilibrium(
+        result: &structural_analysis::FrameAnalysisResult3D,
+        applied: &[(f64, f64, f64, f64, f64, f64, f64, f64, f64)],
+        tol: f64,
+    ) {
+        let mut sum_fx = 0.0;
+        let mut sum_fy = 0.0;
+        let mut sum_fz = 0.0;
+        let mut sum_mx = 0.0;
+        let mut sum_my = 0.0;
+        let mut sum_mz = 0.0;
+
+        for i in 0..result.n_nodes {
+            let (x, y, z) = result.node_coords[i];
+            let rx = result.reactions[i * 6 + 0];
+            let ry = result.reactions[i * 6 + 1];
+            let rz = result.reactions[i * 6 + 2];
+            let mx = result.reactions[i * 6 + 3];
+            let my = result.reactions[i * 6 + 4];
+            let mz = result.reactions[i * 6 + 5];
+            sum_fx += rx;
+            sum_fy += ry;
+            sum_fz += rz;
+            sum_mx += mx + y * rz - z * ry;
+            sum_my += my + z * rx - x * rz;
+            sum_mz += mz + x * ry - y * rx;
+        }
+
+        for &(px, py, pz, fx, fy, fz, mx, my, mz) in applied {
+            sum_fx += fx;
+            sum_fy += fy;
+            sum_fz += fz;
+            sum_mx += mx + py * fz - pz * fy;
+            sum_my += my + pz * fx - px * fz;
+            sum_mz += mz + px * fy - py * fx;
+        }
+
+        let scale = 1.0
+            + applied
+                .iter()
+                .map(|a| a.3.abs() + a.4.abs() + a.5.abs())
+                .sum::<f64>();
+        assert!(sum_fx.abs() < tol * scale, "ΣFx = {sum_fx:.6e}");
+        assert!(sum_fy.abs() < tol * scale, "ΣFy = {sum_fy:.6e}");
+        assert!(sum_fz.abs() < tol * scale, "ΣFz = {sum_fz:.6e}");
+        assert!(sum_mx.abs() < tol * scale, "ΣMx = {sum_mx:.6e}");
+        assert!(sum_my.abs() < tol * scale, "ΣMy = {sum_my:.6e}");
+        assert!(sum_mz.abs() < tol * scale, "ΣMz = {sum_mz:.6e}");
+    }
+
+    /// 3D L-frame with multi-directional nodal loads — full 6-equation equilibrium.
+    #[test]
+    fn full_equilibrium_nodal_loads() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(2.0, 0.0, 0.0).unwrap();
+        let n2 = m.add_node(2.0, 3.0, 0.0).unwrap();
+        let n3 = m.add_node(2.0, 3.0, 1.5).unwrap();
+
+        let s = steel_section();
+        m.add_member(n0, n1, s, [0.0, 0.0, 1.0]).unwrap();
+        m.add_member(n1, n2, s, [1.0, 0.0, 0.0]).unwrap();
+        m.add_member(n2, n3, s, [1.0, 0.0, 0.0]).unwrap();
+
+        m.fix_node(n0).unwrap();
+
+        let fx = 5e3;
+        let fy = -3e3;
+        let fz = 7e3;
+        let mx = 200.0;
+        let my = -150.0;
+        let mz = 400.0;
+        m.add_nodal_load(n3, fx, fy, fz, mx, my, mz).unwrap();
+
+        let result = m.solve().unwrap();
+        check_equilibrium(&result, &[(2.0, 3.0, 1.5, fx, fy, fz, mx, my, mz)], 1e-6);
+    }
+
+    /// Cantilever with distributed member load — equilibrium includes equivalent loads.
+    #[test]
+    fn full_equilibrium_member_load() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(3.0, 0.0, 0.0).unwrap();
+
+        let s = steel_section();
+        let ref_vec = [0.0, 0.0, 1.0];
+        m.add_member(n0, n1, s, ref_vec).unwrap();
+        m.fix_node(n0).unwrap();
+
+        let qy = -2e3;
+        m.add_uniform_y(0, qy).unwrap();
+
+        let result = m.solve().unwrap();
+
+        // Compute local y-axis direction in global coordinates
+        let e = m.member(0).unwrap();
+        let (x_hat, y_hat, z_hat) = e.local_axes((0.0, 0.0, 0.0), (3.0, 0.0, 0.0)).unwrap();
+        let l = 3.0;
+        let f_total = qy * l;
+        let fx = f_total * y_hat[0];
+        let fy = f_total * y_hat[1];
+        let fz = f_total * y_hat[2];
+        let cx = 1.5;
+        let cy = 0.0;
+        let cz = 0.0;
+        let _ = (x_hat, z_hat);
+        check_equilibrium(&result, &[(cx, cy, cz, fx, fy, fz, 0.0, 0.0, 0.0)], 1e-6);
+    }
+
+    /// Inclined member with combined nodal + member loads — full equilibrium.
+    #[test]
+    fn full_equilibrium_inclined_combined() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(2.0, 0.0, 0.0).unwrap();
+        let n2 = m.add_node(3.0, 2.0, 1.0).unwrap();
+
+        let s = steel_section();
+        let ref_vec = [0.0, 0.0, 1.0];
+        m.add_member(n0, n1, s, ref_vec).unwrap();
+        m.add_member(n1, n2, s, ref_vec).unwrap();
+
+        m.fix_node(n0).unwrap();
+        m.fix_dof(n1, Dof3D::Uy, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Uz, 0.0).unwrap();
+        m.fix_dof(n1, Dof3D::Rx, 0.0).unwrap();
+
+        let pz = 1.5;
+        let qz = -800.0;
+        m.add_nodal_load(n2, 0.0, 0.0, pz, 0.0, 0.0, 0.0).unwrap();
+        m.add_uniform_z(1, qz).unwrap();
+
+        let result = m.solve().unwrap();
+
+        // Compute member 1 local z-axis direction in global coordinates
+        let e1 = m.member(1).unwrap();
+        let pi1 = (2.0, 0.0, 0.0);
+        let pj1 = (3.0, 2.0, 1.0);
+        let (_, _, z_hat) = e1.local_axes(pi1, pj1).unwrap();
+        let l1 = e1.length(pi1, pj1);
+        let f_total = qz * l1;
+        let fx_m = f_total * z_hat[0];
+        let fy_m = f_total * z_hat[1];
+        let fz_m = f_total * z_hat[2];
+        let cx = 2.5;
+        let cy = 1.0;
+        let cz = 0.5;
+
+        check_equilibrium(
+            &result,
+            &[
+                (3.0, 2.0, 1.0, 0.0, 0.0, pz, 0.0, 0.0, 0.0),
+                (cx, cy, cz, fx_m, fy_m, fz_m, 0.0, 0.0, 0.0),
+            ],
+            1e-6,
+        );
+    }
+
+    /// Verify local end forces sum to applied loads at a free node.
+    #[test]
+    fn end_force_equilibrium_at_free_node() {
+        let mut m = FrameModel3D::new();
+        let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let n1 = m.add_node(2.0, 0.0, 0.0).unwrap();
+
+        let s = steel_section();
+        m.add_member(n0, n1, s, [0.0, 0.0, 1.0]).unwrap();
+        m.fix_node(n0).unwrap();
+
+        let p = 4e3;
+        m.add_nodal_load(n1, p, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+
+        let result = m.solve().unwrap();
+        let f = result.member_end_forces(0).unwrap();
+
+        // Member is along global x with ref=[0,0,1]:
+        //   x_hat=(1,0,0), z_hat=(0,-1,0), y_hat=(0,0,1)
+        // Local x = global x, so f[6] (local axial at j) should be +p
+        // (force from node on member = applied external force).
+        assert!(
+            (f[6] - p).abs() < 1e-3 * p,
+            "axial end force at j: {:.6e}, expected {:.6e}",
+            f[6],
+            p
+        );
+        // Transverse forces and moments at free end should be ~0
+        assert!(f[7].abs() < 1e-3 * p, "fy at j: {:.6e}", f[7]);
+        assert!(f[8].abs() < 1e-3 * p, "fz at j: {:.6e}", f[8]);
+        assert!(f[9].abs() < 1e-3 * p, "mx at j: {:.6e}", f[9]);
+        assert!(f[10].abs() < 1e-3 * p, "my at j: {:.6e}", f[10]);
+        assert!(f[11].abs() < 1e-3 * p, "mz at j: {:.6e}", f[11]);
+    }
+
+    /// Verify that a well-posed 3D frame produces a symmetric global stiffness.
+    #[test]
+    fn global_stiffness_symmetry_inclined() {
+        let e = FrameElement3D::new(0, 1, steel_section(), [0.3, 0.7, 0.5]).unwrap();
+        let pi = (0.0, 0.0, 0.0);
+        let pj = (1.5, 2.0, 0.8);
+        let k = e.global_stiffness(pi, pj).unwrap();
+        for i in 0..12 {
+            for j in (i + 1)..12 {
+                assert!(
+                    (k[i][j] - k[j][i]).abs() < 1e-6 * (1.0 + k[i][j].abs()),
+                    "K[{i}][{j}] = {:.6e} != K[{j}][{i}] = {:.6e}",
+                    k[i][j],
+                    k[j][i]
+                );
+            }
+        }
+    }
+
+    /// Verify strain energy is identical in local and global representations.
+    #[test]
+    fn strain_energy_local_equals_global() {
+        let e = FrameElement3D::new(0, 1, steel_section(), [0.1, 0.9, 0.2]).unwrap();
+        let pi = (0.0, 0.0, 0.0);
+        let pj = (1.2, 0.5, 0.9);
+
+        let k_local = e.local_stiffness(pi, pj).unwrap();
+        let k_global = e.global_stiffness(pi, pj).unwrap();
+        let t = e.transformation_matrix(pi, pj).unwrap();
+
+        // Arbitrary non-trivial global displacement
+        let u_global: [f64; 12] = [
+            1e-4, -2e-5, 3e-6, 1e-3, -5e-4, 2e-3, -1.5e-4, 3e-5, -1e-6, -2e-3, 4e-4, -1e-3,
+        ];
+
+        // u_local = T * u_global
+        let mut u_local = [0.0f64; 12];
+        for i in 0..12 {
+            for j in 0..12 {
+                u_local[i] += t[i][j] * u_global[j];
+            }
+        }
+
+        // U_local = 0.5 * u_local^T * K_local * u_local
+        let mut ku_local = [0.0f64; 12];
+        for i in 0..12 {
+            for j in 0..12 {
+                ku_local[i] += k_local[i][j] * u_local[j];
+            }
+        }
+        let mut u_local_energy = 0.0;
+        for i in 0..12 {
+            u_local_energy += 0.5 * u_local[i] * ku_local[i];
+        }
+
+        // U_global = 0.5 * u_global^T * K_global * u_global
+        let mut ku_global = [0.0f64; 12];
+        for i in 0..12 {
+            for j in 0..12 {
+                ku_global[i] += k_global[i][j] * u_global[j];
+            }
+        }
+        let mut u_global_energy = 0.0;
+        for i in 0..12 {
+            u_global_energy += 0.5 * u_global[i] * ku_global[i];
+        }
+
+        assert!(
+            (u_local_energy - u_global_energy).abs() < 1e-10 * u_local_energy.abs(),
+            "strain energy: local = {u_local_energy:.12e}, global = {u_global_energy:.12e}"
+        );
+    }
+}
