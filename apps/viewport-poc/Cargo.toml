@@ -1,0 +1,12 @@
+[package]
+name = "viewport-poc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+structural-analysis = { path = "../../crates/structural-analysis" }
+
+[dev-dependencies]
+structural-analysis = { path = "../../crates/structural-analysis" }

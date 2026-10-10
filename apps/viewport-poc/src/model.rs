@@ -1,0 +1,190 @@
+//! Deterministic test models and synthetic generators.
+
+use structural_analysis::{Dof3D, FrameModel3D, FrameSection3D};
+
+/// Steel I-section properties.
+fn steel_section() -> FrameSection3D {
+    FrameSection3D::new(200e9, 80e9, 1e-3, 2e-6, 1e-6, 3e-6).unwrap()
+}
+
+/// Build a deterministic 3-member portal frame.
+///
+/// ```text
+///   N2 ──────── N3
+///   │           │
+///   │           │
+///   N0          N1
+/// ```
+///
+/// - Columns: 3 m tall, along Y.
+/// - Beam: 4 m wide, along X.
+/// - Bases (N0, N1) fully fixed.
+/// - Horizontal load at N2.
+pub fn build_portal_frame() -> FrameModel3D {
+    let mut m = FrameModel3D::new();
+    let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let n2 = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let n3 = m.add_node(4.0, 3.0, 0.0).unwrap();
+
+    let sec = steel_section();
+    m.add_member(n0, n2, sec, [0.0, 0.0, 1.0]).unwrap();
+    m.add_member(n2, n3, sec, [0.0, 0.0, 1.0]).unwrap();
+    m.add_member(n1, n3, sec, [0.0, 0.0, 1.0]).unwrap();
+
+    m.fix_node(n0).unwrap();
+    m.fix_node(n1).unwrap();
+
+    m.add_nodal_load(n2, 5e3, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
+
+    m
+}
+
+/// Build a 3-D frame with an inclined member to exercise general orientation.
+///
+/// ```text
+///   N2 ─── N3
+///   │      │
+///   │      │
+///   N0     N1
+///         /
+///        N4 (offset in Z)
+/// ```
+pub fn build_inclined_frame() -> FrameModel3D {
+    let mut m = FrameModel3D::new();
+    let n0 = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let n1 = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let n2 = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let n3 = m.add_node(4.0, 3.0, 0.0).unwrap();
+    let n4 = m.add_node(5.0, 0.0, 1.0).unwrap();
+
+    let sec = steel_section();
+    m.add_member(n0, n2, sec, [0.0, 0.0, 1.0]).unwrap();
+    m.add_member(n2, n3, sec, [0.0, 0.0, 1.0]).unwrap();
+    m.add_member(n1, n3, sec, [0.0, 0.0, 1.0]).unwrap();
+    m.add_member(n1, n4, sec, [0.3, 0.7, 0.5]).unwrap();
+
+    m.fix_node(n0).unwrap();
+    m.fix_node(n1).unwrap();
+    m.fix_dof(n4, Dof3D::Ux, 0.0).unwrap();
+    m.fix_dof(n4, Dof3D::Uy, 0.0).unwrap();
+    m.fix_dof(n4, Dof3D::Uz, 0.0).unwrap();
+
+    m.add_nodal_load(n2, 3e3, -2e3, 0.0, 0.0, 0.0, 0.0).unwrap();
+
+    m
+}
+
+/// Build a synthetic grid frame for performance testing.
+///
+/// Creates `nx × nz` bays of columns and beams.  Total nodes ≈
+/// `(nx+1) * (nz+1) * 2`, total members ≈ `nx * (nz+1) * 2 + (nx+1) * nz`.
+pub fn build_grid_frame(nx: usize, nz: usize) -> FrameModel3D {
+    let mut m = FrameModel3D::new();
+    let sec = steel_section();
+    let bay = 4.0;
+    let height = 3.0;
+
+    let mut bottom = vec![vec![0usize; nz + 1]; nx + 1];
+    let mut top = vec![vec![0usize; nz + 1]; nx + 1];
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            let x = i as f64 * bay;
+            let z = k as f64 * bay;
+            bottom[i][k] = m.add_node(x, 0.0, z).unwrap();
+            top[i][k] = m.add_node(x, height, z).unwrap();
+        }
+    }
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            m.add_member(bottom[i][k], top[i][k], sec, [0.0, 0.0, 1.0])
+                .unwrap();
+        }
+    }
+    for i in 0..nx {
+        for k in 0..=nz {
+            m.add_member(top[i][k], top[i + 1][k], sec, [0.0, 0.0, 1.0])
+                .unwrap();
+        }
+    }
+    for i in 0..=nx {
+        for k in 0..nz {
+            m.add_member(top[i][k], top[i][k + 1], sec, [1.0, 0.0, 0.0])
+                .unwrap();
+        }
+    }
+
+    for i in 0..=nx {
+        for k in 0..=nz {
+            m.fix_node(bottom[i][k]).unwrap();
+        }
+    }
+
+    if nx > 0 && nz > 0 {
+        m.add_nodal_load(top[0][0], 1e3, 0.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
+    }
+
+    m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portal_frame_structure() {
+        let m = build_portal_frame();
+        assert_eq!(m.n_nodes(), 4);
+        assert_eq!(m.n_members(), 3);
+    }
+
+    #[test]
+    fn inclined_frame_structure() {
+        let m = build_inclined_frame();
+        assert_eq!(m.n_nodes(), 5);
+        assert_eq!(m.n_members(), 4);
+    }
+
+    #[test]
+    fn grid_frame_node_count() {
+        let m = build_grid_frame(2, 2);
+        assert_eq!(m.n_nodes(), 18);
+        assert!(m.n_members() > 0);
+    }
+
+    #[test]
+    fn portal_frame_solves() {
+        let m = build_portal_frame();
+        let result = m.solve();
+        assert!(
+            result.is_ok(),
+            "portal frame should solve: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn inclined_frame_solves() {
+        let m = build_inclined_frame();
+        let result = m.solve();
+        assert!(
+            result.is_ok(),
+            "inclined frame should solve: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn grid_frame_solves() {
+        let m = build_grid_frame(2, 2);
+        let result = m.solve();
+        assert!(
+            result.is_ok(),
+            "grid frame should solve: {:?}",
+            result.err()
+        );
+    }
+}
