@@ -20,14 +20,15 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::edit_model::{
-    EditMember, EditModel, EditNode, MemberId, NodalLoadSpec, NodeId, SupportSpec,
+    EditMember, EditModel, EditNode, MemberId, MemberUniformLoad3D, NodalLoadSpec, NodeId,
+    SupportSpec,
 };
 use structural_analysis::FrameSection3D;
 
 // ── File format version ───────────────────────────────────────────────
 
 /// Currently supported file format version.
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 // ── DTO types ────────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ pub struct ModelFileV1 {
 }
 
 /// Node DTO.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NodeFileV1 {
     pub id: u32,
     pub x: f64,
@@ -59,7 +60,7 @@ pub struct NodeFileV1 {
 }
 
 /// Member DTO.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct MemberFileV1 {
     pub id: u32,
     pub node_i: u32,
@@ -74,7 +75,7 @@ pub struct MemberFileV1 {
 }
 
 /// Support DTO.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SupportFileV1 {
     pub node_id: u32,
     /// 6 DOF values: `None` = free, `Some(v)` = constrained to v.
@@ -83,7 +84,7 @@ pub struct SupportFileV1 {
 }
 
 /// Nodal load DTO.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NodalLoadFileV1 {
     pub node_id: u32,
     pub fx: f64,
@@ -92,6 +93,36 @@ pub struct NodalLoadFileV1 {
     pub mx: f64,
     pub my: f64,
     pub mz: f64,
+}
+
+// ── V2 DTO types ─────────────────────────────────────────────────────
+
+/// Top-level project file (version 2).
+#[derive(Serialize, Deserialize)]
+pub struct ProjectFileV2 {
+    pub format_version: u32,
+    pub model: ModelFileV2,
+}
+
+/// Model data within a project file (version 2).
+#[derive(Serialize, Deserialize)]
+pub struct ModelFileV2 {
+    pub next_node_id: u32,
+    pub next_member_id: u32,
+    pub nodes: Vec<NodeFileV1>,
+    pub members: Vec<MemberFileV1>,
+    pub supports: Vec<SupportFileV1>,
+    pub nodal_loads: Vec<NodalLoadFileV1>,
+    pub member_uniform_loads: Vec<MemberUniformLoadFileV2>,
+}
+
+/// Member uniform load DTO (version 2).
+#[derive(Serialize, Deserialize)]
+pub struct MemberUniformLoadFileV2 {
+    pub member_id: u32,
+    pub qx: f64,
+    pub qy: f64,
+    pub qz: f64,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -194,6 +225,29 @@ fn model_to_dto(model: &EditModel) -> ModelFileV1 {
     }
 }
 
+fn model_to_dto_v2(model: &EditModel) -> ModelFileV2 {
+    let v1 = model_to_dto(model);
+    let member_uniform_loads: Vec<MemberUniformLoadFileV2> = model
+        .member_uniform_loads()
+        .iter()
+        .map(|(mid, load)| MemberUniformLoadFileV2 {
+            member_id: mid.0,
+            qx: load.qx,
+            qy: load.qy,
+            qz: load.qz,
+        })
+        .collect();
+    ModelFileV2 {
+        next_node_id: v1.next_node_id,
+        next_member_id: v1.next_member_id,
+        nodes: v1.nodes,
+        members: v1.members,
+        supports: v1.supports,
+        nodal_loads: v1.nodal_loads,
+        member_uniform_loads,
+    }
+}
+
 // ── DTO conversion: DTO → EditModel (with validation) ────────────────
 
 fn dto_to_model(dto: &ModelFileV1) -> Result<EditModel, PersistenceError> {
@@ -252,6 +306,119 @@ fn dto_to_model(dto: &ModelFileV1) -> Result<EditModel, PersistenceError> {
         members,
         supports,
         nodal_loads,
+        Vec::new(),
+        dto.next_node_id,
+        dto.next_member_id,
+    ))
+}
+
+// ── DTO conversion: V2 DTO → EditModel (with validation) ─────────────
+
+fn dto_v2_to_model(dto: &ModelFileV2) -> Result<EditModel, PersistenceError> {
+    let v1 = ModelFileV1 {
+        next_node_id: dto.next_node_id,
+        next_member_id: dto.next_member_id,
+        nodes: dto.nodes.clone(),
+        members: dto.members.clone(),
+        supports: dto.supports.clone(),
+        nodal_loads: dto.nodal_loads.clone(),
+    };
+    validate_dto(&v1)?;
+
+    use PersistenceError::Validation as V;
+
+    let mut seen_member_loads = std::collections::HashSet::new();
+    let member_exists = |id: u32| dto.members.iter().any(|m| m.id == id);
+    for ml in &dto.member_uniform_loads {
+        if !member_exists(ml.member_id) {
+            return Err(V(format!(
+                "member uniform load references nonexistent member {}",
+                ml.member_id
+            )));
+        }
+        if !seen_member_loads.insert(ml.member_id) {
+            return Err(V(format!(
+                "duplicate member uniform load for member {}",
+                ml.member_id
+            )));
+        }
+        if !ml.qx.is_finite() || !ml.qy.is_finite() || !ml.qz.is_finite() {
+            return Err(V(format!(
+                "member uniform load for member {} has non-finite values",
+                ml.member_id
+            )));
+        }
+    }
+
+    let nodes: Vec<EditNode> = dto
+        .nodes
+        .iter()
+        .map(|n| EditNode {
+            id: NodeId(n.id),
+            x: n.x,
+            y: n.y,
+            z: n.z,
+        })
+        .collect();
+
+    let members: Vec<EditMember> = dto
+        .members
+        .iter()
+        .map(|m| EditMember {
+            id: MemberId(m.id),
+            node_i: NodeId(m.node_i),
+            node_j: NodeId(m.node_j),
+            ref_vec: m.ref_vec,
+            section: FrameSection3D::new(m.e, m.g, m.area, m.iy, m.iz, m.j)
+                .expect("validated above"),
+        })
+        .collect();
+
+    let supports: Vec<(NodeId, SupportSpec)> = dto
+        .supports
+        .iter()
+        .map(|s| (NodeId(s.node_id), SupportSpec::custom(s.dofs)))
+        .collect();
+
+    let nodal_loads: Vec<(NodeId, NodalLoadSpec)> = dto
+        .nodal_loads
+        .iter()
+        .map(|l| {
+            (
+                NodeId(l.node_id),
+                NodalLoadSpec {
+                    fx: l.fx,
+                    fy: l.fy,
+                    fz: l.fz,
+                    mx: l.mx,
+                    my: l.my,
+                    mz: l.mz,
+                },
+            )
+        })
+        .collect();
+
+    let member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D)> = dto
+        .member_uniform_loads
+        .iter()
+        .map(|ml| {
+            (
+                MemberId(ml.member_id),
+                MemberUniformLoad3D {
+                    qx: ml.qx,
+                    qy: ml.qy,
+                    qz: ml.qz,
+                },
+            )
+        })
+        .collect();
+
+    Ok(EditModel::from_parts(
+        nodes,
+        members,
+        supports,
+        nodal_loads,
+        member_uniform_loads,
         dto.next_node_id,
         dto.next_member_id,
     ))
@@ -464,26 +631,42 @@ fn validate_dto(dto: &ModelFileV1) -> Result<(), PersistenceError> {
 
 /// Serialize an EditModel to a JSON string.
 pub fn serialize_project(model: &EditModel) -> Result<String, PersistenceError> {
-    let file = ProjectFileV1 {
+    let file = ProjectFileV2 {
         format_version: CURRENT_FORMAT_VERSION,
-        model: model_to_dto(model),
+        model: model_to_dto_v2(model),
     };
     serde_json::to_string_pretty(&file).map_err(|e| PersistenceError::JsonError(e.to_string()))
 }
 
 /// Deserialize a JSON string to an EditModel.
+///
+/// Supports both version 1 (legacy, no member uniform loads) and
+/// version 2 (current, with member uniform loads) files.
 pub fn deserialize_project(json: &str) -> Result<EditModel, PersistenceError> {
-    let file: ProjectFileV1 =
-        serde_json::from_str(json).map_err(|e| PersistenceError::JsonError(e.to_string()))?;
-
-    if file.format_version != CURRENT_FORMAT_VERSION {
-        return Err(PersistenceError::UnsupportedVersion {
-            found: file.format_version,
-            supported: CURRENT_FORMAT_VERSION,
-        });
+    #[derive(Deserialize)]
+    struct VersionProbe {
+        format_version: u32,
     }
 
-    dto_to_model(&file.model)
+    let probe: VersionProbe =
+        serde_json::from_str(json).map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+
+    match probe.format_version {
+        1 => {
+            let file: ProjectFileV1 = serde_json::from_str(json)
+                .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+            dto_to_model(&file.model)
+        }
+        2 => {
+            let file: ProjectFileV2 = serde_json::from_str(json)
+                .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+            dto_v2_to_model(&file.model)
+        }
+        found => Err(PersistenceError::UnsupportedVersion {
+            found,
+            supported: CURRENT_FORMAT_VERSION,
+        }),
+    }
 }
 
 /// Save an EditModel to a `.saproject` file.

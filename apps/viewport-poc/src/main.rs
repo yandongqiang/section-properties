@@ -13,7 +13,7 @@ use viewport_poc::{
         max_abs, normalize,
     },
     edit_history::EditHistory,
-    edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
+    edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodalLoadSpec, NodeId, SupportSpec},
     model, persistence, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -37,6 +37,7 @@ const ERROR_C: egui::Color32 = egui::Color32::from_rgb(255, 80, 80);
 const SUPPORT_C: egui::Color32 = egui::Color32::from_rgb(100, 255, 200);
 const LOAD_F_C: egui::Color32 = egui::Color32::from_rgb(255, 180, 80);
 const LOAD_M_C: egui::Color32 = egui::Color32::from_rgb(200, 130, 255);
+const MEMBER_LOAD_C: egui::Color32 = egui::Color32::from_rgb(100, 255, 100);
 
 // ── App ─────────────────────────────────────────────────────────────────
 struct ViewportApp {
@@ -87,6 +88,9 @@ struct MemberEditBuffer {
     ref_x: f64,
     ref_y: f64,
     ref_z: f64,
+    load_qx: f64,
+    load_qy: f64,
+    load_qz: f64,
 }
 
 impl Default for MemberEditBuffer {
@@ -102,6 +106,9 @@ impl Default for MemberEditBuffer {
             ref_x: 0.0,
             ref_y: 0.0,
             ref_z: 1.0,
+            load_qx: 0.0,
+            load_qy: 0.0,
+            load_qz: 0.0,
         }
     }
 }
@@ -225,6 +232,7 @@ impl ViewportApp {
         if let Some(model) = &self.project.model {
             if let Some(member) = model.members().iter().find(|m| m.id == id) {
                 let sec = &member.section;
+                let load = model.member_uniform_load(id).copied().unwrap_or_default();
                 self.member_edit = MemberEditBuffer {
                     member_id: Some(id),
                     e: sec.E(),
@@ -236,6 +244,9 @@ impl ViewportApp {
                     ref_x: member.ref_vec[0],
                     ref_y: member.ref_vec[1],
                     ref_z: member.ref_vec[2],
+                    load_qx: load.qx,
+                    load_qy: load.qy,
+                    load_qz: load.qz,
                 };
             }
         }
@@ -244,7 +255,7 @@ impl ViewportApp {
     /// Apply the edit buffer to the model for a member.
     fn apply_member_edit(&mut self, id: MemberId) {
         let buf = &self.member_edit;
-        let (e, g, area, iy, iz, j, rv) = (
+        let (e, g, area, iy, iz, j, rv, load) = (
             buf.e,
             buf.g,
             buf.area,
@@ -252,6 +263,7 @@ impl ViewportApp {
             buf.iz,
             buf.j,
             [buf.ref_x, buf.ref_y, buf.ref_z],
+            MemberUniformLoad3D::new(buf.load_qx, buf.load_qy, buf.load_qz),
         );
         let Some(model) = self.project.model.as_ref() else {
             return;
@@ -265,6 +277,19 @@ impl ViewportApp {
             }
         }
         match candidate.set_member_ref_vec(id, rv) {
+            Ok(()) => {}
+            Err(e) => {
+                self.messages.push(AppMessage::error(e.message()));
+                self.reset_member_edit(id);
+                return;
+            }
+        }
+        let load_result = if load.is_zero() {
+            candidate.clear_member_uniform_load(id)
+        } else {
+            candidate.set_member_uniform_load(id, load)
+        };
+        match load_result {
             Ok(()) => {
                 if candidate.revision() != model.revision() {
                     self.commit_edit(candidate);
@@ -991,6 +1016,86 @@ impl eframe::App for ViewportApp {
                             egui::FontId::proportional(8.0),
                             LOAD_M_C,
                         );
+                    }
+                }
+            }
+
+            // ── Draw member distributed load indicators ──
+            if show_base {
+                for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                    let Some(load) = scene.member_loads.get(mi).copied().flatten() else {
+                        continue;
+                    };
+                    if load.is_zero() || !load.is_finite() {
+                        continue;
+                    }
+                    let (ni, nj) = scene.member_nodes[mi];
+                    let pi = scene.node_positions[ni];
+                    let pj = scene.node_positions[nj];
+                    let ref_vec = scene.member_ref_vecs[mi];
+
+                    let dx = pj[0] - pi[0];
+                    let dy = pj[1] - pi[1];
+                    let dz = pj[2] - pi[2];
+                    let len = dx.hypot(dy).hypot(dz);
+                    if len < 1e-12 {
+                        continue;
+                    }
+                    let x_hat = [dx / len, dy / len, dz / len];
+                    let cross = [
+                        x_hat[1] * ref_vec[2] - x_hat[2] * ref_vec[1],
+                        x_hat[2] * ref_vec[0] - x_hat[0] * ref_vec[2],
+                        x_hat[0] * ref_vec[1] - x_hat[1] * ref_vec[0],
+                    ];
+                    let cross_norm = cross[0].hypot(cross[1]).hypot(cross[2]);
+                    if cross_norm < 1e-12 {
+                        continue;
+                    }
+                    let z_hat = [cross[0] / cross_norm, cross[1] / cross_norm, cross[2] / cross_norm];
+                    let y_hat = [
+                        z_hat[1] * x_hat[2] - z_hat[2] * x_hat[1],
+                        z_hat[2] * x_hat[0] - z_hat[0] * x_hat[2],
+                        z_hat[0] * x_hat[1] - z_hat[1] * x_hat[0],
+                    ];
+
+                    let q_global = [
+                        load.qx * x_hat[0] + load.qy * y_hat[0] + load.qz * z_hat[0],
+                        load.qx * x_hat[1] + load.qy * y_hat[1] + load.qz * z_hat[1],
+                        load.qx * x_hat[2] + load.qy * y_hat[2] + load.qz * z_hat[2],
+                    ];
+                    let qmag = q_global[0].hypot(q_global[1]).hypot(q_global[2]);
+                    if qmag < 1e-12 {
+                        continue;
+                    }
+                    let dir = [q_global[0] / qmag, q_global[1] / qmag, q_global[2] / qmag];
+
+                    let arrow_len = 0.3 * len.min(1.0);
+                    let n_arrows = 5;
+                    for k in 1..n_arrows {
+                        let t = k as f64 / n_arrows as f64;
+                        let base = [
+                            pi[0] + t * dx,
+                            pi[1] + t * dy,
+                            pi[2] + t * dz,
+                        ];
+                        let tip = [
+                            base[0] + dir[0] * arrow_len,
+                            base[1] + dir[1] * arrow_len,
+                            base[2] + dir[2] * arrow_len,
+                        ];
+                        let Some(p_base) = self.camera.project(base, w, h) else {
+                            continue;
+                        };
+                        let Some(p_tip) = self.camera.project(tip, w, h) else {
+                            continue;
+                        };
+                        let s_base = scr(&p_base, rect);
+                        let s_tip = scr(&p_tip, rect);
+                        painter.line_segment(
+                            [s_base, s_tip],
+                            egui::Stroke::new(2.0_f32, MEMBER_LOAD_C),
+                        );
+                        painter.circle_filled(s_tip, 3.0, MEMBER_LOAD_C);
                     }
                 }
             }
@@ -1791,6 +1896,42 @@ impl ViewportApp {
                             });
                     });
 
+                    // ── Distributed load editing ──
+                    ui.collapsing("Distributed Load (local)", |ui| {
+                        ui.label("Uniform load in local coordinates (N/m):");
+                        egui::Grid::new("member_load_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("qx (axial):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.load_qx)
+                                        .speed(100.0)
+                                        .range(-1e8..=1e8),
+                                );
+                                ui.end_row();
+                                ui.label("qy (transverse):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.load_qy)
+                                        .speed(100.0)
+                                        .range(-1e8..=1e8),
+                                );
+                                ui.end_row();
+                                ui.label("qz (transverse):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.load_qz)
+                                        .speed(100.0)
+                                        .range(-1e8..=1e8),
+                                );
+                                ui.end_row();
+                            });
+                        if ui.button("Clear Load").clicked() {
+                            self.member_edit.load_qx = 0.0;
+                            self.member_edit.load_qy = 0.0;
+                            self.member_edit.load_qz = 0.0;
+                        }
+                    });
+
                     ui.horizontal(|ui| {
                         if ui.button("Apply Changes").clicked() {
                             self.apply_member_edit(id);
@@ -1918,12 +2059,16 @@ impl ViewportApp {
                     ui.label(format!("Members ({}):", model.n_members()));
                     for member in model.members() {
                         let is_sel = self.selection == SelectionState::Member(member.id);
+                        let load_label = match model.member_uniform_load(member.id) {
+                            Some(spec) if !spec.is_zero() => " [L]".to_string(),
+                            _ => String::new(),
+                        };
                         if ui
                             .selectable_label(
                                 is_sel,
                                 format!(
-                                    "M{}: N{} \u{2192} N{}",
-                                    member.id.0, member.node_i.0, member.node_j.0
+                                    "M{}: N{} \u{2192} N{}{}",
+                                    member.id.0, member.node_i.0, member.node_j.0, load_label
                                 ),
                             )
                             .clicked()

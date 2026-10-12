@@ -174,6 +174,8 @@ pub enum EditError {
     InvalidSection(String),
     /// Invalid reference vector (non-finite, zero, or parallel to member axis).
     InvalidRefVec(String),
+    /// Load component is NaN or infinity.
+    NonFiniteLoad,
 }
 
 impl EditError {
@@ -193,6 +195,7 @@ impl EditError {
             EditError::FrameModelBuild(s) => format!("Model build error: {s}"),
             EditError::InvalidSection(s) => format!("Invalid section: {s}"),
             EditError::InvalidRefVec(s) => format!("Invalid reference vector: {s}"),
+            EditError::NonFiniteLoad => "Load components must be finite numbers".into(),
         }
     }
 }
@@ -280,6 +283,54 @@ impl NodalLoadSpec {
     }
 }
 
+// ── Member uniform load specification ─────────────────────────────────
+
+/// Uniform distributed load on a member in local coordinates.
+///
+/// `qx` is the axial load (along local x, force per unit length).
+/// `qy` is the transverse load (along local y, force per unit length).
+/// `qz` is the transverse load (along local z, force per unit length).
+///
+/// Positive values act in the positive local axis direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemberUniformLoad3D {
+    pub qx: f64,
+    pub qy: f64,
+    pub qz: f64,
+}
+
+impl Default for MemberUniformLoad3D {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl MemberUniformLoad3D {
+    pub fn new(qx: f64, qy: f64, qz: f64) -> Self {
+        Self { qx, qy, qz }
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            qx: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.qx == 0.0 && self.qy == 0.0 && self.qz == 0.0
+    }
+
+    pub fn is_finite(&self) -> bool {
+        self.qx.is_finite() && self.qy.is_finite() && self.qz.is_finite()
+    }
+
+    pub fn magnitude(&self) -> f64 {
+        (self.qx * self.qx + self.qy * self.qy + self.qz * self.qz).sqrt()
+    }
+}
+
 // ── Edit model ─────────────────────────────────────────────────────────
 
 /// Editable structural model with stable IDs.
@@ -292,6 +343,7 @@ pub struct EditModel {
     members: Vec<EditMember>,
     supports: Vec<(NodeId, SupportSpec)>,
     nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
+    member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D)>,
     next_node_id: u32,
     next_member_id: u32,
     revision: u64,
@@ -311,6 +363,7 @@ impl EditModel {
             members: Vec::new(),
             supports: Vec::new(),
             nodal_loads: Vec::new(),
+            member_uniform_loads: Vec::new(),
             next_node_id: 0,
             next_member_id: 0,
             revision: 0,
@@ -327,6 +380,7 @@ impl EditModel {
         members: Vec<EditMember>,
         supports: Vec<(NodeId, SupportSpec)>,
         nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
+        member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D)>,
         next_node_id: u32,
         next_member_id: u32,
     ) -> Self {
@@ -335,6 +389,7 @@ impl EditModel {
             members,
             supports,
             nodal_loads,
+            member_uniform_loads,
             next_node_id,
             next_member_id,
             revision: 0,
@@ -424,6 +479,14 @@ impl EditModel {
             spec.mx.to_bits().hash(&mut hasher);
             spec.my.to_bits().hash(&mut hasher);
             spec.mz.to_bits().hash(&mut hasher);
+        }
+        // Member uniform loads
+        self.member_uniform_loads.len().hash(&mut hasher);
+        for (mid, load) in &self.member_uniform_loads {
+            mid.0.hash(&mut hasher);
+            load.qx.to_bits().hash(&mut hasher);
+            load.qy.to_bits().hash(&mut hasher);
+            load.qz.to_bits().hash(&mut hasher);
         }
         // ID allocation state
         self.next_node_id.hash(&mut hasher);
@@ -544,6 +607,7 @@ impl EditModel {
             return Err(EditError::MemberNotFound(id));
         }
         self.members.retain(|m| m.id != id);
+        self.member_uniform_loads.retain(|(mid, _)| *mid != id);
         self.bump_revision();
         Ok(())
     }
@@ -800,6 +864,71 @@ impl EditModel {
         &self.nodal_loads
     }
 
+    // ── Member uniform load operations ────────────────────────────────
+
+    /// Set the uniform distributed load on a member, replacing any
+    /// existing member load.
+    ///
+    /// One load record per member.  All components must be finite.
+    pub fn set_member_uniform_load(
+        &mut self,
+        id: MemberId,
+        load: MemberUniformLoad3D,
+    ) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        if !load.is_finite() {
+            return Err(EditError::NonFiniteLoad);
+        }
+        if let Some((_, existing)) = self
+            .member_uniform_loads
+            .iter_mut()
+            .find(|(mid, _)| *mid == id)
+        {
+            if *existing == load {
+                return Ok(());
+            }
+            *existing = load;
+        } else {
+            self.member_uniform_loads.push((id, load));
+        }
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Clear the uniform distributed load on a member.
+    pub fn clear_member_uniform_load(&mut self, id: MemberId) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        let had_load = self.member_uniform_loads.iter().any(|(mid, _)| *mid == id);
+        if !had_load {
+            return Ok(());
+        }
+        self.member_uniform_loads.retain(|(mid, _)| *mid != id);
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Get the uniform distributed load on a member, if any.
+    pub fn member_uniform_load(&self, id: MemberId) -> Option<&MemberUniformLoad3D> {
+        self.member_uniform_loads
+            .iter()
+            .find(|(mid, _)| *mid == id)
+            .map(|(_, load)| load)
+    }
+
+    /// Does the member have a uniform distributed load?
+    pub fn has_member_uniform_load(&self, id: MemberId) -> bool {
+        self.member_uniform_loads.iter().any(|(mid, _)| *mid == id)
+    }
+
+    /// All member uniform loads (member ID + spec), in insertion order.
+    pub fn member_uniform_loads(&self) -> &[(MemberId, MemberUniformLoad3D)] {
+        &self.member_uniform_loads
+    }
+
     // ── Queries ───────────────────────────────────────────────────────
 
     /// Number of nodes.
@@ -933,6 +1062,32 @@ impl EditModel {
             model
                 .add_nodal_load(idx, spec.fx, spec.fy, spec.fz, spec.mx, spec.my, spec.mz)
                 .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
+        }
+
+        let mut member_id_to_idx: HashMap<MemberId, usize> = HashMap::new();
+        for (i, member) in self.members.iter().enumerate() {
+            member_id_to_idx.insert(member.id, i);
+        }
+
+        for (mid, load) in &self.member_uniform_loads {
+            let idx = *member_id_to_idx
+                .get(mid)
+                .ok_or(EditError::MemberNotFound(*mid))?;
+            if load.qx != 0.0 {
+                model
+                    .add_uniform_axial(idx, load.qx)
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
+            }
+            if load.qy != 0.0 {
+                model
+                    .add_uniform_y(idx, load.qy)
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
+            }
+            if load.qz != 0.0 {
+                model
+                    .add_uniform_z(idx, load.qz)
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
+            }
         }
 
         Ok(model)

@@ -59,6 +59,7 @@ fn deformation_amplification_scales_linearly() {
         member_ref_vecs: vec![[0.0, 0.0, 1.0]],
         node_supports: vec![None, None],
         node_loads: vec![None, None],
+        member_loads: vec![None],
     };
     let disp = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
