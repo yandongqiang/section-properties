@@ -294,6 +294,7 @@ pub struct EditModel {
     nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
     next_node_id: u32,
     next_member_id: u32,
+    revision: u64,
 }
 
 impl Default for EditModel {
@@ -312,7 +313,20 @@ impl EditModel {
             nodal_loads: Vec::new(),
             next_node_id: 0,
             next_member_id: 0,
+            revision: 0,
         }
+    }
+
+    /// Current model revision count.
+    ///
+    /// Incremented on every effective mutation.  Used by [`Project`]
+    /// to detect stale analysis results without manual stale-flag bookkeeping.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.saturating_add(1);
     }
 
     // ── Node operations ───────────────────────────────────────────────
@@ -327,6 +341,7 @@ impl EditModel {
         let id = NodeId(self.next_node_id);
         self.next_node_id += 1;
         self.nodes.push(EditNode { id, x, y, z });
+        self.bump_revision();
         Ok(id)
     }
 
@@ -342,9 +357,13 @@ impl EditModel {
             .iter_mut()
             .find(|n| n.id == id)
             .ok_or(EditError::NodeNotFound(id))?;
+        if node.x == x && node.y == y && node.z == z {
+            return Ok(());
+        }
         node.x = x;
         node.y = y;
         node.z = z;
+        self.bump_revision();
         Ok(())
     }
 
@@ -369,6 +388,7 @@ impl EditModel {
         self.nodes.retain(|n| n.id != id);
         self.supports.retain(|(nid, _)| *nid != id);
         self.nodal_loads.retain(|(nid, _)| *nid != id);
+        self.bump_revision();
         Ok(())
     }
 
@@ -412,6 +432,7 @@ impl EditModel {
             ref_vec: [0.0, 0.0, 1.0],
             section: default_section(),
         });
+        self.bump_revision();
         Ok(id)
     }
 
@@ -421,6 +442,7 @@ impl EditModel {
             return Err(EditError::MemberNotFound(id));
         }
         self.members.retain(|m| m.id != id);
+        self.bump_revision();
         Ok(())
     }
 
@@ -470,7 +492,11 @@ impl EditModel {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or(EditError::MemberNotFound(id))?;
+        if member.ref_vec == ref_vec {
+            return Ok(());
+        }
         member.ref_vec = ref_vec;
+        self.bump_revision();
         Ok(())
     }
 
@@ -520,7 +546,18 @@ impl EditModel {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or(EditError::MemberNotFound(id))?;
+        let old = &member.section;
+        if old.E() == e
+            && old.G() == g
+            && old.area() == area
+            && old.iy() == iy
+            && old.iz() == iz
+            && old.j() == j
+        {
+            return Ok(());
+        }
         member.section = section;
+        self.bump_revision();
         Ok(())
     }
 
@@ -544,12 +581,16 @@ impl EditModel {
             return Err(EditError::NodeNotFound(id));
         }
         if let Some((_, spec)) = self.supports.iter_mut().find(|(nid, _)| *nid == id) {
+            if spec.dof(dof) == Some(0.0) {
+                return Ok(());
+            }
             spec.set_dof(dof, Some(0.0));
         } else {
             let mut spec = SupportSpec::free();
             spec.set_dof(dof, Some(0.0));
             self.supports.push((id, spec));
         }
+        self.bump_revision();
         Ok(())
     }
 
@@ -560,10 +601,14 @@ impl EditModel {
             return Err(EditError::NodeNotFound(id));
         }
         if let Some((_, existing)) = self.supports.iter_mut().find(|(nid, _)| *nid == id) {
+            if *existing == spec {
+                return Ok(());
+            }
             *existing = spec;
         } else {
             self.supports.push((id, spec));
         }
+        self.bump_revision();
         Ok(())
     }
 
@@ -572,7 +617,12 @@ impl EditModel {
         if self.nodes.iter().all(|n| n.id != id) {
             return Err(EditError::NodeNotFound(id));
         }
+        let had_support = self.supports.iter().any(|(nid, _)| *nid == id);
+        if !had_support {
+            return Ok(());
+        }
         self.supports.retain(|(nid, _)| *nid != id);
+        self.bump_revision();
         Ok(())
     }
 
@@ -605,10 +655,14 @@ impl EditModel {
             return Err(EditError::NonFiniteCoordinate);
         }
         if let Some((_, existing)) = self.nodal_loads.iter_mut().find(|(nid, _)| *nid == id) {
+            if *existing == spec {
+                return Ok(());
+            }
             *existing = spec;
         } else {
             self.nodal_loads.push((id, spec));
         }
+        self.bump_revision();
         Ok(())
     }
 
@@ -617,7 +671,12 @@ impl EditModel {
         if self.nodes.iter().all(|n| n.id != id) {
             return Err(EditError::NodeNotFound(id));
         }
+        let had_load = self.nodal_loads.iter().any(|(nid, _)| *nid == id);
+        if !had_load {
+            return Ok(());
+        }
         self.nodal_loads.retain(|(nid, _)| *nid != id);
+        self.bump_revision();
         Ok(())
     }
 
@@ -720,7 +779,7 @@ impl EditModel {
         for node in &self.nodes {
             let idx = model
                 .add_node(node.x, node.y, node.z)
-                .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
             id_to_idx.insert(node.id, idx);
         }
 
@@ -733,7 +792,7 @@ impl EditModel {
                 .ok_or(EditError::NodeNotFound(member.node_j))?;
             model
                 .add_member(ni, nj, member.section, member.ref_vec)
-                .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
         }
 
         for (nid, spec) in &self.supports {
@@ -741,17 +800,17 @@ impl EditModel {
             if spec.is_fixed() {
                 model
                     .fix_node(idx)
-                    .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
             } else if spec.is_pinned() {
                 model
                     .pin_node(idx)
-                    .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                    .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
             } else {
                 for dof in Dof3D::ALL {
                     if let Some(value) = spec.dof(dof) {
                         model
                             .fix_dof(idx, dof, value)
-                            .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                            .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
                     }
                 }
             }
@@ -761,7 +820,7 @@ impl EditModel {
             let idx = *id_to_idx.get(nid).ok_or(EditError::NodeNotFound(*nid))?;
             model
                 .add_nodal_load(idx, spec.fx, spec.fy, spec.fz, spec.mx, spec.my, spec.mz)
-                .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
+                .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
         }
 
         Ok(model)

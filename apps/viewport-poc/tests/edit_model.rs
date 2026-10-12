@@ -721,7 +721,6 @@ fn section_edit_marks_stale() {
     model
         .set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
         .unwrap();
-    p.mark_analysis_stale();
     assert!(p.results_are_stale());
     p.solve().unwrap();
     assert!(!p.results_are_stale());
@@ -737,7 +736,6 @@ fn ref_vec_edit_marks_stale() {
     let model = p.model.as_mut().unwrap();
     let mid = model.members()[0].id;
     model.set_member_ref_vec(mid, [1.0, 0.0, 0.0]).unwrap();
-    p.mark_analysis_stale();
     assert!(p.results_are_stale());
 }
 
@@ -887,4 +885,240 @@ fn edited_ref_vec_solve_remains_stable() {
     m.set_member_ref_vec(mid, [0.3, 0.7, 0.5]).unwrap();
     let fm = m.to_frame_model().unwrap();
     assert!(fm.solve().is_ok());
+}
+
+// ── Revision tracking regression tests ───────────────────────────────
+
+#[test]
+fn revision_starts_at_zero() {
+    let m = EditModel::new();
+    assert_eq!(m.revision(), 0);
+}
+
+#[test]
+fn add_node_bumps_revision() {
+    let mut m = EditModel::new();
+    m.add_node(0.0, 0.0, 0.0).unwrap();
+    assert_eq!(m.revision(), 1);
+    m.add_node(1.0, 0.0, 0.0).unwrap();
+    assert_eq!(m.revision(), 2);
+}
+
+#[test]
+fn update_node_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    assert_eq!(m.revision(), 1);
+    m.update_node(id, 1.0, 2.0, 3.0).unwrap();
+    assert_eq!(m.revision(), 2);
+}
+
+#[test]
+fn update_node_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(1.0, 2.0, 3.0).unwrap();
+    let rev = m.revision();
+    m.update_node(id, 1.0, 2.0, 3.0).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn delete_node_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.delete_node(id).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn add_member_bumps_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.add_member(a, b).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn delete_member_bumps_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+    let rev = m.revision();
+    m.delete_member(mid).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn set_member_ref_vec_bumps_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+    let rev = m.revision();
+    m.set_member_ref_vec(mid, [0.0, 1.0, 0.0]).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn set_member_ref_vec_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+    let rv = m.members()[0].ref_vec;
+    let rev = m.revision();
+    m.set_member_ref_vec(mid, rv).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn set_member_section_bumps_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+    let rev = m.revision();
+    m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+        .unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn set_member_section_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+    let s = &m.members()[0].section;
+    let rev = m.revision();
+    m.set_member_section(mid, s.E(), s.G(), s.area(), s.iy(), s.iz(), s.j())
+        .unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn fix_dof_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.fix_dof(id, Dof3D::Ux).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn fix_dof_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.fix_dof(id, Dof3D::Ux).unwrap();
+    let rev = m.revision();
+    m.fix_dof(id, Dof3D::Ux).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn set_support_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.set_support(id, SupportSpec::fixed()).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn set_support_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.set_support(id, SupportSpec::pinned()).unwrap();
+    let rev = m.revision();
+    m.set_support(id, SupportSpec::pinned()).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn clear_support_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    m.set_support(id, SupportSpec::fixed()).unwrap();
+    let rev = m.revision();
+    m.clear_support(id).unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn clear_support_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.clear_support(id).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn set_nodal_load_bumps_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let rev = m.revision();
+    m.set_nodal_load(
+        id,
+        NodalLoadSpec {
+            fx: 1.0,
+            fy: 0.0,
+            fz: 0.0,
+            mx: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(m.revision(), rev + 1);
+}
+
+#[test]
+fn set_nodal_load_no_op_preserves_revision() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let load = NodalLoadSpec {
+        fx: 1.0,
+        fy: 2.0,
+        fz: 3.0,
+        mx: 0.0,
+        my: 0.0,
+        mz: 0.0,
+    };
+    m.set_nodal_load(id, load).unwrap();
+    let rev = m.revision();
+    m.set_nodal_load(id, load).unwrap();
+    assert_eq!(m.revision(), rev);
+}
+
+#[test]
+fn clear_nodal_load_bumps_and_no_op() {
+    let mut m = EditModel::new();
+    let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+
+    // Clearing when no load exists — no-op.
+    let rev0 = m.revision();
+    m.clear_nodal_load(id).unwrap();
+    assert_eq!(m.revision(), rev0);
+
+    // Add a load, then clear it — bumps.
+    m.set_nodal_load(
+        id,
+        NodalLoadSpec {
+            fx: 1.0,
+            fy: 0.0,
+            fz: 0.0,
+            mx: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        },
+    )
+    .unwrap();
+    let rev1 = m.revision();
+    m.clear_nodal_load(id).unwrap();
+    assert_eq!(m.revision(), rev1 + 1);
 }

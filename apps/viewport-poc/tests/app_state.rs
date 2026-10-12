@@ -1,8 +1,8 @@
 //! Integration tests for application state behavior.
 
 use viewport_poc::{
-    app_state::{AppMessage, MessageLevel, Project},
-    edit_model::NodeId,
+    app_state::{AnalysisStatus, AppMessage, MessageLevel, Project},
+    edit_model::{EditModel, NodeId, SupportSpec},
     model::{self, PresetModel},
     scene::ViewportScene,
     selection::SelectionState,
@@ -25,23 +25,30 @@ fn load_and_solve_produces_result() {
 }
 
 #[test]
-fn switching_model_marks_results_stale() {
+fn switching_model_discards_results() {
     let mut p = Project::empty();
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(!p.results_are_stale());
 
     p.load_model("Inclined".into(), model::build_inclined_edit());
-    assert!(p.results_are_stale());
+    assert_eq!(p.analysis_status(), AnalysisStatus::NeverSolved);
+    assert!(!p.has_results());
 }
 
 #[test]
-fn stale_results_still_accessible() {
+fn editing_model_marks_results_stale() {
     let mut p = Project::empty();
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
-    p.load_model("Inclined".into(), model::build_inclined_edit());
+    assert!(!p.results_are_stale());
 
+    let id = p.model.as_ref().unwrap().nodes()[0].id;
+    p.model
+        .as_mut()
+        .unwrap()
+        .update_node(id, 0.001, 0.0, 0.0)
+        .unwrap();
     assert!(p.results_are_stale());
     let analysis = p.analysis.as_ref().unwrap();
     assert!(analysis.result.displacements.len() > 0);
@@ -52,11 +59,17 @@ fn re_solve_clears_staleness() {
     let mut p = Project::empty();
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
-    p.load_model("Inclined".into(), model::build_inclined_edit());
+    let id = p.model.as_ref().unwrap().nodes()[0].id;
+    p.model
+        .as_mut()
+        .unwrap()
+        .update_node(id, 0.001, 0.0, 0.0)
+        .unwrap();
     assert!(p.results_are_stale());
 
     p.solve().unwrap();
     assert!(!p.results_are_stale());
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
 }
 
 #[test]
@@ -152,22 +165,121 @@ fn deformation_scale_does_not_trigger_solve() {
 }
 
 #[test]
-fn mark_analysis_stale_works() {
+fn edit_after_solve_marks_stale() {
     let mut p = Project::empty();
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(!p.results_are_stale());
 
-    p.mark_analysis_stale();
+    let id = p.model.as_ref().unwrap().nodes()[0].id;
+    p.model
+        .as_mut()
+        .unwrap()
+        .update_node(id, 0.001, 0.0, 0.0)
+        .unwrap();
     assert!(p.results_are_stale());
 }
 
 #[test]
-fn mark_analysis_stale_no_op_without_results() {
+fn no_op_edit_does_not_mark_stale() {
     let mut p = Project::empty();
     p.load_model("Portal".into(), model::build_portal_edit());
-    assert!(!p.has_results());
-
-    p.mark_analysis_stale();
+    p.solve().unwrap();
     assert!(!p.results_are_stale());
+
+    let (id, x, y, z) = {
+        let n = &p.model.as_ref().unwrap().nodes()[0];
+        (n.id, n.x, n.y, n.z)
+    };
+    p.model.as_mut().unwrap().update_node(id, x, y, z).unwrap();
+    assert!(!p.results_are_stale());
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+}
+
+// ── Phase 147 integration scenarios ───────────────────────────────────
+
+#[test]
+fn workflow_preset_solve_edit_stale_resolve_current() {
+    let mut p = Project::empty();
+
+    // Preset → load and solve.
+    p.load_model("Portal".into(), model::build_portal_edit());
+    p.solve().unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+    assert!(p.analysis_result().is_some());
+
+    // Edit a node coordinate → Stale.
+    let (id, x, y, z) = {
+        let n = &p.model.as_ref().unwrap().nodes()[0];
+        (n.id, n.x, n.y, n.z)
+    };
+    p.model
+        .as_mut()
+        .unwrap()
+        .update_node(id, x + 0.5, y, z)
+        .unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Stale);
+    assert!(
+        p.analysis_result().is_none(),
+        "Policy A: stale results hidden"
+    );
+
+    // Re-solve → Current.
+    p.solve().unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+    assert!(p.analysis_result().is_some());
+}
+
+#[test]
+fn workflow_valid_solve_mechanism_failed_repair_solve_current() {
+    let mut p = Project::empty();
+
+    // Build a valid fixed-fixed beam.
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::fixed()).unwrap();
+    p.load_model("Beam".into(), m);
+
+    // Solve → Current.
+    p.solve().unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+
+    // Remove both supports → mechanism (rigid body modes).
+    p.model.as_mut().unwrap().clear_support(a).unwrap();
+    p.model.as_mut().unwrap().clear_support(b).unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Stale);
+
+    // Solve → Failed (singular stiffness matrix).
+    let result = p.solve();
+    assert!(result.is_err(), "unconstrained model must fail");
+    assert_eq!(p.analysis_status(), AnalysisStatus::Failed);
+    assert!(
+        p.analysis_result().is_none(),
+        "Policy A: failed results hidden"
+    );
+
+    // Repair: re-add supports.
+    p.model
+        .as_mut()
+        .unwrap()
+        .set_support(a, SupportSpec::fixed())
+        .unwrap();
+    p.model
+        .as_mut()
+        .unwrap()
+        .set_support(b, SupportSpec::fixed())
+        .unwrap();
+    assert_eq!(
+        p.analysis_status(),
+        AnalysisStatus::Failed,
+        "status stays Failed until a successful solve"
+    );
+
+    // Solve → Current.
+    p.solve().unwrap();
+    assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+    assert!(p.analysis_result().is_some());
 }

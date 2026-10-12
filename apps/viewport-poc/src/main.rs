@@ -6,7 +6,7 @@ use eframe;
 use egui;
 use structural_analysis::{Dof3D, FrameAnalysisResult3D};
 use viewport_poc::{
-    app_state::{AppMessage, MessageLevel, Project},
+    app_state::{AnalysisStatus, AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
     edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
@@ -106,9 +106,11 @@ impl ViewportApp {
         }
     }
 
-    /// Borrow the current analysis result, if any.
+    /// Borrow the current analysis result, or `None` if stale/failed/none.
+    ///
+    /// Delegates to [`Project::analysis_result`] (Policy A).
     fn analysis_result(&self) -> Option<&FrameAnalysisResult3D> {
-        self.project.analysis.as_ref().map(|a| &a.result)
+        self.project.analysis_result()
     }
 
     /// Load a preset model and immediately solve it.
@@ -186,7 +188,6 @@ impl ViewportApp {
             }
             match model.set_member_ref_vec(id, rv) {
                 Ok(()) => {
-                    self.project.mark_analysis_stale();
                     self.rebuild_scene();
                     self.messages
                         .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
@@ -321,13 +322,24 @@ impl eframe::App for ViewportApp {
                     self.selection = SelectionState::None;
                 }
                 ui.separator();
-                if self.project.results_are_stale() {
-                    ui.label(
-                        egui::RichText::new(
-                            "\u{26a0} Results are stale \u{2014} re-solve to update",
-                        )
-                        .color(STALE_C),
-                    );
+                match self.project.analysis_status() {
+                    AnalysisStatus::Stale => {
+                        ui.label(
+                            egui::RichText::new(
+                                "\u{26a0} Results are stale \u{2014} re-solve to update",
+                            )
+                            .color(STALE_C),
+                        );
+                    }
+                    AnalysisStatus::Failed => {
+                        ui.label(
+                            egui::RichText::new(
+                                "\u{26a0} Last solve failed \u{2014} fix and re-solve",
+                            )
+                            .color(ERROR_C),
+                        );
+                    }
+                    _ => {}
                 }
             });
         });
@@ -345,14 +357,19 @@ impl eframe::App for ViewportApp {
                             ui.label(format!("Nodes: {}", m.n_nodes()));
                             ui.label(format!("Members: {}", m.n_members()));
                         }
-                        if self.project.has_results() {
-                            if self.project.results_are_stale() {
-                                ui.label(egui::RichText::new("Analysis: STALE").color(STALE_C));
-                            } else {
+                        match self.project.analysis_status() {
+                            AnalysisStatus::Current => {
                                 ui.label("Analysis: \u{2713}");
                             }
-                        } else {
-                            ui.label("Analysis: not run");
+                            AnalysisStatus::Stale => {
+                                ui.label(egui::RichText::new("Analysis: STALE").color(STALE_C));
+                            }
+                            AnalysisStatus::Failed => {
+                                ui.label(egui::RichText::new("Analysis: FAILED").color(ERROR_C));
+                            }
+                            AnalysisStatus::NeverSolved => {
+                                ui.label("Analysis: not run");
+                            }
                         }
                     }
                     ui.separator();
@@ -869,7 +886,6 @@ impl ViewportApp {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.update_node(id, new_coords.0, new_coords.1, new_coords.2) {
                                 Ok(()) => {
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
@@ -979,7 +995,6 @@ impl ViewportApp {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.clear_support(id) {
                                 Ok(()) => {
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                     self.messages.push(AppMessage::info(format!(
                                         "Cleared support at node N{}",
@@ -993,7 +1008,6 @@ impl ViewportApp {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.set_support(id, new_spec) {
                                 Ok(()) => {
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
@@ -1101,7 +1115,6 @@ impl ViewportApp {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.clear_nodal_load(id) {
                                 Ok(()) => {
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                     self.messages.push(AppMessage::info(format!(
                                         "Cleared load at node N{}",
@@ -1115,7 +1128,6 @@ impl ViewportApp {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.set_nodal_load(id, new_load) {
                                 Ok(()) => {
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
@@ -1128,7 +1140,6 @@ impl ViewportApp {
                             match model.delete_node(id) {
                                 Ok(()) => {
                                     self.selection = SelectionState::None;
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                     self.messages
                                         .push(AppMessage::info(format!("Deleted node N{}", id.0)));
@@ -1281,7 +1292,6 @@ impl ViewportApp {
                             match model.delete_member(id) {
                                 Ok(()) => {
                                     self.selection = SelectionState::None;
-                                    self.project.mark_analysis_stale();
                                     self.rebuild_scene();
                                     self.messages.push(AppMessage::info(format!(
                                         "Deleted member M{}",
@@ -1409,7 +1419,6 @@ impl ViewportApp {
         };
         match model.add_node(x, y, z) {
             Ok(id) => {
-                self.project.mark_analysis_stale();
                 self.rebuild_scene();
                 self.messages.push(AppMessage::info(format!(
                     "Added node N{} at ({}, {}, {})",
@@ -1444,7 +1453,6 @@ impl ViewportApp {
         };
         match model.add_member(NodeId(ni), NodeId(nj)) {
             Ok(id) => {
-                self.project.mark_analysis_stale();
                 self.rebuild_scene();
                 self.messages.push(AppMessage::info(format!(
                     "Added member M{} (N{} \u{2192} N{})",
