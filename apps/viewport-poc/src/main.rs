@@ -64,6 +64,8 @@ enum PendingAction {
     None,
     New,
     Open,
+    Clear,
+    LoadPreset(model::PresetModel),
 }
 
 /// Temporary buffer for member property editing.
@@ -305,7 +307,8 @@ impl ViewportApp {
 
     /// Save the project to the current path (or the file path input if no
     /// current path is set).  On failure, `saved_revision` is not updated.
-    fn do_save(&mut self) {
+    /// Returns `true` on success.
+    fn do_save(&mut self) -> bool {
         let path = match &self.project_path {
             Some(p) => p.clone(),
             None => {
@@ -314,30 +317,32 @@ impl ViewportApp {
                     self.messages.push(AppMessage::error(
                         "No file path. Use \u{201c}Save As\u{201d} to specify one.",
                     ));
-                    return;
+                    return false;
                 }
                 p
             }
         };
-        self.save_to_path(&path);
+        self.save_to_path(&path)
     }
 
     /// Save the project to the path in the file path input.
-    fn do_save_as(&mut self) {
+    /// Returns `true` on success.
+    fn do_save_as(&mut self) -> bool {
         let path = std::path::PathBuf::from(self.file_path_input.trim());
         if path.as_os_str().is_empty() {
             self.messages
                 .push(AppMessage::error("No file path specified."));
-            return;
+            return false;
         }
-        self.save_to_path(&path);
+        self.save_to_path(&path)
     }
 
     /// Internal: save the model to `path` and update state on success.
-    fn save_to_path(&mut self, path: &std::path::Path) {
+    /// Returns `true` on success.
+    fn save_to_path(&mut self, path: &std::path::Path) -> bool {
         let Some(model) = &self.project.model else {
             self.messages.push(AppMessage::error("No model to save."));
-            return;
+            return false;
         };
         match persistence::save_project(path, model) {
             Ok(()) => {
@@ -347,10 +352,12 @@ impl ViewportApp {
                 self.file_path_input = path.to_string_lossy().to_string();
                 self.messages
                     .push(AppMessage::info(format!("Saved to {}", path.display())));
+                true
             }
             Err(e) => {
                 self.messages
                     .push(AppMessage::error(format!("Save failed: {e}")));
+                false
             }
         }
     }
@@ -361,6 +368,8 @@ impl ViewportApp {
             PendingAction::None => {}
             PendingAction::New => self.do_new(),
             PendingAction::Open => self.do_open(),
+            PendingAction::Clear => self.clear_project(),
+            PendingAction::LoadPreset(preset) => self.load_preset(preset),
         }
         self.pending_action = PendingAction::None;
         self.show_unsaved_dialog = false;
@@ -468,7 +477,12 @@ impl eframe::App for ViewportApp {
                     }
                     ui.separator();
                     if ui.button("Clear project").clicked() {
-                        self.clear_project();
+                        if self.is_dirty() {
+                            self.show_unsaved_dialog = true;
+                            self.pending_action = PendingAction::Clear;
+                        } else {
+                            self.clear_project();
+                        }
                         ui.close_menu();
                     }
                 });
@@ -559,7 +573,12 @@ impl eframe::App for ViewportApp {
                         .add_enabled(!is_active, egui::Button::new(preset.name()))
                         .clicked()
                     {
-                        self.load_preset(preset);
+                        if self.is_dirty() {
+                            self.show_unsaved_dialog = true;
+                            self.pending_action = PendingAction::LoadPreset(preset);
+                        } else {
+                            self.load_preset(preset);
+                        }
                     }
                 }
                 ui.separator();
@@ -572,7 +591,12 @@ impl eframe::App for ViewportApp {
                     }
                 }
                 if ui.button("Clear project").clicked() {
-                    self.clear_project();
+                    if self.is_dirty() {
+                        self.show_unsaved_dialog = true;
+                        self.pending_action = PendingAction::Clear;
+                    } else {
+                        self.clear_project();
+                    }
                 }
                 ui.separator();
                 ui.label("File path:");
@@ -626,16 +650,16 @@ impl eframe::App for ViewportApp {
                         if ui.button("Save").clicked() {
                             let has_path = self.project_path.is_some();
                             if has_path {
-                                self.do_save();
-                                self.execute_pending();
+                                if self.do_save() {
+                                    self.execute_pending();
+                                }
                             } else {
                                 let p = std::path::PathBuf::from(self.file_path_input.trim());
                                 if p.as_os_str().is_empty() {
                                     self.messages.push(AppMessage::error(
                                         "No file path. Enter a path or cancel.",
                                     ));
-                                } else {
-                                    self.save_to_path(&p);
+                                } else if self.save_to_path(&p) {
                                     self.execute_pending();
                                 }
                             }
