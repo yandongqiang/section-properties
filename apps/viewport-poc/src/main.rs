@@ -9,7 +9,7 @@ use viewport_poc::{
     app_state::{AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
-    edit_model::{EditModel, NodalLoadSpec, NodeId, SupportSpec},
+    edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
     model, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -47,6 +47,43 @@ struct ViewportApp {
     new_node_z: String,
     new_member_i: String,
     new_member_j: String,
+    member_edit: MemberEditBuffer,
+}
+
+/// Temporary buffer for member property editing.
+///
+/// Holds section (E, G, A, Iy, Iz, J) and ref_vec (rx, ry, rz) values
+/// being edited in the inspector.  Values are only applied to the
+/// EditModel when the user clicks "Apply".
+struct MemberEditBuffer {
+    /// The MemberId this buffer corresponds to.
+    member_id: Option<MemberId>,
+    e: f64,
+    g: f64,
+    area: f64,
+    iy: f64,
+    iz: f64,
+    j: f64,
+    ref_x: f64,
+    ref_y: f64,
+    ref_z: f64,
+}
+
+impl Default for MemberEditBuffer {
+    fn default() -> Self {
+        Self {
+            member_id: None,
+            e: 200e9,
+            g: 80e9,
+            area: 1e-3,
+            iy: 2e-6,
+            iz: 1e-6,
+            j: 3e-6,
+            ref_x: 0.0,
+            ref_y: 0.0,
+            ref_z: 1.0,
+        }
+    }
 }
 
 impl ViewportApp {
@@ -65,6 +102,7 @@ impl ViewportApp {
             new_node_z: String::new(),
             new_member_i: String::new(),
             new_member_j: String::new(),
+            member_edit: MemberEditBuffer::default(),
         }
     }
 
@@ -94,6 +132,70 @@ impl ViewportApp {
             }
         } else {
             self.scene = None;
+        }
+    }
+
+    /// Sync the member edit buffer when the selected member changes.
+    fn sync_member_edit_buffer(&mut self, id: MemberId) {
+        if self.member_edit.member_id == Some(id) {
+            return;
+        }
+        self.reset_member_edit(id);
+    }
+
+    /// Reset the edit buffer to the current model values for a member.
+    fn reset_member_edit(&mut self, id: MemberId) {
+        if let Some(model) = &self.project.model {
+            if let Some(member) = model.members().iter().find(|m| m.id == id) {
+                let sec = &member.section;
+                self.member_edit = MemberEditBuffer {
+                    member_id: Some(id),
+                    e: sec.E(),
+                    g: sec.G(),
+                    area: sec.area(),
+                    iy: sec.iy(),
+                    iz: sec.iz(),
+                    j: sec.j(),
+                    ref_x: member.ref_vec[0],
+                    ref_y: member.ref_vec[1],
+                    ref_z: member.ref_vec[2],
+                };
+            }
+        }
+    }
+
+    /// Apply the edit buffer to the model for a member.
+    fn apply_member_edit(&mut self, id: MemberId) {
+        let buf = &self.member_edit;
+        let (e, g, area, iy, iz, j, rv) = (
+            buf.e,
+            buf.g,
+            buf.area,
+            buf.iy,
+            buf.iz,
+            buf.j,
+            [buf.ref_x, buf.ref_y, buf.ref_z],
+        );
+        if let Some(model) = self.project.model.as_mut() {
+            match model.set_member_section(id, e, g, area, iy, iz, j) {
+                Ok(()) => {}
+                Err(e) => {
+                    self.messages.push(AppMessage::error(e.message()));
+                    return;
+                }
+            }
+            match model.set_member_ref_vec(id, rv) {
+                Ok(()) => {
+                    self.project.mark_analysis_stale();
+                    self.rebuild_scene();
+                    self.messages
+                        .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
+                }
+                Err(e) => {
+                    self.messages.push(AppMessage::error(e.message()));
+                    self.reset_member_edit(id);
+                }
+            }
         }
     }
 
@@ -1049,6 +1151,103 @@ impl ViewportApp {
                             if let Some(len) = s.member_length(idx) {
                                 ui.label(format!("Length: {:.4} m", len));
                             }
+                        }
+                    }
+
+                    // ── Section / Material editing ──
+                    self.sync_member_edit_buffer(id);
+                    ui.collapsing("Section / Material", |ui| {
+                        egui::Grid::new("member_section_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("E (Pa):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.e)
+                                        .speed(1e8)
+                                        .range(1.0..=1e12),
+                                );
+                                ui.end_row();
+                                ui.label("G (Pa):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.g)
+                                        .speed(1e8)
+                                        .range(1.0..=1e12),
+                                );
+                                ui.end_row();
+                                ui.label("A (m\u{00b2}):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.area)
+                                        .speed(1e-5)
+                                        .range(1e-12..=1.0),
+                                );
+                                ui.end_row();
+                                ui.label("Iy (m\u{2074}):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.iy)
+                                        .speed(1e-8)
+                                        .range(1e-15..=1.0),
+                                );
+                                ui.end_row();
+                                ui.label("Iz (m\u{2074}):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.iz)
+                                        .speed(1e-8)
+                                        .range(1e-15..=1.0),
+                                );
+                                ui.end_row();
+                                ui.label("J (m\u{2074}):");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.j)
+                                        .speed(1e-8)
+                                        .range(1e-15..=1.0),
+                                );
+                                ui.end_row();
+                            });
+                    });
+
+                    // ── Reference vector editing ──
+                    ui.collapsing("Reference Vector", |ui| {
+                        egui::Grid::new("member_refvec_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("ref_x:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.ref_x)
+                                        .speed(0.1)
+                                        .range(-10.0..=10.0),
+                                );
+                                ui.end_row();
+                                ui.label("ref_y:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.ref_y)
+                                        .speed(0.1)
+                                        .range(-10.0..=10.0),
+                                );
+                                ui.end_row();
+                                ui.label("ref_z:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.member_edit.ref_z)
+                                        .speed(0.1)
+                                        .range(-10.0..=10.0),
+                                );
+                                ui.end_row();
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply Changes").clicked() {
+                            self.apply_member_edit(id);
+                        }
+                        if ui.button("Reset").clicked() {
+                            self.reset_member_edit(id);
+                        }
+                    });
+
+                    // ── Analysis results (read-only) ──
+                    if let Some(s) = &self.scene {
+                        if let Some(idx) = s.member_index(id) {
                             if let Some(r) = self.analysis_result() {
                                 if let Ok(f) = r.member_end_forces(idx) {
                                     ui.label("Local end forces:");
@@ -1326,7 +1525,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 145"),
+            .with_title("Structural Analysis \u{2014} Phase 146"),
         ..Default::default()
     };
     eframe::run_native(

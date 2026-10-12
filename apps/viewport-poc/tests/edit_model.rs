@@ -277,13 +277,13 @@ fn set_member_ref_vec() {
     let b = m.add_node(3.0, 0.0, 0.0).unwrap();
     let mid = m.add_member(a, b).unwrap();
 
-    m.set_member_ref_vec(mid, [1.0, 0.0, 0.0]).unwrap();
-    assert_eq!(m.member(mid).unwrap().ref_vec, [1.0, 0.0, 0.0]);
+    m.set_member_ref_vec(mid, [0.0, 1.0, 0.0]).unwrap();
+    assert_eq!(m.member(mid).unwrap().ref_vec, [0.0, 1.0, 0.0]);
 
     let fm = m.to_frame_model().unwrap();
     let member = fm.member(0).unwrap();
     let rv = member.ref_vec();
-    assert!((rv[0] - 1.0).abs() < 1e-15);
+    assert!((rv[1] - 1.0).abs() < 1e-15);
 }
 
 #[test]
@@ -635,4 +635,256 @@ fn support_and_load_coexist_in_scene() {
     assert!(scene.node_supports[0].unwrap().is_fixed());
     assert!(scene.node_loads[1].is_some());
     assert!(scene.node_loads[0].is_none());
+}
+
+// ── Member property editing integration tests ───────────────────────
+
+#[test]
+fn preset_section_preservation() {
+    use structural_analysis::FrameSection3D;
+    for &preset in model::PresetModel::all() {
+        let m = preset.build_edit();
+        let fm = m
+            .to_frame_model()
+            .unwrap_or_else(|e| panic!("preset '{}' to_frame_model failed: {e:?}", preset.name()));
+        for member in m.members() {
+            let idx = m.member_index(member.id).unwrap();
+            let sec_edit = &member.section;
+            let sec_fm = fm.member(idx).unwrap().section();
+            assert!(
+                (sec_edit.E() - sec_fm.E()).abs() < 1e-3,
+                "preset '{}' M{}: E mismatch",
+                preset.name(),
+                member.id.0
+            );
+            assert!(
+                (sec_edit.area() - sec_fm.area()).abs() < 1e-15,
+                "preset '{}' M{}: A mismatch",
+                preset.name(),
+                member.id.0
+            );
+        }
+        let _ = FrameSection3D::new(1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    }
+}
+
+#[test]
+fn preset_ref_vec_preservation() {
+    for &preset in model::PresetModel::all() {
+        let m = preset.build_edit();
+        let fm = m
+            .to_frame_model()
+            .unwrap_or_else(|e| panic!("preset '{}' to_frame_model failed: {e:?}", preset.name()));
+        for member in m.members() {
+            let idx = m.member_index(member.id).unwrap();
+            let rv_edit = member.ref_vec;
+            let rv_fm = fm.member(idx).unwrap().ref_vec();
+            for k in 0..3 {
+                assert!(
+                    (rv_edit[k] - rv_fm[k]).abs() < 1e-15,
+                    "preset '{}' M{}: ref_vec[{}] mismatch",
+                    preset.name(),
+                    member.id.0,
+                    k
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn member_id_stable_after_unrelated_deletion() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(6.0, 0.0, 0.0).unwrap();
+    let _m_ab = m.add_member(a, b).unwrap();
+    let m_bc = m.add_member(b, c).unwrap();
+    m.set_member_section(m_bc, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+        .unwrap();
+    let other_node = m.add_node(10.0, 10.0, 10.0).unwrap();
+    m.delete_node(other_node).unwrap();
+    let s = m.member_section(m_bc).unwrap();
+    assert!((s.E() - 210e9).abs() < 1e-3);
+    assert!((s.area() - 2e-3).abs() < 1e-15);
+}
+
+#[test]
+fn section_edit_marks_stale() {
+    use viewport_poc::app_state::Project;
+    let mut p = Project::empty();
+    p.load_model("Portal".into(), model::build_portal_edit());
+    p.solve().unwrap();
+    assert!(!p.results_are_stale());
+    let model = p.model.as_mut().unwrap();
+    let mid = model.members()[0].id;
+    model
+        .set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+        .unwrap();
+    p.mark_analysis_stale();
+    assert!(p.results_are_stale());
+    p.solve().unwrap();
+    assert!(!p.results_are_stale());
+}
+
+#[test]
+fn ref_vec_edit_marks_stale() {
+    use viewport_poc::app_state::Project;
+    let mut p = Project::empty();
+    p.load_model("Portal".into(), model::build_portal_edit());
+    p.solve().unwrap();
+    assert!(!p.results_are_stale());
+    let model = p.model.as_mut().unwrap();
+    let mid = model.members()[0].id;
+    model.set_member_ref_vec(mid, [1.0, 0.0, 0.0]).unwrap();
+    p.mark_analysis_stale();
+    assert!(p.results_are_stale());
+}
+
+// ── Numerical integration: axial deformation u = FL/EA ─────────────
+
+#[test]
+fn axial_deformation_matches_formula() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+
+    let e = 200e9;
+    let area = 1e-3;
+    let iy = 2e-6;
+    let iz = 1e-6;
+    let j = 3e-6;
+    let g = 80e9;
+    m.set_member_section(mid, e, g, area, iy, iz, j).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+
+    let f = 1e3;
+    m.set_nodal_load(b, NodalLoadSpec::new(f, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("axial cantilever should solve");
+    let b_idx = m.node_index(b).unwrap();
+    let ux = result.displacements[b_idx * 6 + 0];
+    let l = 3.0_f64;
+    let expected = f * l / (e * area);
+    assert!(
+        (ux - expected).abs() / expected.abs() < 1e-4,
+        "axial: ux={ux:.6e}, expected={expected:.6e}"
+    );
+}
+
+#[test]
+fn axial_deformation_doubles_when_area_halves() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+
+    let e = 200e9;
+    let area = 1e-3;
+    m.set_member_section(mid, e, 80e9, area, 2e-6, 1e-6, 3e-6)
+        .unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().unwrap();
+    let b_idx = m.node_index(b).unwrap();
+    let ux1 = result.displacements[b_idx * 6 + 0];
+
+    m.set_member_section(mid, e, 80e9, area / 2.0, 2e-6, 1e-6, 3e-6)
+        .unwrap();
+    let fm2 = m.to_frame_model().unwrap();
+    let result2 = fm2.solve().unwrap();
+    let ux2 = result2.displacements[b_idx * 6 + 0];
+
+    assert!(
+        (ux2 / ux1 - 2.0).abs() < 1e-4,
+        "halving A should double u: ux1={ux1:.6e}, ux2={ux2:.6e}"
+    );
+}
+
+// ── Numerical integration: cantilever bending δ = FL³/(3EI) ─────────
+
+#[test]
+fn cantilever_bending_matches_formula() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+
+    let e = 200e9;
+    let iz = 1e-6;
+    m.set_member_section(mid, e, 80e9, 1e-3, 2e-6, iz, 3e-6)
+        .unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+
+    let f = 1e3;
+    m.set_nodal_load(b, NodalLoadSpec::new(0.0, 0.0, f, 0.0, 0.0, 0.0))
+        .unwrap();
+
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("bending cantilever should solve");
+    let b_idx = m.node_index(b).unwrap();
+    let uz = result.displacements[b_idx * 6 + 2];
+    let l = 3.0_f64;
+    let expected = f * l * l * l / (3.0 * e * iz);
+    assert!(
+        (uz - expected).abs() / expected.abs() < 1e-4,
+        "bending: uz={uz:.6e}, expected={expected:.6e}"
+    );
+}
+
+#[test]
+fn cantilever_bending_doubles_when_i_halves() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let mid = m.add_member(a, b).unwrap();
+
+    let e = 200e9;
+    let iz = 1e-6;
+    m.set_member_section(mid, e, 80e9, 1e-3, 2e-6, iz, 3e-6)
+        .unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(0.0, 0.0, 1e3, 0.0, 0.0, 0.0))
+        .unwrap();
+
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().unwrap();
+    let b_idx = m.node_index(b).unwrap();
+    let uz1 = result.displacements[b_idx * 6 + 2];
+
+    m.set_member_section(mid, e, 80e9, 1e-3, 2e-6, iz / 2.0, 3e-6)
+        .unwrap();
+    let fm2 = m.to_frame_model().unwrap();
+    let result2 = fm2.solve().unwrap();
+    let uz2 = result2.displacements[b_idx * 6 + 2];
+
+    assert!(
+        (uz2 / uz1 - 2.0).abs() < 1e-4,
+        "halving I should double δ: uz1={uz1:.6e}, uz2={uz2:.6e}"
+    );
+}
+
+#[test]
+fn edited_section_solve_remains_stable() {
+    let mut m = model::build_portal_edit();
+    let mid = m.members()[0].id;
+    m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+        .unwrap();
+    let fm = m.to_frame_model().unwrap();
+    assert!(fm.solve().is_ok());
+}
+
+#[test]
+fn edited_ref_vec_solve_remains_stable() {
+    let mut m = model::build_portal_edit();
+    let mid = m.members()[0].id;
+    m.set_member_ref_vec(mid, [0.3, 0.7, 0.5]).unwrap();
+    let fm = m.to_frame_model().unwrap();
+    assert!(fm.solve().is_ok());
 }

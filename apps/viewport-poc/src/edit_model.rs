@@ -12,6 +12,12 @@ use std::collections::HashMap;
 
 use structural_analysis::{Dof3D, FrameModel3D, FrameSection3D};
 
+/// Tolerance for detecting near-parallel reference vectors.
+///
+/// Matches `frame3d::PARALLEL_TOL` — `sin(angle) < 1e-8` means the
+/// reference vector is effectively parallel to the member axis.
+const PARALLEL_TOL: f64 = 1e-8;
+
 // ── Identifiers ────────────────────────────────────────────────────────
 
 /// Stable node identifier.
@@ -40,6 +46,7 @@ pub struct EditMember {
     pub node_i: NodeId,
     pub node_j: NodeId,
     pub ref_vec: [f64; 3],
+    pub section: FrameSection3D,
 }
 
 // ── Support specification ─────────────────────────────────────────────
@@ -163,6 +170,10 @@ pub enum EditError {
     DuplicateMember,
     /// Conversion to FrameModel3D failed.
     FrameModelBuild(String),
+    /// Invalid section/material parameter (non-finite, zero, or negative).
+    InvalidSection(String),
+    /// Invalid reference vector (non-finite, zero, or parallel to member axis).
+    InvalidRefVec(String),
 }
 
 impl EditError {
@@ -180,6 +191,8 @@ impl EditError {
             EditError::ZeroLengthMember => "Member has zero length".into(),
             EditError::DuplicateMember => "A member between these nodes already exists".into(),
             EditError::FrameModelBuild(s) => format!("Model build error: {s}"),
+            EditError::InvalidSection(s) => format!("Invalid section: {s}"),
+            EditError::InvalidRefVec(s) => format!("Invalid reference vector: {s}"),
         }
     }
 }
@@ -397,6 +410,7 @@ impl EditModel {
             node_i,
             node_j,
             ref_vec: [0.0, 0.0, 1.0],
+            section: default_section(),
         });
         Ok(id)
     }
@@ -410,8 +424,47 @@ impl EditModel {
         Ok(())
     }
 
-    /// Set the reference vector for a member.  Used by preset models.
+    /// Set the reference vector for a member.
+    ///
+    /// Validates that the vector is finite, nonzero, and not parallel
+    /// (or nearly parallel) to the member axis, using the same tolerance
+    /// as the analysis engine (`sin(angle) < 1e-8`).
     pub fn set_member_ref_vec(&mut self, id: MemberId, ref_vec: [f64; 3]) -> Result<(), EditError> {
+        if !ref_vec[0].is_finite() || !ref_vec[1].is_finite() || !ref_vec[2].is_finite() {
+            return Err(EditError::InvalidRefVec(
+                "reference vector must be finite".to_string(),
+            ));
+        }
+        let ref_norm = ref_vec[0].hypot(ref_vec[1]).hypot(ref_vec[2]);
+        if ref_norm == 0.0 {
+            return Err(EditError::InvalidRefVec(
+                "reference vector must be nonzero".to_string(),
+            ));
+        }
+        let member = self
+            .members
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or(EditError::MemberNotFound(id))?;
+        let pi = self.node(member.node_i).unwrap();
+        let pj = self.node(member.node_j).unwrap();
+        let dx = pj.x - pi.x;
+        let dy = pj.y - pi.y;
+        let dz = pj.z - pi.z;
+        let len = dx.hypot(dy).hypot(dz);
+        let x_hat = [dx / len, dy / len, dz / len];
+        let cross = [
+            x_hat[1] * ref_vec[2] - x_hat[2] * ref_vec[1],
+            x_hat[2] * ref_vec[0] - x_hat[0] * ref_vec[2],
+            x_hat[0] * ref_vec[1] - x_hat[1] * ref_vec[0],
+        ];
+        let cross_norm = cross[0].hypot(cross[1]).hypot(cross[2]);
+        let sin_angle = cross_norm / ref_norm;
+        if sin_angle < PARALLEL_TOL {
+            return Err(EditError::InvalidRefVec(format!(
+                "parallel to member axis; sin(angle) = {sin_angle:.3e} < tol {PARALLEL_TOL:.3e}"
+            )));
+        }
         let member = self
             .members
             .iter_mut()
@@ -419,6 +472,61 @@ impl EditModel {
             .ok_or(EditError::MemberNotFound(id))?;
         member.ref_vec = ref_vec;
         Ok(())
+    }
+
+    /// Query the reference vector of a member.
+    pub fn member_ref_vec(&self, id: MemberId) -> Option<[f64; 3]> {
+        self.members.iter().find(|m| m.id == id).map(|m| m.ref_vec)
+    }
+
+    /// Set the section/material properties for a member.
+    ///
+    /// All six parameters must be finite and strictly positive.
+    /// On validation failure the member is left unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_member_section(
+        &mut self,
+        id: MemberId,
+        e: f64,
+        g: f64,
+        area: f64,
+        iy: f64,
+        iz: f64,
+        j: f64,
+    ) -> Result<(), EditError> {
+        for (label, val) in [
+            ("E", e),
+            ("G", g),
+            ("A", area),
+            ("Iy", iy),
+            ("Iz", iz),
+            ("J", j),
+        ] {
+            if !val.is_finite() {
+                return Err(EditError::InvalidSection(format!(
+                    "{label} must be finite, got {val}"
+                )));
+            }
+            if val <= 0.0 {
+                return Err(EditError::InvalidSection(format!(
+                    "{label} must be positive, got {val}"
+                )));
+            }
+        }
+        let section = FrameSection3D::new(e, g, area, iy, iz, j)
+            .map_err(|e| EditError::InvalidSection(format!("{e:?}")))?;
+        let member = self
+            .members
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or(EditError::MemberNotFound(id))?;
+        member.section = section;
+        Ok(())
+    }
+
+    /// Query the section of a member.
+    pub fn member_section(&self, id: MemberId) -> Option<&FrameSection3D> {
+        self.members.iter().find(|m| m.id == id).map(|m| &m.section)
     }
 
     // ── Support / constraint operations ───────────────────────────────
@@ -616,7 +724,6 @@ impl EditModel {
             id_to_idx.insert(node.id, idx);
         }
 
-        let section = default_section();
         for member in &self.members {
             let ni = *id_to_idx
                 .get(&member.node_i)
@@ -625,7 +732,7 @@ impl EditModel {
                 .get(&member.node_j)
                 .ok_or(EditError::NodeNotFound(member.node_j))?;
             model
-                .add_member(ni, nj, section, member.ref_vec)
+                .add_member(ni, nj, member.section, member.ref_vec)
                 .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
         }
 
@@ -1421,5 +1528,260 @@ mod tests {
             .unwrap();
         let fm = m.to_frame_model().unwrap();
         assert!(fm.solve().is_ok());
+    }
+
+    // ── Member section / ref_vec tests ───────────────────────────────
+
+    #[test]
+    fn set_member_section_success() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+            .unwrap();
+        let s = m.member_section(mid).unwrap();
+        assert!((s.E() - 210e9).abs() < 1e-3);
+        assert!((s.G() - 81e9).abs() < 1e-3);
+        assert!((s.area() - 2e-3).abs() < 1e-15);
+        assert!((s.iy() - 4e-6).abs() < 1e-15);
+        assert!((s.iz() - 3e-6).abs() < 1e-15);
+        assert!((s.j() - 5e-6).abs() < 1e-15);
+    }
+
+    #[test]
+    fn set_member_section_rejects_nonexistent() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.add_member(a, b).unwrap();
+        let err = m
+            .set_member_section(MemberId(99), 200e9, 80e9, 1e-3, 2e-6, 1e-6, 3e-6)
+            .unwrap_err();
+        assert!(matches!(err, EditError::MemberNotFound(MemberId(99))));
+    }
+
+    #[test]
+    fn set_member_section_rejects_zero() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m
+            .set_member_section(mid, 0.0, 80e9, 1e-3, 2e-6, 1e-6, 3e-6)
+            .unwrap_err();
+        assert!(matches!(err, EditError::InvalidSection(_)));
+    }
+
+    #[test]
+    fn set_member_section_rejects_negative() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m
+            .set_member_section(mid, 200e9, 80e9, -1e-3, 2e-6, 1e-6, 3e-6)
+            .unwrap_err();
+        assert!(matches!(err, EditError::InvalidSection(_)));
+    }
+
+    #[test]
+    fn set_member_section_rejects_nan() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m
+            .set_member_section(mid, f64::NAN, 80e9, 1e-3, 2e-6, 1e-6, 3e-6)
+            .unwrap_err();
+        assert!(matches!(err, EditError::InvalidSection(_)));
+    }
+
+    #[test]
+    fn set_member_section_rejects_infinity() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m
+            .set_member_section(mid, 200e9, f64::INFINITY, 1e-3, 2e-6, 1e-6, 3e-6)
+            .unwrap_err();
+        assert!(matches!(err, EditError::InvalidSection(_)));
+    }
+
+    #[test]
+    fn set_member_section_atomic_on_failure() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let original = m.member_section(mid).unwrap().E();
+        let _ = m.set_member_section(mid, -1.0, 80e9, 1e-3, 2e-6, 1e-6, 3e-6);
+        assert!((m.member_section(mid).unwrap().E() - original).abs() < 1e-15);
+    }
+
+    #[test]
+    fn set_member_section_does_not_affect_others() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(6.0, 0.0, 0.0).unwrap();
+        let m1 = m.add_member(a, b).unwrap();
+        let m2 = m.add_member(b, c).unwrap();
+        m.set_member_section(m1, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+            .unwrap();
+        let s2 = m.member_section(m2).unwrap();
+        assert!((s2.E() - 200e9).abs() < 1e-3);
+    }
+
+    #[test]
+    fn member_section_query_none_for_nonexistent() {
+        let m = EditModel::new();
+        assert!(m.member_section(MemberId(99)).is_none());
+    }
+
+    #[test]
+    fn set_member_ref_vec_success() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_ref_vec(mid, [0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(m.member_ref_vec(mid).unwrap(), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn set_member_ref_vec_rejects_nonexistent() {
+        let mut m = EditModel::new();
+        let err = m
+            .set_member_ref_vec(MemberId(99), [0.0, 0.0, 1.0])
+            .unwrap_err();
+        assert!(matches!(err, EditError::MemberNotFound(MemberId(99))));
+    }
+
+    #[test]
+    fn set_member_ref_vec_rejects_zero() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m.set_member_ref_vec(mid, [0.0, 0.0, 0.0]).unwrap_err();
+        assert!(matches!(err, EditError::InvalidRefVec(_)));
+    }
+
+    #[test]
+    fn set_member_ref_vec_rejects_nan() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m.set_member_ref_vec(mid, [f64::NAN, 0.0, 1.0]).unwrap_err();
+        assert!(matches!(err, EditError::InvalidRefVec(_)));
+    }
+
+    #[test]
+    fn set_member_ref_vec_rejects_parallel() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m.set_member_ref_vec(mid, [1.0, 0.0, 0.0]).unwrap_err();
+        assert!(matches!(err, EditError::InvalidRefVec(_)));
+    }
+
+    #[test]
+    fn set_member_ref_vec_rejects_near_parallel() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(1.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let err = m.set_member_ref_vec(mid, [1.0, 1e-10, 0.0]).unwrap_err();
+        assert!(matches!(err, EditError::InvalidRefVec(_)));
+    }
+
+    #[test]
+    fn set_member_ref_vec_atomic_on_failure() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let original = m.member_ref_vec(mid).unwrap();
+        let _ = m.set_member_ref_vec(mid, [1.0, 0.0, 0.0]);
+        assert_eq!(m.member_ref_vec(mid).unwrap(), original);
+    }
+
+    #[test]
+    fn member_ref_vec_query_none_for_nonexistent() {
+        let m = EditModel::new();
+        assert!(m.member_ref_vec(MemberId(99)).is_none());
+    }
+
+    #[test]
+    fn section_edit_preserves_connectivity() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+            .unwrap();
+        let member = m.member(mid).unwrap();
+        assert_eq!(member.node_i, a);
+        assert_eq!(member.node_j, b);
+    }
+
+    #[test]
+    fn section_edit_preserves_supports_and_loads() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_support(a, SupportSpec::fixed()).unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+            .unwrap();
+        assert!(m.has_support(a));
+        assert!(m.has_nodal_load(b));
+    }
+
+    #[test]
+    fn to_frame_model_uses_edited_section() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_section(mid, 210e9, 81e9, 2e-3, 4e-6, 3e-6, 5e-6)
+            .unwrap();
+        let fm = m.to_frame_model().unwrap();
+        let sec = fm.member(0).unwrap().section();
+        assert!((sec.E() - 210e9).abs() < 1e-3);
+        assert!((sec.area() - 2e-3).abs() < 1e-15);
+    }
+
+    #[test]
+    fn to_frame_model_uses_edited_ref_vec() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_ref_vec(mid, [0.0, 1.0, 0.0]).unwrap();
+        let fm = m.to_frame_model().unwrap();
+        let rv = fm.member(0).unwrap().ref_vec();
+        assert!((rv[1] - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn default_section_is_steel() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let s = m.member_section(mid).unwrap();
+        assert!((s.E() - 200e9).abs() < 1e-3);
+        assert!((s.G() - 80e9).abs() < 1e-3);
+        assert!((s.area() - 1e-3).abs() < 1e-15);
+        assert!((s.iy() - 2e-6).abs() < 1e-15);
+        assert!((s.iz() - 1e-6).abs() < 1e-15);
+        assert!((s.j() - 3e-6).abs() < 1e-15);
     }
 }
