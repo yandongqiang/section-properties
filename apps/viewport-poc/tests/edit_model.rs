@@ -2,7 +2,7 @@
 
 use structural_analysis::Dof3D;
 use viewport_poc::{
-    edit_model::{EditError, EditModel, MemberId, NodeId, SupportSpec},
+    edit_model::{EditError, EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
     model,
     scene::ViewportScene,
 };
@@ -223,7 +223,8 @@ fn add_node_and_member_then_solve() {
 
     m.fix_node(a).unwrap();
     m.fix_node(b).unwrap();
-    m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    m.set_nodal_load(c, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
 
     let fm = m.to_frame_model().unwrap();
     let result = fm.solve().expect("portal frame should solve");
@@ -308,7 +309,8 @@ fn set_support_fixed_then_solve() {
     m.add_member(b, d).unwrap();
     m.set_support(a, SupportSpec::fixed()).unwrap();
     m.set_support(b, SupportSpec::fixed()).unwrap();
-    m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    m.set_nodal_load(c, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
     let fm = m.to_frame_model().unwrap();
     assert!(fm.solve().is_ok());
 }
@@ -328,7 +330,8 @@ fn set_support_pinned_then_solve() {
     m.add_member(c, d).unwrap();
     m.set_support(a, SupportSpec::fixed()).unwrap();
     m.set_support(b, SupportSpec::fixed()).unwrap();
-    m.add_nodal_load(e, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+    m.set_nodal_load(e, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
     let fm = m.to_frame_model().unwrap();
     assert!(fm.solve().is_ok());
 }
@@ -433,4 +436,203 @@ fn scene_supports_match_model_after_clear() {
     m.clear_support(a).unwrap();
     let scene = ViewportScene::from_edit_model(&m);
     assert!(scene.node_supports[0].is_none());
+}
+
+// ── Nodal load editing integration tests ─────────────────────────────
+
+#[test]
+fn scene_reflects_loads() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    let load = NodalLoadSpec::new(1e3, 2e3, 3e3, 4e3, 5e3, 6e3);
+    m.set_nodal_load(b, load).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert_eq!(scene.node_loads.len(), 2);
+    assert!(scene.node_loads[0].is_none());
+    let s = scene.node_loads[1].unwrap();
+    assert_eq!(s.fx, 1e3);
+    assert_eq!(s.fy, 2e3);
+    assert_eq!(s.fz, 3e3);
+    assert_eq!(s.mx, 4e3);
+    assert_eq!(s.my, 5e3);
+    assert_eq!(s.mz, 6e3);
+}
+
+#[test]
+fn scene_no_loads_when_none_set() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert!(scene.node_loads[0].is_none());
+    assert!(scene.node_loads[1].is_none());
+}
+
+#[test]
+fn scene_loads_match_model_after_clear() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    m.clear_nodal_load(b).unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert!(scene.node_loads[1].is_none());
+}
+
+#[test]
+fn solver_load_transfer() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+    let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+    m.add_member(a, c).unwrap();
+    m.add_member(c, d).unwrap();
+    m.add_member(b, d).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::fixed()).unwrap();
+    let load = NodalLoadSpec::new(0.0, -5e3, 0.0, 0.0, 0.0, 0.0);
+    m.set_nodal_load(c, load).unwrap();
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("portal frame with load should solve");
+    assert!(result.displacements.len() > 0);
+    let c_idx = m.node_index(c).unwrap();
+    let uy = result.displacements[c_idx * 6 + 1];
+    assert!(
+        uy < 0.0,
+        "vertical displacement at loaded node should be negative (downward), got {uy}"
+    );
+}
+
+#[test]
+fn preset_load_preservation() {
+    for &preset in model::PresetModel::all() {
+        let m = preset.build_edit();
+        let loads_before: Vec<_> = m.nodal_loads().to_vec();
+        let fm = m
+            .to_frame_model()
+            .unwrap_or_else(|e| panic!("preset '{}' to_frame_model failed: {e:?}", preset.name()));
+        assert!(
+            fm.solve().is_ok(),
+            "preset '{}' with loads should solve",
+            preset.name()
+        );
+        let m2 = preset.build_edit();
+        let loads_after: Vec<_> = m2.nodal_loads().to_vec();
+        assert_eq!(
+            loads_before.len(),
+            loads_after.len(),
+            "preset '{}' load count changed",
+            preset.name()
+        );
+    }
+}
+
+#[test]
+fn edited_load_produces_expected_response() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(6.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(3.0, 4.0, 0.0).unwrap();
+    m.add_member(a, c).unwrap();
+    m.add_member(b, c).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_support(b, SupportSpec::fixed()).unwrap();
+    m.set_nodal_load(c, NodalLoadSpec::new(0.0, -10e3, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    let fm = m.to_frame_model().unwrap();
+    let result = fm.solve().expect("triangle frame should solve");
+    let c_idx = m.node_index(c).unwrap();
+    let uy = result.displacements[c_idx * 6 + 1];
+    assert!(
+        uy < 0.0,
+        "apex vertical displacement should be negative, got {uy}"
+    );
+    assert!(
+        uy.abs() > 1e-12,
+        "apex vertical displacement should be non-trivial, got {uy}"
+    );
+    let a_idx = m.node_index(a).unwrap();
+    let b_idx = m.node_index(b).unwrap();
+    let ua = result.displacements[a_idx * 6 + 0];
+    let ub = result.displacements[b_idx * 6 + 0];
+    assert!(
+        ua.abs() < 1e-6,
+        "fixed node a should have ~zero Ux, got {ua}"
+    );
+    assert!(
+        ub.abs() < 1e-6,
+        "fixed node b should have ~zero Ux, got {ub}"
+    );
+}
+
+#[test]
+fn load_preserved_after_node_coordinate_update() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    let load = NodalLoadSpec::new(100.0, 200.0, 300.0, 0.0, 0.0, 0.0);
+    m.set_nodal_load(b, load).unwrap();
+    m.update_node(b, 5.0, 0.0, 0.0).unwrap();
+    let s = m.nodal_load(b).unwrap();
+    assert_eq!(s.fx, 100.0);
+    assert_eq!(s.fy, 200.0);
+    assert_eq!(s.fz, 300.0);
+}
+
+#[test]
+fn delete_node_removes_load_from_scene() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    let c = m.add_node(6.0, 0.0, 0.0).unwrap();
+    let _m_ab = m.add_member(a, b).unwrap();
+    let m_bc = m.add_member(b, c).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    m.set_nodal_load(c, NodalLoadSpec::new(2e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    m.delete_member(m_bc).unwrap();
+    m.delete_node(c).unwrap();
+    assert!(!m.has_nodal_load(c));
+    assert!(m.has_nodal_load(b));
+    let scene = ViewportScene::from_edit_model(&m);
+    assert_eq!(scene.node_loads.len(), 2);
+    assert!(scene.node_loads[1].is_some());
+}
+
+#[test]
+fn replace_load_updates_scene() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert_eq!(scene.node_loads[1].unwrap().fx, 5e3);
+    assert_eq!(m.nodal_loads().len(), 1);
+}
+
+#[test]
+fn support_and_load_coexist_in_scene() {
+    let mut m = EditModel::new();
+    let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+    let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+    m.add_member(a, b).unwrap();
+    m.set_support(a, SupportSpec::fixed()).unwrap();
+    m.set_nodal_load(b, NodalLoadSpec::new(0.0, -1e3, 0.0, 0.0, 0.0, 0.0))
+        .unwrap();
+    let scene = ViewportScene::from_edit_model(&m);
+    assert!(scene.node_supports[0].unwrap().is_fixed());
+    assert!(scene.node_loads[1].is_some());
+    assert!(scene.node_loads[0].is_none());
 }

@@ -9,7 +9,7 @@ use viewport_poc::{
     app_state::{AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
     display::ResultDisplayState,
-    edit_model::{EditModel, NodeId, SupportSpec},
+    edit_model::{EditModel, NodalLoadSpec, NodeId, SupportSpec},
     model, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -31,6 +31,8 @@ const HELP_C: egui::Color32 = egui::Color32::from_rgb(130, 130, 130);
 const STALE_C: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);
 const ERROR_C: egui::Color32 = egui::Color32::from_rgb(255, 80, 80);
 const SUPPORT_C: egui::Color32 = egui::Color32::from_rgb(100, 255, 200);
+const LOAD_F_C: egui::Color32 = egui::Color32::from_rgb(255, 180, 80);
+const LOAD_M_C: egui::Color32 = egui::Color32::from_rgb(200, 130, 255);
 
 // ── App ─────────────────────────────────────────────────────────────────
 struct ViewportApp {
@@ -490,6 +492,60 @@ impl eframe::App for ViewportApp {
                 }
             }
 
+            // ── Draw load indicators ──
+            if self.display.show_undeformed {
+                for (i, &pos) in scene.node_positions.iter().enumerate() {
+                    let Some(load) = scene.node_loads.get(i).copied().flatten() else {
+                        continue;
+                    };
+                    if load.is_zero() {
+                        continue;
+                    }
+                    let Some(p) = self.camera.project(pos, w, h) else {
+                        continue;
+                    };
+                    let center = scr(&p, rect);
+
+                    let fmag = load.force_magnitude();
+                    if fmag > 1e-12 {
+                        let dir = [
+                            load.fx / fmag,
+                            load.fy / fmag,
+                            load.fz / fmag,
+                        ];
+                        let tip_world = [
+                            pos[0] + dir[0] * 0.5,
+                            pos[1] + dir[1] * 0.5,
+                            pos[2] + dir[2] * 0.5,
+                        ];
+                        if let Some(p_tip) = self.camera.project(tip_world, w, h) {
+                            let tip = scr(&p_tip, rect);
+                            painter.line_segment(
+                                [center, tip],
+                                egui::Stroke::new(2.5_f32, LOAD_F_C),
+                            );
+                            painter.circle_filled(tip, 4.0, LOAD_F_C);
+                        }
+                    }
+
+                    let mmag = load.moment_magnitude();
+                    if mmag > 1e-12 {
+                        painter.circle_stroke(
+                            center + egui::vec2(14.0, -14.0),
+                            6.0,
+                            egui::Stroke::new(2.0_f32, LOAD_M_C),
+                        );
+                        painter.text(
+                            center + egui::vec2(14.0, -14.0),
+                            egui::Align2::CENTER_CENTER,
+                            "M",
+                            egui::FontId::proportional(8.0),
+                            LOAD_M_C,
+                        );
+                    }
+                }
+            }
+
             // ── Draw deformed shape ──
             if self.display.show_deformed {
                 if let Some(result) = self.analysis_result() {
@@ -843,6 +899,128 @@ impl ViewportApp {
                         }
                     }
 
+                    // ── Nodal load editing ──
+                    ui.separator();
+                    ui.label("Nodal load (global coords, N and N\u{00b7}m):");
+                    let mut load_changed = false;
+                    let mut new_load = NodalLoadSpec::zero();
+                    let mut has_load = false;
+                    let mut clear_load_clicked = false;
+                    if let Some(model) = self.project.model.as_ref() {
+                        if let Some(spec) = model.nodal_load(id) {
+                            new_load = *spec;
+                            has_load = true;
+                        }
+                    }
+                    ui.label(format!(
+                        "Current: {}",
+                        if has_load {
+                            if new_load.is_zero() {
+                                "zero load"
+                            } else {
+                                "nonzero load"
+                            }
+                        } else {
+                            "no load"
+                        }
+                    ));
+                    egui::Grid::new("nodal_load_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 3.0])
+                        .show(ui, |ui| {
+                            ui.strong("Force (N)");
+                            ui.strong("Moment (N\u{00b7}m)");
+                            ui.end_row();
+                            ui.label("x:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.fx)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.label("x:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.mx)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("y:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.fy)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.label("y:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.my)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("z:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.fz)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.label("z:");
+                            let r = ui.add(
+                                egui::DragValue::new(&mut new_load.mz)
+                                    .speed(100.0)
+                                    .range(-1e12..=1e12),
+                            );
+                            if r.changed() {
+                                load_changed = true;
+                            }
+                            ui.end_row();
+                        });
+                    ui.horizontal(|ui| {
+                        if has_load && ui.button("Clear load").clicked() {
+                            clear_load_clicked = true;
+                        }
+                    });
+
+                    if clear_load_clicked {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.clear_nodal_load(id) {
+                                Ok(()) => {
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                    self.messages.push(AppMessage::info(format!(
+                                        "Cleared load at node N{}",
+                                        id.0
+                                    )));
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
+                    } else if load_changed {
+                        if let Some(model) = self.project.model.as_mut() {
+                            match model.set_nodal_load(id, new_load) {
+                                Ok(()) => {
+                                    self.project.mark_analysis_stale();
+                                    self.rebuild_scene();
+                                }
+                                Err(e) => self.messages.push(AppMessage::error(e.message())),
+                            }
+                        }
+                    }
+
                     if ui.button("Delete node").clicked() {
                         if let Some(model) = self.project.model.as_mut() {
                             match model.delete_node(id) {
@@ -963,12 +1141,16 @@ impl ViewportApp {
                             Some(spec) => format!(" [{}]", spec.label()),
                             None => String::new(),
                         };
+                        let load_label = match model.nodal_load(node.id) {
+                            Some(spec) if !spec.is_zero() => " [L]".to_string(),
+                            _ => String::new(),
+                        };
                         if ui
                             .selectable_label(
                                 is_sel,
                                 format!(
-                                    "N{} ({:.1}, {:.1}, {:.1}){}",
-                                    node.id.0, node.x, node.y, node.z, sup_label
+                                    "N{} ({:.1}, {:.1}, {:.1}){}{}",
+                                    node.id.0, node.x, node.y, node.z, sup_label, load_label
                                 ),
                             )
                             .clicked()
@@ -1144,7 +1326,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 144"),
+            .with_title("Structural Analysis \u{2014} Phase 145"),
         ..Default::default()
     };
     eframe::run_native(

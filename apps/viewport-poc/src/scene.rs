@@ -5,7 +5,7 @@
 //! reference to the solver or model, so camera and selection operations
 //! cannot mutate the analysis data.
 
-use crate::edit_model::{EditModel, MemberId, NodeId, SupportSpec};
+use crate::edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec};
 use crate::project::Vec3;
 
 /// Stable display geometry.
@@ -24,6 +24,9 @@ pub struct ViewportScene {
     /// Support spec for each node (parallel to `node_positions`).
     /// `None` means no support (free).
     pub node_supports: Vec<Option<SupportSpec>>,
+    /// Nodal load spec for each node (parallel to `node_positions`).
+    /// `None` means no load.
+    pub node_loads: Vec<Option<NodalLoadSpec>>,
 }
 
 impl ViewportScene {
@@ -51,6 +54,12 @@ impl ViewportScene {
             .map(|n| model.support(n.id).copied())
             .collect();
 
+        let node_loads: Vec<Option<NodalLoadSpec>> = model
+            .nodes()
+            .iter()
+            .map(|n| model.nodal_load(n.id).copied())
+            .collect();
+
         Self {
             node_positions,
             node_ids,
@@ -58,6 +67,7 @@ impl ViewportScene {
             member_ids,
             member_ref_vecs,
             node_supports,
+            node_loads,
         }
     }
 
@@ -165,6 +175,7 @@ mod tests {
             member_ids: vec![MemberId(0), MemberId(1)],
             member_ref_vecs: vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
             node_supports: vec![None, None, None],
+            node_loads: vec![None, None, None],
         }
     }
 
@@ -185,6 +196,7 @@ mod tests {
             member_ids: vec![],
             member_ref_vecs: vec![],
             node_supports: vec![],
+            node_loads: vec![],
         };
         let (min, max) = s.bounding_box();
         assert_eq!(min, [0.0; 3]);

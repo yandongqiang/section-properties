@@ -2,7 +2,7 @@
 
 use structural_analysis::{Dof3D, FrameModel3D, FrameSection3D};
 
-use crate::edit_model::EditModel;
+use crate::edit_model::{EditModel, NodalLoadSpec};
 
 /// Available preset models for the model browser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +203,7 @@ pub fn build_portal_edit() -> EditModel {
     m.fix_node(n0).unwrap();
     m.fix_node(n1).unwrap();
 
-    m.add_nodal_load(n2, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0])
+    m.set_nodal_load(n2, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
         .unwrap();
 
     m
@@ -230,7 +230,7 @@ pub fn build_inclined_edit() -> EditModel {
     m.fix_dof(n4, Dof3D::Uy).unwrap();
     m.fix_dof(n4, Dof3D::Uz).unwrap();
 
-    m.add_nodal_load(n2, [3e3, -2e3, 0.0, 0.0, 0.0, 0.0])
+    m.set_nodal_load(n2, NodalLoadSpec::new(3e3, -2e3, 0.0, 0.0, 0.0, 0.0))
         .unwrap();
 
     m
@@ -280,7 +280,7 @@ pub fn build_grid_edit(nx: usize, nz: usize) -> EditModel {
     }
 
     if nx > 0 && nz > 0 {
-        m.add_nodal_load(top[0][0], [1e3, 0.0, 0.0, 0.0, 0.0, 0.0])
+        m.set_nodal_load(top[0][0], NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
             .unwrap();
     }
 

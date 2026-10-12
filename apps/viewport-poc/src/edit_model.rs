@@ -184,6 +184,89 @@ impl EditError {
     }
 }
 
+// ── Nodal load specification ──────────────────────────────────────────
+
+/// Six-component nodal load in global coordinates.
+///
+/// `fx`, `fy`, `fz` are forces along global X, Y, Z.
+/// `mx`, `my`, `mz` are moments about global X, Y, Z.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NodalLoadSpec {
+    pub fx: f64,
+    pub fy: f64,
+    pub fz: f64,
+    pub mx: f64,
+    pub my: f64,
+    pub mz: f64,
+}
+
+impl Default for NodalLoadSpec {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl NodalLoadSpec {
+    /// Create a nodal load from six components.
+    pub fn new(fx: f64, fy: f64, fz: f64, mx: f64, my: f64, mz: f64) -> Self {
+        Self {
+            fx,
+            fy,
+            fz,
+            mx,
+            my,
+            mz,
+        }
+    }
+
+    /// Zero load (all components zero).
+    pub fn zero() -> Self {
+        Self {
+            fx: 0.0,
+            fy: 0.0,
+            fz: 0.0,
+            mx: 0.0,
+            my: 0.0,
+            mz: 0.0,
+        }
+    }
+
+    /// Are all components zero?
+    pub fn is_zero(&self) -> bool {
+        self.fx == 0.0
+            && self.fy == 0.0
+            && self.fz == 0.0
+            && self.mx == 0.0
+            && self.my == 0.0
+            && self.mz == 0.0
+    }
+
+    /// Are all components finite (not NaN, not infinity)?
+    pub fn is_finite(&self) -> bool {
+        self.fx.is_finite()
+            && self.fy.is_finite()
+            && self.fz.is_finite()
+            && self.mx.is_finite()
+            && self.my.is_finite()
+            && self.mz.is_finite()
+    }
+
+    /// Force magnitude (Euclidean norm of fx, fy, fz).
+    pub fn force_magnitude(&self) -> f64 {
+        (self.fx * self.fx + self.fy * self.fy + self.fz * self.fz).sqrt()
+    }
+
+    /// Moment magnitude (Euclidean norm of mx, my, mz).
+    pub fn moment_magnitude(&self) -> f64 {
+        (self.mx * self.mx + self.my * self.my + self.mz * self.mz).sqrt()
+    }
+
+    /// As a `[fx, fy, fz, mx, my, mz]` array.
+    pub fn as_array(&self) -> [f64; 6] {
+        [self.fx, self.fy, self.fz, self.mx, self.my, self.mz]
+    }
+}
+
 // ── Edit model ─────────────────────────────────────────────────────────
 
 /// Editable structural model with stable IDs.
@@ -195,7 +278,7 @@ pub struct EditModel {
     nodes: Vec<EditNode>,
     members: Vec<EditMember>,
     supports: Vec<(NodeId, SupportSpec)>,
-    nodal_loads: Vec<(NodeId, [f64; 6])>,
+    nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
     next_node_id: u32,
     next_member_id: u32,
 }
@@ -403,13 +486,49 @@ impl EditModel {
         &self.supports
     }
 
-    /// Add a nodal load.  Used by preset models.
-    pub fn add_nodal_load(&mut self, id: NodeId, loads: [f64; 6]) -> Result<(), EditError> {
+    /// Set the nodal load at a node, replacing any existing load.
+    ///
+    /// One load record per node.  All components must be finite.
+    pub fn set_nodal_load(&mut self, id: NodeId, spec: NodalLoadSpec) -> Result<(), EditError> {
         if self.nodes.iter().all(|n| n.id != id) {
             return Err(EditError::NodeNotFound(id));
         }
-        self.nodal_loads.push((id, loads));
+        if !spec.is_finite() {
+            return Err(EditError::NonFiniteCoordinate);
+        }
+        if let Some((_, existing)) = self.nodal_loads.iter_mut().find(|(nid, _)| *nid == id) {
+            *existing = spec;
+        } else {
+            self.nodal_loads.push((id, spec));
+        }
         Ok(())
+    }
+
+    /// Clear the nodal load at a node.
+    pub fn clear_nodal_load(&mut self, id: NodeId) -> Result<(), EditError> {
+        if self.nodes.iter().all(|n| n.id != id) {
+            return Err(EditError::NodeNotFound(id));
+        }
+        self.nodal_loads.retain(|(nid, _)| *nid != id);
+        Ok(())
+    }
+
+    /// Get the nodal load at a node, if any.
+    pub fn nodal_load(&self, id: NodeId) -> Option<&NodalLoadSpec> {
+        self.nodal_loads
+            .iter()
+            .find(|(nid, _)| *nid == id)
+            .map(|(_, spec)| spec)
+    }
+
+    /// Does the node have a nodal load?
+    pub fn has_nodal_load(&self, id: NodeId) -> bool {
+        self.nodal_loads.iter().any(|(nid, _)| *nid == id)
+    }
+
+    /// All nodal loads (node ID + spec), in insertion order.
+    pub fn nodal_loads(&self) -> &[(NodeId, NodalLoadSpec)] {
+        &self.nodal_loads
     }
 
     // ── Queries ───────────────────────────────────────────────────────
@@ -531,12 +650,10 @@ impl EditModel {
             }
         }
 
-        for (nid, loads) in &self.nodal_loads {
+        for (nid, spec) in &self.nodal_loads {
             let idx = *id_to_idx.get(nid).ok_or(EditError::NodeNotFound(*nid))?;
             model
-                .add_nodal_load(
-                    idx, loads[0], loads[1], loads[2], loads[3], loads[4], loads[5],
-                )
+                .add_nodal_load(idx, spec.fx, spec.fy, spec.fz, spec.mx, spec.my, spec.mz)
                 .map_err(|e| EditError::FrameModelBuild(format!("{e:?}")))?;
         }
 
@@ -824,7 +941,8 @@ mod tests {
         m.add_member(b, a).unwrap();
         m.fix_node(a).unwrap();
         m.fix_node(b).unwrap();
-        m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        m.set_nodal_load(c, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
         let fm = m.to_frame_model().unwrap();
         assert_eq!(fm.n_nodes(), 3);
         assert_eq!(fm.n_members(), 3);
@@ -1068,7 +1186,8 @@ mod tests {
         m.add_member(b, d).unwrap();
         m.set_support(a, SupportSpec::fixed()).unwrap();
         m.set_support(b, SupportSpec::fixed()).unwrap();
-        m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        m.set_nodal_load(c, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
         let fm = m.to_frame_model().unwrap();
         assert!(fm.solve().is_ok());
     }
@@ -1087,7 +1206,219 @@ mod tests {
         spec.set_dof(Dof3D::Rz, None);
         m.set_support(a, spec).unwrap();
         m.set_support(b, SupportSpec::fixed()).unwrap();
-        m.add_nodal_load(c, [5e3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        m.set_nodal_load(c, NodalLoadSpec::new(5e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        let fm = m.to_frame_model().unwrap();
+        assert!(fm.solve().is_ok());
+    }
+
+    // ── NodalLoadSpec tests ───────────────────────────────────────────
+
+    #[test]
+    fn nodal_load_default_is_zero() {
+        let s = NodalLoadSpec::default();
+        assert!(s.is_zero());
+        assert!(s.is_finite());
+    }
+
+    #[test]
+    fn nodal_load_zero() {
+        let s = NodalLoadSpec::zero();
+        assert!(s.is_zero());
+        assert_eq!(s.fx, 0.0);
+        assert_eq!(s.mz, 0.0);
+    }
+
+    #[test]
+    fn nodal_load_new() {
+        let s = NodalLoadSpec::new(1e3, -2e3, 3e3, 4e2, -5e2, 6e2);
+        assert!(!s.is_zero());
+        assert!(s.is_finite());
+        assert_eq!(s.fx, 1e3);
+        assert_eq!(s.fy, -2e3);
+        assert_eq!(s.fz, 3e3);
+        assert_eq!(s.mx, 4e2);
+        assert_eq!(s.my, -5e2);
+        assert_eq!(s.mz, 6e2);
+    }
+
+    #[test]
+    fn nodal_load_is_finite_rejects_nan() {
+        let s = NodalLoadSpec::new(f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(!s.is_finite());
+    }
+
+    #[test]
+    fn nodal_load_is_finite_rejects_infinity() {
+        let s = NodalLoadSpec::new(0.0, f64::INFINITY, 0.0, 0.0, 0.0, 0.0);
+        assert!(!s.is_finite());
+    }
+
+    #[test]
+    fn nodal_load_force_magnitude() {
+        let s = NodalLoadSpec::new(3.0, 4.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((s.force_magnitude() - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn nodal_load_moment_magnitude() {
+        let s = NodalLoadSpec::new(0.0, 0.0, 0.0, 0.0, 3.0, 4.0);
+        assert!((s.moment_magnitude() - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn nodal_load_as_array() {
+        let s = NodalLoadSpec::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+        assert_eq!(s.as_array(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    // ── Nodal load operation tests ───────────────────────────────────
+
+    #[test]
+    fn set_nodal_load_success() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        assert!(m.has_nodal_load(id));
+        let load = m.nodal_load(id).unwrap();
+        assert_eq!(load.fx, 1e3);
+    }
+
+    #[test]
+    fn set_nodal_load_replaces_existing() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::new(2e3, 1e3, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        let load = m.nodal_load(id).unwrap();
+        assert_eq!(load.fx, 2e3);
+        assert_eq!(load.fy, 1e3);
+    }
+
+    #[test]
+    fn set_nodal_load_rejects_nonexistent_node() {
+        let mut m = EditModel::new();
+        assert_eq!(
+            m.set_nodal_load(NodeId(99), NodalLoadSpec::zero()),
+            Err(EditError::NodeNotFound(NodeId(99)))
+        );
+    }
+
+    #[test]
+    fn set_nodal_load_rejects_nan() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        assert_eq!(
+            m.set_nodal_load(id, NodalLoadSpec::new(f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0)),
+            Err(EditError::NonFiniteCoordinate)
+        );
+    }
+
+    #[test]
+    fn set_nodal_load_rejects_infinity() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        assert_eq!(
+            m.set_nodal_load(
+                id,
+                NodalLoadSpec::new(0.0, 0.0, 0.0, 0.0, f64::INFINITY, 0.0)
+            ),
+            Err(EditError::NonFiniteCoordinate)
+        );
+    }
+
+    #[test]
+    fn clear_nodal_load() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        assert!(m.has_nodal_load(id));
+        m.clear_nodal_load(id).unwrap();
+        assert!(!m.has_nodal_load(id));
+        assert!(m.nodal_load(id).is_none());
+    }
+
+    #[test]
+    fn clear_nodal_load_nonexistent_is_ok() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.clear_nodal_load(id).unwrap();
+    }
+
+    #[test]
+    fn clear_nodal_load_nonexistent_node_fails() {
+        let mut m = EditModel::new();
+        assert_eq!(
+            m.clear_nodal_load(NodeId(99)),
+            Err(EditError::NodeNotFound(NodeId(99)))
+        );
+    }
+
+    #[test]
+    fn delete_node_removes_load() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.add_member(a, b).unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        assert!(m.has_nodal_load(b));
+        m.delete_member(m.members()[0].id).unwrap();
+        m.delete_node(b).unwrap();
+        assert!(!m.has_nodal_load(b));
+    }
+
+    #[test]
+    fn nodal_loads_list() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.set_nodal_load(a, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(0.0, 2e3, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        let loads = m.nodal_loads();
+        assert_eq!(loads.len(), 2);
+    }
+
+    #[test]
+    fn zero_load_is_valid() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::zero()).unwrap();
+        assert!(m.has_nodal_load(id));
+        assert!(m.nodal_load(id).unwrap().is_zero());
+    }
+
+    #[test]
+    fn support_and_load_coexist() {
+        let mut m = EditModel::new();
+        let id = m.add_node(0.0, 0.0, 0.0).unwrap();
+        m.set_support(id, SupportSpec::fixed()).unwrap();
+        m.set_nodal_load(id, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        assert!(m.has_support(id));
+        assert!(m.has_nodal_load(id));
+    }
+
+    #[test]
+    fn to_frame_model_with_edited_load_solves() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let d = m.add_node(4.0, 3.0, 0.0).unwrap();
+        m.add_member(a, c).unwrap();
+        m.add_member(c, d).unwrap();
+        m.add_member(b, d).unwrap();
+        m.set_support(a, SupportSpec::fixed()).unwrap();
+        m.set_support(b, SupportSpec::fixed()).unwrap();
+        m.set_nodal_load(c, NodalLoadSpec::new(0.0, -1e4, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
         let fm = m.to_frame_model().unwrap();
         assert!(fm.solve().is_ok());
     }
