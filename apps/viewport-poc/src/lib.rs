@@ -7,6 +7,7 @@
 pub mod app_state;
 pub mod camera;
 pub mod display;
+pub mod edit_history;
 pub mod edit_model;
 pub mod model;
 pub mod persistence;
@@ -17,6 +18,7 @@ pub mod selection;
 pub use app_state::{AppMessage, MessageLevel, Project};
 pub use camera::Camera3D;
 pub use display::ResultDisplayState;
+pub use edit_history::EditHistory;
 pub use edit_model::{
     EditError, EditMember, EditModel, EditNode, MemberId, NodalLoadSpec, NodeId, SupportSpec,
 };

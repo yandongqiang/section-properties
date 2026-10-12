@@ -12,6 +12,7 @@ use viewport_poc::{
         ResultDisplayState, ResultViewMode, displacement_magnitudes, fmt_eng, magnitude_color,
         max_abs, normalize,
     },
+    edit_history::EditHistory,
     edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
     model, persistence, project,
     scene::ViewportScene,
@@ -52,10 +53,11 @@ struct ViewportApp {
     new_member_j: String,
     member_edit: MemberEditBuffer,
     project_path: Option<std::path::PathBuf>,
-    saved_revision: Option<u64>,
+    saved_fingerprint: Option<u64>,
     file_path_input: String,
     show_unsaved_dialog: bool,
     pending_action: PendingAction,
+    history: EditHistory,
 }
 
 /// Action waiting for unsaved-changes confirmation.
@@ -122,10 +124,11 @@ impl ViewportApp {
             new_member_j: String::new(),
             member_edit: MemberEditBuffer::default(),
             project_path: None,
-            saved_revision: None,
+            saved_fingerprint: None,
             file_path_input: String::new(),
             show_unsaved_dialog: false,
             pending_action: PendingAction::None,
+            history: EditHistory::default(),
         }
     }
 
@@ -136,6 +139,52 @@ impl ViewportApp {
         self.project.analysis_result()
     }
 
+    /// Commit a model transition as the result of an engineering edit.
+    ///
+    /// Records the previous model in the undo history, replaces the
+    /// current model, clears the redo stack, invalidates analysis, and
+    /// rebuilds the viewport scene.  The caller must ensure the new model
+    /// differs from the old one (no-op edits should not call this).
+    fn commit_edit(&mut self, new_model: EditModel) {
+        if let Some(old_model) = self.project.model.take() {
+            self.history.record(old_model);
+        }
+        self.project.replace_model(new_model);
+        self.rebuild_scene();
+    }
+
+    /// Undo the most recent edit.
+    fn do_undo(&mut self) {
+        let Some(current) = self.project.model.clone() else {
+            return;
+        };
+        let Some(mut restored) = self.history.undo(current.clone()) else {
+            return;
+        };
+        let current_rev = current.revision();
+        restored.ensure_revision_at_least(current_rev + 1);
+        self.project.replace_model(restored);
+        self.rebuild_scene();
+        self.validate_selection();
+        self.messages.push(AppMessage::info("Undo"));
+    }
+
+    /// Redo the most recently undone edit.
+    fn do_redo(&mut self) {
+        let Some(current) = self.project.model.clone() else {
+            return;
+        };
+        let Some(mut restored) = self.history.redo(current.clone()) else {
+            return;
+        };
+        let current_rev = current.revision();
+        restored.ensure_revision_at_least(current_rev + 1);
+        self.project.replace_model(restored);
+        self.rebuild_scene();
+        self.validate_selection();
+        self.messages.push(AppMessage::info("Redo"));
+    }
+
     /// Load a preset model and immediately solve it.
     fn load_preset(&mut self, preset: model::PresetModel) {
         let name = preset.name().to_string();
@@ -144,7 +193,8 @@ impl ViewportApp {
         self.messages
             .push(AppMessage::info(format!("Loaded '{}'", preset.name())));
         self.project_path = None;
-        self.saved_revision = None;
+        self.saved_fingerprint = None;
+        self.history.clear();
         self.rebuild_scene();
         self.run_solve();
     }
@@ -203,24 +253,30 @@ impl ViewportApp {
             buf.j,
             [buf.ref_x, buf.ref_y, buf.ref_z],
         );
-        if let Some(model) = self.project.model.as_mut() {
-            match model.set_member_section(id, e, g, area, iy, iz, j) {
-                Ok(()) => {}
-                Err(e) => {
-                    self.messages.push(AppMessage::error(e.message()));
-                    return;
-                }
+        let Some(model) = self.project.model.as_ref() else {
+            return;
+        };
+        let mut candidate = model.clone();
+        match candidate.set_member_section(id, e, g, area, iy, iz, j) {
+            Ok(()) => {}
+            Err(e) => {
+                self.messages.push(AppMessage::error(e.message()));
+                return;
             }
-            match model.set_member_ref_vec(id, rv) {
-                Ok(()) => {
-                    self.rebuild_scene();
+        }
+        match candidate.set_member_ref_vec(id, rv) {
+            Ok(()) => {
+                if candidate.revision() != model.revision() {
+                    self.commit_edit(candidate);
                     self.messages
                         .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
+                } else {
+                    self.messages.push(AppMessage::info("No changes to apply."));
                 }
-                Err(e) => {
-                    self.messages.push(AppMessage::error(e.message()));
-                    self.reset_member_edit(id);
-                }
+            }
+            Err(e) => {
+                self.messages.push(AppMessage::error(e.message()));
+                self.reset_member_edit(id);
             }
         }
     }
@@ -247,20 +303,22 @@ impl ViewportApp {
         self.scene = None;
         self.selection = SelectionState::None;
         self.project_path = None;
-        self.saved_revision = None;
+        self.saved_fingerprint = None;
+        self.history.clear();
         self.messages.push(AppMessage::info("Project cleared."));
     }
 
     /// `true` if the current model has unsaved changes.
     ///
-    /// Dirty state is separate from analysis staleness.  A model is dirty
-    /// if it exists and its revision differs from the revision recorded
-    /// at the last successful save (or if it has never been saved).
+    /// Dirty state is based on a canonical fingerprint of the engineering
+    /// data (nodes, members, supports, loads, ID allocation), NOT on the
+    /// runtime revision counter.  This ensures that undoing back to the
+    /// saved state correctly reports `dirty = false`.
     fn is_dirty(&self) -> bool {
         self.project
             .model
             .as_ref()
-            .map_or(false, |m| self.saved_revision != Some(m.revision()))
+            .map_or(false, |m| self.saved_fingerprint != Some(m.fingerprint()))
     }
 
     /// Create a new empty model.
@@ -269,7 +327,8 @@ impl ViewportApp {
         self.rebuild_scene();
         self.selection = SelectionState::None;
         self.project_path = None;
-        self.saved_revision = None;
+        self.saved_fingerprint = None;
+        self.history.clear();
         self.messages.push(AppMessage::info("Created empty model."));
     }
 
@@ -289,12 +348,13 @@ impl ViewportApp {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Untitled".to_string());
-                let rev = model.revision();
+                let fp = model.fingerprint();
                 self.project.load_model(name, model);
                 self.rebuild_scene();
                 self.selection = SelectionState::None;
                 self.project_path = Some(path);
-                self.saved_revision = Some(rev);
+                self.saved_fingerprint = Some(fp);
+                self.history.clear();
                 self.messages
                     .push(AppMessage::info("Project loaded successfully."));
             }
@@ -346,9 +406,9 @@ impl ViewportApp {
         };
         match persistence::save_project(path, model) {
             Ok(()) => {
-                let rev = model.revision();
+                let fp = model.fingerprint();
                 self.project_path = Some(path.to_path_buf());
-                self.saved_revision = Some(rev);
+                self.saved_fingerprint = Some(fp);
                 self.file_path_input = path.to_string_lossy().to_string();
                 self.messages
                     .push(AppMessage::info(format!("Saved to {}", path.display())));
@@ -445,6 +505,24 @@ impl ViewportApp {
 
 impl eframe::App for ViewportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Keyboard shortcuts (undo/redo) ─────────────────────────────
+        // Only process when no widget has focus, to avoid interfering
+        // with DragValue / TextEdit keyboard handling (e.g. Ctrl+Z in
+        // a text field should do text undo, not model undo).
+        let no_text_focus = ctx.memory(|m| m.focused().is_none());
+        if no_text_focus {
+            if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift)
+            {
+                self.do_undo();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Y) && i.modifiers.ctrl) {
+                self.do_redo();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift) {
+                self.do_redo();
+            }
+        }
+
         // ── Top panel: toolbar ──────────────────────────────────────────
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -493,6 +571,18 @@ impl eframe::App for ViewportApp {
                     .clicked()
                 {
                     self.run_solve();
+                }
+                if ui
+                    .add_enabled(self.history.can_undo(), egui::Button::new("Undo"))
+                    .clicked()
+                {
+                    self.do_undo();
+                }
+                if ui
+                    .add_enabled(self.history.can_redo(), egui::Button::new("Redo"))
+                    .clicked()
+                {
+                    self.do_redo();
                 }
                 if ui.button("Clear selection").clicked() {
                     self.selection = SelectionState::None;
@@ -1312,10 +1402,18 @@ impl ViewportApp {
                         }
                     }
                     if changed {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.update_node(id, new_coords.0, new_coords.1, new_coords.2) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.update_node(
+                                id,
+                                new_coords.0,
+                                new_coords.1,
+                                new_coords.2,
+                            ) {
                                 Ok(()) => {
-                                    self.rebuild_scene();
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
@@ -1421,23 +1519,29 @@ impl ViewportApp {
                     }
 
                     if clear_clicked {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.clear_support(id) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.clear_support(id) {
                                 Ok(()) => {
-                                    self.rebuild_scene();
-                                    self.messages.push(AppMessage::info(format!(
-                                        "Cleared support at node N{}",
-                                        id.0
-                                    )));
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                        self.messages.push(AppMessage::info(format!(
+                                            "Cleared support at node N{}",
+                                            id.0
+                                        )));
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
                         }
                     } else if support_changed {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.set_support(id, new_spec) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.set_support(id, new_spec) {
                                 Ok(()) => {
-                                    self.rebuild_scene();
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
@@ -1541,23 +1645,29 @@ impl ViewportApp {
                     });
 
                     if clear_load_clicked {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.clear_nodal_load(id) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.clear_nodal_load(id) {
                                 Ok(()) => {
-                                    self.rebuild_scene();
-                                    self.messages.push(AppMessage::info(format!(
-                                        "Cleared load at node N{}",
-                                        id.0
-                                    )));
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                        self.messages.push(AppMessage::info(format!(
+                                            "Cleared load at node N{}",
+                                            id.0
+                                        )));
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
                         }
                     } else if load_changed {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.set_nodal_load(id, new_load) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.set_nodal_load(id, new_load) {
                                 Ok(()) => {
-                                    self.rebuild_scene();
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
@@ -1565,13 +1675,18 @@ impl ViewportApp {
                     }
 
                     if ui.button("Delete node").clicked() {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.delete_node(id) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.delete_node(id) {
                                 Ok(()) => {
-                                    self.selection = SelectionState::None;
-                                    self.rebuild_scene();
-                                    self.messages
-                                        .push(AppMessage::info(format!("Deleted node N{}", id.0)));
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                        self.selection = SelectionState::None;
+                                        self.messages.push(AppMessage::info(format!(
+                                            "Deleted node N{}",
+                                            id.0
+                                        )));
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
@@ -1717,15 +1832,18 @@ impl ViewportApp {
                     }
 
                     if ui.button("Delete member").clicked() {
-                        if let Some(model) = self.project.model.as_mut() {
-                            match model.delete_member(id) {
+                        if let Some(model) = self.project.model.as_ref() {
+                            let mut candidate = model.clone();
+                            match candidate.delete_member(id) {
                                 Ok(()) => {
-                                    self.selection = SelectionState::None;
-                                    self.rebuild_scene();
-                                    self.messages.push(AppMessage::info(format!(
-                                        "Deleted member M{}",
-                                        id.0
-                                    )));
+                                    if candidate.revision() != model.revision() {
+                                        self.commit_edit(candidate);
+                                        self.selection = SelectionState::None;
+                                        self.messages.push(AppMessage::info(format!(
+                                            "Deleted member M{}",
+                                            id.0
+                                        )));
+                                    }
                                 }
                                 Err(e) => self.messages.push(AppMessage::error(e.message())),
                             }
@@ -1842,13 +1960,14 @@ impl ViewportApp {
                 return;
             }
         };
-        let Some(model) = self.project.model.as_mut() else {
+        let Some(model) = self.project.model.as_ref() else {
             self.messages.push(AppMessage::error("No model loaded"));
             return;
         };
-        match model.add_node(x, y, z) {
+        let mut candidate = model.clone();
+        match candidate.add_node(x, y, z) {
             Ok(id) => {
-                self.rebuild_scene();
+                self.commit_edit(candidate);
                 self.messages.push(AppMessage::info(format!(
                     "Added node N{} at ({}, {}, {})",
                     id.0, x, y, z
@@ -1876,13 +1995,14 @@ impl ViewportApp {
                 return;
             }
         };
-        let Some(model) = self.project.model.as_mut() else {
+        let Some(model) = self.project.model.as_ref() else {
             self.messages.push(AppMessage::error("No model loaded"));
             return;
         };
-        match model.add_member(NodeId(ni), NodeId(nj)) {
+        let mut candidate = model.clone();
+        match candidate.add_member(NodeId(ni), NodeId(nj)) {
             Ok(id) => {
-                self.rebuild_scene();
+                self.commit_edit(candidate);
                 self.messages.push(AppMessage::info(format!(
                     "Added member M{} (N{} \u{2192} N{})",
                     id.0, ni, nj

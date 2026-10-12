@@ -216,6 +216,19 @@ impl Project {
         Ok(())
     }
 
+    /// Replace the current model, preserving the project name.
+    ///
+    /// Invalidates any existing analysis result (the new model's revision
+    /// will not match the prior `solved_revision`).  Does NOT reset the
+    /// model's revision — the caller is responsible for ensuring the
+    /// revision invariant (e.g. via `ensure_revision_at_least` for
+    /// undo/redo).
+    pub fn replace_model(&mut self, model: EditModel) {
+        self.model = Some(model);
+        self.analysis = None;
+        self.last_solve_failed = false;
+    }
+
     /// Clear the project to the empty state.
     pub fn clear(&mut self) {
         self.name = "Untitled".to_string();

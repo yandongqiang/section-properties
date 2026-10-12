@@ -353,6 +353,84 @@ impl EditModel {
         self.revision = self.revision.saturating_add(1);
     }
 
+    /// Ensure the revision is at least `min_rev`.
+    ///
+    /// Used by undo/redo to maintain the monotonic revision invariant:
+    /// a restored snapshot must not have a revision that matches any
+    /// prior solved revision, otherwise stale results could appear current.
+    pub fn ensure_revision_at_least(&mut self, min_rev: u64) {
+        if self.revision < min_rev {
+            self.revision = min_rev;
+        }
+    }
+
+    /// Compute a canonical fingerprint of the engineering data.
+    ///
+    /// Two models with the same fingerprint have identical engineering
+    /// content: nodes (IDs + coordinates), members (IDs + connectivity +
+    /// section + ref vec), supports, nodal loads, and ID allocation state.
+    /// The revision counter is intentionally excluded — dirty-state
+    /// comparison must reflect engineering content, not edit history.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::Hash;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Nodes
+        self.nodes.len().hash(&mut hasher);
+        for n in &self.nodes {
+            n.id.0.hash(&mut hasher);
+            n.x.to_bits().hash(&mut hasher);
+            n.y.to_bits().hash(&mut hasher);
+            n.z.to_bits().hash(&mut hasher);
+        }
+        // Members
+        self.members.len().hash(&mut hasher);
+        for m in &self.members {
+            m.id.0.hash(&mut hasher);
+            m.node_i.0.hash(&mut hasher);
+            m.node_j.0.hash(&mut hasher);
+            m.ref_vec[0].to_bits().hash(&mut hasher);
+            m.ref_vec[1].to_bits().hash(&mut hasher);
+            m.ref_vec[2].to_bits().hash(&mut hasher);
+            m.section.E().to_bits().hash(&mut hasher);
+            m.section.G().to_bits().hash(&mut hasher);
+            m.section.area().to_bits().hash(&mut hasher);
+            m.section.iy().to_bits().hash(&mut hasher);
+            m.section.iz().to_bits().hash(&mut hasher);
+            m.section.j().to_bits().hash(&mut hasher);
+        }
+        // Supports
+        self.supports.len().hash(&mut hasher);
+        for (nid, spec) in &self.supports {
+            nid.0.hash(&mut hasher);
+            for dof in Dof3D::ALL {
+                match spec.dof(dof) {
+                    Some(v) => {
+                        1u8.hash(&mut hasher);
+                        v.to_bits().hash(&mut hasher);
+                    }
+                    None => {
+                        0u8.hash(&mut hasher);
+                    }
+                }
+            }
+        }
+        // Nodal loads
+        self.nodal_loads.len().hash(&mut hasher);
+        for (nid, spec) in &self.nodal_loads {
+            nid.0.hash(&mut hasher);
+            spec.fx.to_bits().hash(&mut hasher);
+            spec.fy.to_bits().hash(&mut hasher);
+            spec.fz.to_bits().hash(&mut hasher);
+            spec.mx.to_bits().hash(&mut hasher);
+            spec.my.to_bits().hash(&mut hasher);
+            spec.mz.to_bits().hash(&mut hasher);
+        }
+        // ID allocation state
+        self.next_node_id.hash(&mut hasher);
+        self.next_member_id.hash(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+
     // ── Node operations ───────────────────────────────────────────────
 
     /// Add a node with the given coordinates.
