@@ -317,6 +317,30 @@ impl EditModel {
         }
     }
 
+    /// Construct an EditModel from pre-validated parts.
+    ///
+    /// This is intended for deserialization after all validation has
+    /// passed.  The caller is responsible for ensuring the data is
+    /// consistent (unique IDs, valid references, etc.).
+    pub fn from_parts(
+        nodes: Vec<EditNode>,
+        members: Vec<EditMember>,
+        supports: Vec<(NodeId, SupportSpec)>,
+        nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
+        next_node_id: u32,
+        next_member_id: u32,
+    ) -> Self {
+        Self {
+            nodes,
+            members,
+            supports,
+            nodal_loads,
+            next_node_id,
+            next_member_id,
+            revision: 0,
+        }
+    }
+
     /// Current model revision count.
     ///
     /// Incremented on every effective mutation.  Used by [`Project`]
@@ -728,6 +752,16 @@ impl EditModel {
     /// All members.
     pub fn members(&self) -> &[EditMember] {
         &self.members
+    }
+
+    /// Next node ID that will be assigned by `add_node`.
+    pub fn next_node_id(&self) -> u32 {
+        self.next_node_id
+    }
+
+    /// Next member ID that will be assigned by `add_member`.
+    pub fn next_member_id(&self) -> u32 {
+        self.next_member_id
     }
 
     /// Vec index of a node ID, for viewport rendering.

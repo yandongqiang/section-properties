@@ -13,7 +13,7 @@ use viewport_poc::{
         max_abs, normalize,
     },
     edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
-    model, project,
+    model, persistence, project,
     scene::ViewportScene,
     selection::SelectionState,
 };
@@ -51,6 +51,19 @@ struct ViewportApp {
     new_member_i: String,
     new_member_j: String,
     member_edit: MemberEditBuffer,
+    project_path: Option<std::path::PathBuf>,
+    saved_revision: Option<u64>,
+    file_path_input: String,
+    show_unsaved_dialog: bool,
+    pending_action: PendingAction,
+}
+
+/// Action waiting for unsaved-changes confirmation.
+#[derive(Clone, Copy, PartialEq)]
+enum PendingAction {
+    None,
+    New,
+    Open,
 }
 
 /// Temporary buffer for member property editing.
@@ -106,6 +119,11 @@ impl ViewportApp {
             new_member_i: String::new(),
             new_member_j: String::new(),
             member_edit: MemberEditBuffer::default(),
+            project_path: None,
+            saved_revision: None,
+            file_path_input: String::new(),
+            show_unsaved_dialog: false,
+            pending_action: PendingAction::None,
         }
     }
 
@@ -123,6 +141,8 @@ impl ViewportApp {
         self.project.load_model(name, m);
         self.messages
             .push(AppMessage::info(format!("Loaded '{}'", preset.name())));
+        self.project_path = None;
+        self.saved_revision = None;
         self.rebuild_scene();
         self.run_solve();
     }
@@ -224,7 +244,126 @@ impl ViewportApp {
         self.project.clear();
         self.scene = None;
         self.selection = SelectionState::None;
+        self.project_path = None;
+        self.saved_revision = None;
         self.messages.push(AppMessage::info("Project cleared."));
+    }
+
+    /// `true` if the current model has unsaved changes.
+    ///
+    /// Dirty state is separate from analysis staleness.  A model is dirty
+    /// if it exists and its revision differs from the revision recorded
+    /// at the last successful save (or if it has never been saved).
+    fn is_dirty(&self) -> bool {
+        self.project
+            .model
+            .as_ref()
+            .map_or(false, |m| self.saved_revision != Some(m.revision()))
+    }
+
+    /// Create a new empty model.
+    fn do_new(&mut self) {
+        self.project.load_model("Untitled".into(), EditModel::new());
+        self.rebuild_scene();
+        self.selection = SelectionState::None;
+        self.project_path = None;
+        self.saved_revision = None;
+        self.messages.push(AppMessage::info("Created empty model."));
+    }
+
+    /// Open a project from the file path input.
+    ///
+    /// On failure, the current model/path/dirty state are preserved.
+    fn do_open(&mut self) {
+        let path = std::path::PathBuf::from(self.file_path_input.trim());
+        if path.as_os_str().is_empty() {
+            self.messages
+                .push(AppMessage::error("No file path specified."));
+            return;
+        }
+        match persistence::load_project(&path) {
+            Ok(model) => {
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let rev = model.revision();
+                self.project.load_model(name, model);
+                self.rebuild_scene();
+                self.selection = SelectionState::None;
+                self.project_path = Some(path);
+                self.saved_revision = Some(rev);
+                self.messages
+                    .push(AppMessage::info("Project loaded successfully."));
+            }
+            Err(e) => {
+                self.messages
+                    .push(AppMessage::error(format!("Load failed: {e}")));
+            }
+        }
+    }
+
+    /// Save the project to the current path (or the file path input if no
+    /// current path is set).  On failure, `saved_revision` is not updated.
+    fn do_save(&mut self) {
+        let path = match &self.project_path {
+            Some(p) => p.clone(),
+            None => {
+                let p = std::path::PathBuf::from(self.file_path_input.trim());
+                if p.as_os_str().is_empty() {
+                    self.messages.push(AppMessage::error(
+                        "No file path. Use \u{201c}Save As\u{201d} to specify one.",
+                    ));
+                    return;
+                }
+                p
+            }
+        };
+        self.save_to_path(&path);
+    }
+
+    /// Save the project to the path in the file path input.
+    fn do_save_as(&mut self) {
+        let path = std::path::PathBuf::from(self.file_path_input.trim());
+        if path.as_os_str().is_empty() {
+            self.messages
+                .push(AppMessage::error("No file path specified."));
+            return;
+        }
+        self.save_to_path(&path);
+    }
+
+    /// Internal: save the model to `path` and update state on success.
+    fn save_to_path(&mut self, path: &std::path::Path) {
+        let Some(model) = &self.project.model else {
+            self.messages.push(AppMessage::error("No model to save."));
+            return;
+        };
+        match persistence::save_project(path, model) {
+            Ok(()) => {
+                let rev = model.revision();
+                self.project_path = Some(path.to_path_buf());
+                self.saved_revision = Some(rev);
+                self.file_path_input = path.to_string_lossy().to_string();
+                self.messages
+                    .push(AppMessage::info(format!("Saved to {}", path.display())));
+            }
+            Err(e) => {
+                self.messages
+                    .push(AppMessage::error(format!("Save failed: {e}")));
+            }
+        }
+    }
+
+    /// Execute the pending action after the unsaved-changes dialog.
+    fn execute_pending(&mut self) {
+        match self.pending_action {
+            PendingAction::None => {}
+            PendingAction::New => self.do_new(),
+            PendingAction::Open => self.do_open(),
+        }
+        self.pending_action = PendingAction::None;
+        self.show_unsaved_dialog = false;
     }
 
     /// Clear selection if it points to a node/member that no longer exists.
@@ -301,13 +440,33 @@ impl eframe::App for ViewportApp {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New (empty model)").clicked() {
-                        self.project.load_model("Untitled".into(), EditModel::new());
-                        self.rebuild_scene();
-                        self.selection = SelectionState::None;
-                        self.messages.push(AppMessage::info("Created empty model."));
+                    if ui.button("New").clicked() {
+                        if self.is_dirty() {
+                            self.show_unsaved_dialog = true;
+                            self.pending_action = PendingAction::New;
+                        } else {
+                            self.do_new();
+                        }
                         ui.close_menu();
                     }
+                    if ui.button("Open...").clicked() {
+                        if self.is_dirty() {
+                            self.show_unsaved_dialog = true;
+                            self.pending_action = PendingAction::Open;
+                        } else {
+                            self.do_open();
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Save").clicked() {
+                        self.do_save();
+                        ui.close_menu();
+                    }
+                    if ui.button("Save As...").clicked() {
+                        self.do_save_as();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Clear project").clicked() {
                         self.clear_project();
                         ui.close_menu();
@@ -405,13 +564,39 @@ impl eframe::App for ViewportApp {
                 }
                 ui.separator();
                 if ui.button("New empty model").clicked() {
-                    self.project.load_model("Untitled".into(), EditModel::new());
-                    self.rebuild_scene();
-                    self.selection = SelectionState::None;
-                    self.messages.push(AppMessage::info("Created empty model."));
+                    if self.is_dirty() {
+                        self.show_unsaved_dialog = true;
+                        self.pending_action = PendingAction::New;
+                    } else {
+                        self.do_new();
+                    }
                 }
                 if ui.button("Clear project").clicked() {
                     self.clear_project();
+                }
+                ui.separator();
+                ui.label("File path:");
+                ui.text_edit_singleline(&mut self.file_path_input);
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        if self.is_dirty() {
+                            self.show_unsaved_dialog = true;
+                            self.pending_action = PendingAction::Open;
+                        } else {
+                            self.do_open();
+                        }
+                    }
+                    if ui.button("Save").clicked() {
+                        self.do_save();
+                    }
+                    if ui.button("Save As").clicked() {
+                        self.do_save_as();
+                    }
+                });
+                if self.is_dirty() {
+                    ui.label(egui::RichText::new("\u{26a0} Unsaved changes").color(STALE_C));
+                } else if self.project_path.is_some() {
+                    ui.label(egui::RichText::new("\u{2713} Saved").color(SUPPORT_C));
                 }
             });
 
@@ -428,6 +613,43 @@ impl eframe::App for ViewportApp {
                     self.show_camera_section(ui);
                 });
             });
+
+        // ── Unsaved-changes dialog ─────────────────────────────────────
+        if self.show_unsaved_dialog {
+            egui::Window::new("Unsaved Changes")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("You have unsaved changes.");
+                    ui.label("Save before proceeding?");
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            let has_path = self.project_path.is_some();
+                            if has_path {
+                                self.do_save();
+                                self.execute_pending();
+                            } else {
+                                let p = std::path::PathBuf::from(self.file_path_input.trim());
+                                if p.as_os_str().is_empty() {
+                                    self.messages.push(AppMessage::error(
+                                        "No file path. Enter a path or cancel.",
+                                    ));
+                                } else {
+                                    self.save_to_path(&p);
+                                    self.execute_pending();
+                                }
+                            }
+                        }
+                        if ui.button("Don't Save").clicked() {
+                            self.execute_pending();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_unsaved_dialog = false;
+                            self.pending_action = PendingAction::None;
+                        }
+                    });
+                });
+        }
 
         // ── Central panel: 3D viewport ─────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1716,7 +1938,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 148"),
+            .with_title("Structural Analysis \u{2014} Phase 150"),
         ..Default::default()
     };
     eframe::run_native(

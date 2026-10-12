@@ -9,6 +9,7 @@ pub mod camera;
 pub mod display;
 pub mod edit_model;
 pub mod model;
+pub mod persistence;
 pub mod project;
 pub mod scene;
 pub mod selection;
