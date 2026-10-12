@@ -8,7 +8,10 @@ use structural_analysis::{Dof3D, FrameAnalysisResult3D};
 use viewport_poc::{
     app_state::{AnalysisStatus, AppMessage, MessageLevel, Project},
     camera::{Camera3D, ScreenPos},
-    display::ResultDisplayState,
+    display::{
+        ResultDisplayState, ResultViewMode, displacement_magnitudes, fmt_eng, magnitude_color,
+        max_abs, normalize,
+    },
     edit_model::{EditModel, MemberId, NodalLoadSpec, NodeId, SupportSpec},
     model, project,
     scene::ViewportScene,
@@ -526,23 +529,14 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Depth-sort members ──
-            let mut order: Vec<usize> = (0..scene.n_members()).collect();
-            order.sort_by(|&a, &b| {
-                let da = scene
-                    .member_midpoint(a)
-                    .and_then(|m| self.camera.project(m, w, h))
-                    .map(|p| p.depth)
-                    .unwrap_or(f64::INFINITY);
-                let db = scene
-                    .member_midpoint(b)
-                    .and_then(|m| self.camera.project(m, w, h))
-                    .map(|p| p.depth)
-                    .unwrap_or(f64::INFINITY);
-                db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let order: Vec<usize> = (0..scene.n_members()).collect();
+
+            // Determine whether to show base (undeformed) geometry.
+            let show_base = self.display.mode != ResultViewMode::Deformed
+                || self.display.show_undeformed;
 
             // ── Draw undeformed members ──
-            if self.display.show_undeformed {
+            if show_base {
                 for &mi in &order {
                     let (ni, nj) = scene.member_nodes[mi];
                     let pi = scene.node_positions[ni];
@@ -567,7 +561,7 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw undeformed nodes ──
-            if self.display.show_undeformed {
+            if show_base {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
                     let Some(p) = self.camera.project(pos, w, h) else {
                         continue;
@@ -580,7 +574,7 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw support symbols ──
-            if self.display.show_undeformed {
+            if show_base {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
                     let Some(spec) = scene.node_supports.get(i).copied().flatten() else {
                         continue;
@@ -612,7 +606,7 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw load indicators ──
-            if self.display.show_undeformed {
+            if show_base {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
                     let Some(load) = scene.node_loads.get(i).copied().flatten() else {
                         continue;
@@ -666,7 +660,7 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw deformed shape ──
-            if self.display.show_deformed {
+            if self.display.mode == ResultViewMode::Deformed {
                 if let Some(result) = self.analysis_result() {
                     let deformed = scene
                         .deformed_positions(&result.displacements, self.display.deformation_scale);
@@ -690,6 +684,167 @@ impl eframe::App for ViewportApp {
                             continue;
                         };
                         painter.circle_filled(scr(&p, rect), 3.5, DEF_NODE);
+                    }
+                }
+            }
+
+            // ── Draw displacement color-coding ──
+            if self.display.mode == ResultViewMode::Displacement {
+                if let Some(result) = self.analysis_result() {
+                    let mags = displacement_magnitudes(
+                        &result.displacements,
+                        scene.n_nodes(),
+                    );
+                    let max_mag = max_abs(&mags);
+                    for (i, &mag) in mags.iter().enumerate() {
+                        let &pos = &scene.node_positions[i];
+                        let Some(p) = self.camera.project(pos, w, h) else {
+                            continue;
+                        };
+                        let t = normalize(mag, max_mag);
+                        let [r, g, b] = magnitude_color(t);
+                        let col = egui::Color32::from_rgb(r, g, b);
+                        let radius = (5.0 + t * 4.0) as f32;
+                        painter.circle_filled(scr(&p, rect), radius, col);
+                    }
+                    // Legend
+                    if max_mag > 0.0 {
+                        let ly = rect.min.y + 20.0;
+                        let lx = rect.max.x - 180.0;
+                        painter.text(
+                            egui::pos2(lx, ly),
+                            egui::Align2::LEFT_TOP,
+                            format!("|u| max = {}", fmt_eng(max_mag)),
+                            egui::FontId::proportional(11.0),
+                            LABEL_C,
+                        );
+                        for j in 0..40 {
+                            let t = j as f64 / 39.0;
+                            let [r, g, b] = magnitude_color(t);
+                            painter.line_segment(
+                                [
+                                    egui::pos2(lx + j as f32 * 3.0, ly + 20.0),
+                                    egui::pos2(lx + j as f32 * 3.0, ly + 30.0),
+                                ],
+                                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(r, g, b)),
+                            );
+                        }
+                        painter.text(
+                            egui::pos2(lx, ly + 32.0),
+                            egui::Align2::LEFT_TOP,
+                            "0",
+                            egui::FontId::proportional(9.0),
+                            LABEL_C,
+                        );
+                        painter.text(
+                            egui::pos2(lx + 120.0, ly + 32.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("{}", fmt_eng(max_mag)),
+                            egui::FontId::proportional(9.0),
+                            LABEL_C,
+                        );
+                    }
+                }
+            }
+
+            // ── Draw reaction indicators ──
+            if self.display.mode == ResultViewMode::Reaction {
+                if let Some(result) = self.analysis_result() {
+                    for (i, &pos) in scene.node_positions.iter().enumerate() {
+                        let Some(_) = scene.node_supports.get(i).copied().flatten() else {
+                            continue;
+                        };
+                        let fx = result.reactions.get(i * 6).copied().unwrap_or(0.0);
+                        let fy = result.reactions.get(i * 6 + 1).copied().unwrap_or(0.0);
+                        let fz = result.reactions.get(i * 6 + 2).copied().unwrap_or(0.0);
+                        let mx = result.reactions.get(i * 6 + 3).copied().unwrap_or(0.0);
+                        let my = result.reactions.get(i * 6 + 4).copied().unwrap_or(0.0);
+                        let mz = result.reactions.get(i * 6 + 5).copied().unwrap_or(0.0);
+
+                        let Some(p) = self.camera.project(pos, w, h) else {
+                            continue;
+                        };
+                        let center = scr(&p, rect);
+
+                        let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+                        if fmag > 1e-9 {
+                            let dir = [fx / fmag, fy / fmag, fz / fmag];
+                            let scale = 0.3_f64.min(fmag * 1e-3);
+                            let tip_world = [
+                                pos[0] + dir[0] * scale,
+                                pos[1] + dir[1] * scale,
+                                pos[2] + dir[2] * scale,
+                            ];
+                            if let Some(p_tip) = self.camera.project(tip_world, w, h) {
+                                let tip = scr(&p_tip, rect);
+                                painter.line_segment(
+                                    [center, tip],
+                                    egui::Stroke::new(3.0_f32, SUPPORT_C),
+                                );
+                                painter.circle_filled(tip, 5.0, SUPPORT_C);
+                            }
+                        }
+
+                        let mmag = (mx * mx + my * my + mz * mz).sqrt();
+                        if mmag > 1e-9 {
+                            painter.circle_stroke(
+                                center + egui::vec2(14.0, -14.0),
+                                7.0,
+                                egui::Stroke::new(2.5_f32, LOAD_M_C),
+                            );
+                            painter.text(
+                                center + egui::vec2(14.0, -14.0),
+                                egui::Align2::CENTER_CENTER,
+                                "R",
+                                egui::FontId::proportional(8.0),
+                                LOAD_M_C,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ── Draw member end-force indicators ──
+            if self.display.mode == ResultViewMode::MemberEndForces {
+                if let (SelectionState::Member(mid), Some(result)) =
+                    (self.selection, self.analysis_result())
+                {
+                    if let Some(mi) = scene.member_index(mid) {
+                        if let Ok(f_global) = result.member_end_forces_global(mi) {
+                            let (ni, nj) = scene.member_nodes[mi];
+                            let pi = scene.node_positions[ni];
+                            let pj = scene.node_positions[nj];
+
+                            for (end, f) in [(pi, &f_global[0..3]), (pj, &f_global[6..9])] {
+                                let fx = f[0];
+                                let fy = f[1];
+                                let fz = f[2];
+                                let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+                                if fmag <= 1e-9 {
+                                    continue;
+                                }
+                                let dir = [fx / fmag, fy / fmag, fz / fmag];
+                                let scale = 0.3_f64.min(fmag * 1e-3);
+                                let tip_world = [
+                                    end[0] + dir[0] * scale,
+                                    end[1] + dir[1] * scale,
+                                    end[2] + dir[2] * scale,
+                                ];
+                                let Some(p0) = self.camera.project(end, w, h) else {
+                                    continue;
+                                };
+                                let Some(p1) = self.camera.project(tip_world, w, h) else {
+                                    continue;
+                                };
+                                let c0 = scr(&p0, rect);
+                                let c1 = scr(&p1, rect);
+                                painter.line_segment(
+                                    [c0, c1],
+                                    egui::Stroke::new(3.0_f32, SELECTED_C),
+                                );
+                                painter.circle_filled(c1, 5.0, SELECTED_C);
+                            }
+                        }
                     }
                 }
             }
@@ -832,21 +987,49 @@ impl ViewportApp {
         egui::CollapsingHeader::new("Display")
             .default_open(true)
             .show(ui, |ui| {
-                ui.checkbox(&mut self.display.show_undeformed, "Undeformed shape");
-                ui.checkbox(&mut self.display.show_deformed, "Deformed shape");
+                ui.label("Result view mode:");
+                ui.horizontal_wrapped(|ui| {
+                    for mode in ResultViewMode::ALL {
+                        let selected = self.display.mode == mode;
+                        if ui
+                            .add(egui::SelectableLabel::new(selected, mode.label()))
+                            .clicked()
+                        {
+                            self.display.mode = mode;
+                        }
+                    }
+                });
+
+                let result_available = self.analysis_result().is_some();
+                if self.display.mode.requires_result() && !result_available {
+                    ui.label(
+                        egui::RichText::new("(no current result — solve first)").color(STALE_C),
+                    );
+                }
+
+                ui.separator();
+
+                if self.display.mode == ResultViewMode::Deformed {
+                    ui.checkbox(&mut self.display.show_undeformed, "Undeformed reference");
+                    ui.add(
+                        egui::Slider::new(&mut self.display.deformation_scale, 0.0..=2000.0)
+                            .text("Deform scale")
+                            .logarithmic(true),
+                    );
+                    ui.label(format!(
+                        "Scale: {:.1}x actual displacement",
+                        self.display.deformation_scale
+                    ));
+                    if ui.button("Reset scale").clicked() {
+                        self.display.deformation_scale = 100.0;
+                    }
+                    ui.separator();
+                }
+
                 ui.checkbox(&mut self.display.show_local_axes, "Local axes (selected)");
                 ui.checkbox(&mut self.display.show_grid, "Ground grid");
                 ui.checkbox(&mut self.display.show_global_axes, "Global axes");
                 ui.checkbox(&mut self.display.show_node_labels, "Node labels");
-                ui.add(
-                    egui::Slider::new(&mut self.display.deformation_scale, 0.0..=2000.0)
-                        .text("Deform scale")
-                        .logarithmic(true),
-                );
-                ui.label(format!(
-                    "Scale: {:.1}x actual displacement",
-                    self.display.deformation_scale
-                ));
             });
     }
 
@@ -1533,7 +1716,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
-            .with_title("Structural Analysis \u{2014} Phase 146"),
+            .with_title("Structural Analysis \u{2014} Phase 148"),
         ..Default::default()
     };
     eframe::run_native(
