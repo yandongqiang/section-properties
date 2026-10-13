@@ -109,6 +109,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 scene,
                 &app.display,
                 app.selection,
+                app.analysis_result(),
                 show_base,
                 w / h,
                 ctx.pixels_per_point(),
@@ -201,9 +202,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw support symbols ──
+        // ── Draw support symbols (Software only; GPU draws 3-D glyphs) ──
         // Fixed = square, Pinned = triangle, Custom = circle
-        if show_base {
+        if show_base && !use_gpu {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
                 let Some(spec) = scene.node_supports.get(i).copied().flatten() else {
                     continue;
@@ -245,8 +246,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw load indicators ──
-        if show_base {
+        // ── Draw load indicators (Software only; GPU draws 3-D arrows) ──
+        if show_base && !use_gpu {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
                 let Some(load) = scene.node_loads.get(i).copied().flatten() else {
                     continue;
@@ -292,8 +293,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw member distributed load indicators ──
-        if show_base {
+        // ── Draw member distributed load indicators (Software only; GPU 3-D) ──
+        if show_base && !use_gpu {
             for (mi, &_) in scene.member_nodes.iter().enumerate() {
                 let Some(load) = scene.member_loads.get(mi).copied().flatten() else {
                     continue;
@@ -372,8 +373,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw member point load indicators ──
-        if show_base {
+        // ── Draw member point load indicators (Software only; GPU 3-D arrows) ──
+        if show_base && !use_gpu {
             for (mi, &_) in scene.member_nodes.iter().enumerate() {
                 let Some(loads) = scene.member_point_loads.get(mi) else {
                     continue;
@@ -454,7 +455,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         }
 
         // ── Draw deformed shape (cubic Hermite beam curve) ──
-        if app.display.mode == ResultViewMode::Deformed {
+        // Software only; in GPU mode the renderer sweeps the sampled curve as
+        // depth-tested solids (see `GlGeometry::build`).
+        if !use_gpu && app.display.mode == ResultViewMode::Deformed {
             if let Some(result) = app.analysis_result() {
                 let scale = app.display.deformation_scale;
                 let deformed = scene.deformed_positions(&result.displacements, scale);
@@ -502,20 +505,24 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         }
 
         // ── Draw displacement color-coding ──
+        // In GPU mode the member prisms are contoured by the renderer; only the
+        // node markers (software) and the legend stay on the painter.
         if app.display.mode == ResultViewMode::Displacement {
             if let Some(result) = app.analysis_result() {
                 let mags = displacement_magnitudes(&result.displacements, scene.n_nodes());
                 let max_mag = max_abs(&mags);
-                for (i, &mag) in mags.iter().enumerate() {
-                    let &pos = &scene.node_positions[i];
-                    let Some(p) = app.camera.project(pos, w, h) else {
-                        continue;
-                    };
-                    let t = normalize(mag, max_mag);
-                    let [r, g, b] = magnitude_color(t);
-                    let col = egui::Color32::from_rgb(r, g, b);
-                    let radius = (5.0 + t * 4.0) as f32;
-                    painter.circle_filled(scr(&p, rect), radius, col);
+                if !use_gpu {
+                    for (i, &mag) in mags.iter().enumerate() {
+                        let &pos = &scene.node_positions[i];
+                        let Some(p) = app.camera.project(pos, w, h) else {
+                            continue;
+                        };
+                        let t = normalize(mag, max_mag);
+                        let [r, g, b] = magnitude_color(t);
+                        let col = egui::Color32::from_rgb(r, g, b);
+                        let radius = (5.0 + t * 4.0) as f32;
+                        painter.circle_filled(scr(&p, rect), radius, col);
+                    }
                 }
                 // Legend
                 if max_mag > 0.0 {
@@ -557,8 +564,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw reaction indicators ──
-        if app.display.mode == ResultViewMode::Reaction {
+        // ── Draw reaction indicators (Software only; GPU draws 3-D arrows) ──
+        if !use_gpu && app.display.mode == ResultViewMode::Reaction {
             if let Some(result) = app.analysis_result() {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
                     let Some(_) = scene.node_supports.get(i).copied().flatten() else {
@@ -611,8 +618,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw member end-force indicators ──
-        if app.display.mode == ResultViewMode::MemberEndForces {
+        // ── Draw member end-force indicators (Software only; GPU 3-D arrows) ──
+        if !use_gpu && app.display.mode == ResultViewMode::MemberEndForces {
             if let (SelectionState::Member(mid), Some(result)) =
                 (app.selection, app.analysis_result())
             {
@@ -654,24 +661,35 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         }
 
         // ── Internal-force diagrams (N / V / M) ──
-        super::diagrams::show_diagrams(app, scene, rect, &painter);
+        // Software: the full painter diagram (polylines, hatching, labels,
+        // legend).  GPU: the 3-D depth-tested line strips are emitted by the
+        // renderer, so only the numeric labels + legend stay on the painter.
+        if use_gpu {
+            super::diagrams::show_diagram_labels(app, scene, rect, &painter);
+        } else {
+            super::diagrams::show_diagrams(app, scene, rect, &painter);
+        }
 
-        // ── Draw local axes for selected member ──
-        if let (SelectionState::Member(mid), Some(result)) = (app.selection, app.analysis_result()) {
-            if app.display.show_local_axes {
-                if let Some(mi) = scene.member_index(mid) {
-                    if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
-                        if let Some(mpos) = scene.member_midpoint(mi) {
-                            draw_local_axes(
-                                &app.camera,
-                                w,
-                                h,
-                                rect,
-                                &painter,
-                                mpos,
-                                [xh, yh, zh],
-                                0.5,
-                            );
+        // ── Draw local axes for selected member (Software only; GPU triads) ──
+        if !use_gpu {
+            if let (SelectionState::Member(mid), Some(result)) =
+                (app.selection, app.analysis_result())
+            {
+                if app.display.show_local_axes {
+                    if let Some(mi) = scene.member_index(mid) {
+                        if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
+                            if let Some(mpos) = scene.member_midpoint(mi) {
+                                draw_local_axes(
+                                    &app.camera,
+                                    w,
+                                    h,
+                                    rect,
+                                    &painter,
+                                    mpos,
+                                    [xh, yh, zh],
+                                    0.5,
+                                );
+                            }
                         }
                     }
                 }

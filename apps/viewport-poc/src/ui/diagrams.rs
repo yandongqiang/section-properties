@@ -12,13 +12,22 @@
 //! distributed / point loads.  Offsets are along the member's **local**
 //! `y` axis (N, Vy, Mz) or `z` axis (Vz, My); see [`SectionForces3D`] for the
 //! sign convention.  Units are SI (N, N·m).
+//!
+//! # Painter vs. GPU
+//!
+//! [`compute`] turns the samples into world-space line segments + label
+//! anchors.  The Software renderer ([`show_diagrams`]) projects and paints
+//! them; the GPU renderer consumes the same segments as depth-tested 3-D line
+//! strips and only [`show_diagram_labels`] (labels + legend) stays on the
+//! painter.  Both paths therefore agree exactly.
 
 use egui;
 
 use viewport_poc::camera::Camera3D;
-use viewport_poc::display::fmt_eng;
+use viewport_poc::display::{fmt_eng, ResultDisplayState};
 use viewport_poc::scene::{SectionForces3D, ViewportScene};
 use viewport_poc::selection::SelectionState;
+use structural_analysis::FrameAnalysisResult3D;
 
 use crate::ViewportApp;
 
@@ -28,6 +37,11 @@ const SAMPLES: usize = 21;
 const HATCH_STEP: usize = 2;
 /// Fraction of the member length used as the on-screen amplitude at peak.
 const AMP_FRACTION: f64 = 0.30;
+
+/// Polyline / hatching stroke width (px) — mirror of the painter values.
+const POLYLINE_W: f32 = 2.0;
+const HATCH_W: f32 = 1.0;
+const BASELINE_W: f32 = 1.0;
 
 const C_AXIAL: egui::Color32 = egui::Color32::from_rgb(120, 230, 120);
 const C_SHEAR_Y: egui::Color32 = egui::Color32::from_rgb(255, 150, 60);
@@ -79,6 +93,12 @@ impl Comp {
         }
     }
 
+    /// RGB triple of the component colour.
+    fn rgb(self) -> [u8; 3] {
+        let c = self.color();
+        [c.r(), c.g(), c.b()]
+    }
+
     /// `1` = offset along local `+y`, `2` = along local `+z`.
     fn offset_axis(self) -> usize {
         match self {
@@ -128,37 +148,61 @@ impl Peaks {
     }
 }
 
-/// Draw the internal-force diagram overlay (no-op when disabled or when no
-/// current analysis result / selection is available).
-pub fn show_diagrams(
-    app: &ViewportApp,
+/// A world-space line segment of the diagram overlay (colour + stroke width).
+pub(crate) struct DiagramLine {
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+    pub color: [u8; 3],
+    pub width: f32,
+}
+
+/// A world-space anchor for a painter peak-value label.
+pub(crate) struct DiagramLabel {
+    pub pos: [f64; 3],
+    pub text: String,
+    pub color: [u8; 3],
+}
+
+/// One legend row: component label, colour, and its peak value.
+pub(crate) struct DiagramLegendRow {
+    pub label: &'static str,
+    pub color: [u8; 3],
+    pub peak: f64,
+}
+
+/// Fully-computed diagram overlay in world space, shared by both renderers.
+pub(crate) struct Diagrams {
+    pub lines: Vec<DiagramLine>,
+    pub labels: Vec<DiagramLabel>,
+    pub legend: Vec<DiagramLegendRow>,
+    pub scale: f64,
+}
+
+/// Sample the diagram overlay for the current selection / display flags.
+///
+/// Returns `None` when diagrams are disabled, no result is available, nothing
+/// is selected (in selected-member mode), or every sample was degenerate.
+pub(crate) fn compute(
     scene: &ViewportScene,
-    rect: egui::Rect,
-    painter: &egui::Painter,
-) {
-    if !app.display.show_diagrams {
-        return;
-    }
-    let Some(result) = app.analysis_result() else {
-        return;
-    };
-    let w = rect.width() as f64;
-    let h = rect.height() as f64;
-    if w < 10.0 || h < 10.0 {
-        return;
+    display: &ResultDisplayState,
+    result: &FrameAnalysisResult3D,
+    selection: SelectionState,
+) -> Option<Diagrams> {
+    if !display.show_diagrams {
+        return None;
     }
 
     // Which members to draw.
-    let members: Vec<usize> = if app.display.diagram_all_members {
+    let members: Vec<usize> = if display.diagram_all_members {
         (0..scene.n_members()).collect()
     } else {
-        match app.selection {
+        match selection {
             SelectionState::Member(mid) => scene.member_index(mid).into_iter().collect(),
-            _ => return,
+            _ => return None,
         }
     };
     if members.is_empty() {
-        return;
+        return None;
     }
 
     // First pass: sample forces and accumulate per-component peaks.
@@ -205,125 +249,198 @@ pub fn show_diagrams(
         }
     }
     if data.is_empty() {
-        return;
+        return None;
     }
 
     // Active components.
     let mut comps: Vec<Comp> = Vec::new();
-    if app.display.diagram_axial {
+    if display.diagram_axial {
         comps.push(Comp::N);
     }
-    if app.display.diagram_shear {
+    if display.diagram_shear {
         comps.push(Comp::Vy);
         comps.push(Comp::Vz);
     }
-    if app.display.diagram_moment {
+    if display.diagram_moment {
         comps.push(Comp::Mz);
         comps.push(Comp::My);
     }
     if comps.is_empty() {
-        return;
+        return None;
     }
+
+    let mut lines: Vec<DiagramLine> = Vec::new();
+    let mut labels: Vec<DiagramLabel> = Vec::new();
 
     for m in &data {
         // Baseline along the undeformed member axis.
-        if let (Some(a), Some(b)) = (
-            project(&app.camera, m.pi, w, h, rect),
-            project(&app.camera, m.pj, w, h, rect),
-        ) {
-            painter.line_segment([a, b], egui::Stroke::new(1.0_f32, C_BASELINE));
-        }
-        let amp = AMP_FRACTION * m.length * app.display.diagram_scale;
+        lines.push(DiagramLine {
+            a: m.pi,
+            b: m.pj,
+            color: [C_BASELINE.r(), C_BASELINE.g(), C_BASELINE.b()],
+            width: BASELINE_W,
+        });
+        let amp = AMP_FRACTION * m.length * display.diagram_scale;
         for &c in &comps {
-            draw_component(painter, &app.camera, m, c, peaks.get(c), amp, w, h, rect);
+            let dir = if c.offset_axis() == 2 { m.axes.2 } else { m.axes.1 };
+            let rgb = c.rgb();
+            let inv_peak = {
+                let p = peaks.get(c);
+                if p > 0.0 { 1.0 / p } else { 0.0 }
+            };
+
+            // Offset polyline, remembering the peak sample.
+            let mut bases: Vec<[f64; 3]> = Vec::with_capacity(m.xs.len());
+            let mut tips: Vec<[f64; 3]> = Vec::with_capacity(m.xs.len());
+            let mut peak_idx = 0usize;
+            let mut peak_abs = -1.0_f64;
+            for (k, &xi) in m.xs.iter().enumerate() {
+                let value = c.value(&m.forces[k]);
+                if value.abs() > peak_abs {
+                    peak_abs = value.abs();
+                    peak_idx = k;
+                }
+                let offset = value * inv_peak * amp;
+                let base = lerp(m.pi, m.pj, xi);
+                let tip = [
+                    base[0] + dir[0] * offset,
+                    base[1] + dir[1] * offset,
+                    base[2] + dir[2] * offset,
+                ];
+                bases.push(base);
+                tips.push(tip);
+            }
+
+            // Hatching from baseline to the offset curve.
+            for k in (0..tips.len()).step_by(HATCH_STEP.max(1)) {
+                lines.push(DiagramLine {
+                    a: bases[k],
+                    b: tips[k],
+                    color: rgb,
+                    width: HATCH_W,
+                });
+            }
+            // Offset polyline.
+            for k in 1..tips.len() {
+                lines.push(DiagramLine {
+                    a: tips[k - 1],
+                    b: tips[k],
+                    color: rgb,
+                    width: POLYLINE_W,
+                });
+            }
+            if peaks.get(c) > 0.0 {
+                labels.push(DiagramLabel {
+                    pos: tips[peak_idx],
+                    text: format!("{}={}", c.label(), fmt_eng(c.value(&m.forces[peak_idx]))),
+                    color: rgb,
+                });
+            }
         }
     }
 
-    draw_legend(painter, rect, &comps, &peaks, app.display.diagram_scale);
+    let legend = comps
+        .iter()
+        .map(|&c| DiagramLegendRow {
+            label: c.label(),
+            color: c.rgb(),
+            peak: peaks.get(c),
+        })
+        .collect();
+
+    Some(Diagrams {
+        lines,
+        labels,
+        legend,
+        scale: display.diagram_scale,
+    })
 }
 
-/// Draw one component's offset polyline, hatching and peak label for a member.
-#[allow(clippy::too_many_arguments)]
-fn draw_component(
+/// Draw the full internal-force diagram overlay with the painter (Software
+/// renderer).  No-op when disabled or when nothing is available to draw.
+pub fn show_diagrams(
+    app: &ViewportApp,
+    scene: &ViewportScene,
+    rect: egui::Rect,
     painter: &egui::Painter,
+) {
+    let Some(result) = app.analysis_result() else {
+        return;
+    };
+    let Some(d) = compute(scene, &app.display, result, app.selection) else {
+        return;
+    };
+    let (w, h) = (rect.width() as f64, rect.height() as f64);
+    if w < 10.0 || h < 10.0 {
+        return;
+    }
+    for l in &d.lines {
+        if let (Some(a), Some(b)) = (
+            project(&app.camera, l.a, w, h, rect),
+            project(&app.camera, l.b, w, h, rect),
+        ) {
+            let col = egui::Color32::from_rgb(l.color[0], l.color[1], l.color[2]);
+            painter.line_segment([a, b], egui::Stroke::new(l.width, col));
+        }
+    }
+    paint_labels(&app.camera, &d, w, h, rect, painter);
+    draw_legend(painter, rect, &d);
+}
+
+/// Painter-only companion used in GPU mode: the 3-D strips are drawn by the
+/// renderer, so only the peak-value labels and the legend are painted here.
+pub fn show_diagram_labels(
+    app: &ViewportApp,
+    scene: &ViewportScene,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+) {
+    let Some(result) = app.analysis_result() else {
+        return;
+    };
+    let Some(d) = compute(scene, &app.display, result, app.selection) else {
+        return;
+    };
+    let (w, h) = (rect.width() as f64, rect.height() as f64);
+    if w < 10.0 || h < 10.0 {
+        return;
+    }
+    paint_labels(&app.camera, &d, w, h, rect, painter);
+    draw_legend(painter, rect, &d);
+}
+
+/// Paint the projected peak-value labels.
+fn paint_labels(
     cam: &Camera3D,
-    m: &MemberDiagram,
-    c: Comp,
-    peak: f64,
-    amp: f64,
+    d: &Diagrams,
     w: f64,
     h: f64,
     rect: egui::Rect,
+    painter: &egui::Painter,
 ) {
-    let dir = if c.offset_axis() == 2 { m.axes.2 } else { m.axes.1 };
-    let color = c.color();
-    let inv_peak = if peak > 0.0 { 1.0 / peak } else { 0.0 };
-
-    // Build the offset polyline, remembering the peak sample.
-    let mut pts: Vec<Option<egui::Pos2>> = Vec::with_capacity(m.xs.len());
-    let mut base_pts: Vec<Option<egui::Pos2>> = Vec::with_capacity(m.xs.len());
-    let mut peak_idx = 0usize;
-    let mut peak_abs = -1.0_f64;
-    for (k, &xi) in m.xs.iter().enumerate() {
-        let value = c.value(&m.forces[k]);
-        if value.abs() > peak_abs {
-            peak_abs = value.abs();
-            peak_idx = k;
+    for lb in &d.labels {
+        if let Some(p) = project(cam, lb.pos, w, h, rect) {
+            painter.text(
+                p + egui::vec2(4.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                &lb.text,
+                egui::FontId::proportional(10.0),
+                egui::Color32::from_rgb(lb.color[0], lb.color[1], lb.color[2]),
+            );
         }
-        let offset = value * inv_peak * amp;
-        let base = lerp(m.pi, m.pj, xi);
-        let tip = [
-            base[0] + dir[0] * offset,
-            base[1] + dir[1] * offset,
-            base[2] + dir[2] * offset,
-        ];
-        base_pts.push(project(cam, base, w, h, rect));
-        pts.push(project(cam, tip, w, h, rect));
-    }
-
-    // Hatching from the baseline to the offset curve.
-    let hatch_stroke = egui::Stroke::new(1.0_f32, color);
-    for k in (0..pts.len()).step_by(HATCH_STEP.max(1)) {
-        if let (Some(a), Some(b)) = (base_pts[k], pts[k]) {
-            painter.line_segment([a, b], hatch_stroke);
-        }
-    }
-
-    // Offset polyline (split across points that fail to project).
-    let stroke = egui::Stroke::new(2.0_f32, color);
-    for k in 1..pts.len() {
-        if let (Some(a), Some(b)) = (pts[k - 1], pts[k]) {
-            painter.line_segment([a, b], stroke);
-        }
-    }
-
-    // Peak-value label (only when there is something to report).
-    let label_point = if peak > 0.0 { pts[peak_idx] } else { None };
-    if let Some(p) = label_point {
-        let text = format!("{}={}", c.label(), fmt_eng(c.value(&m.forces[peak_idx])));
-        painter.text(
-            p + egui::vec2(4.0, -4.0),
-            egui::Align2::LEFT_BOTTOM,
-            text,
-            egui::FontId::proportional(10.0),
-            color,
-        );
     }
 }
 
 /// Short scale legend with the peak value of each active component.
-fn draw_legend(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    comps: &[Comp],
-    peaks: &Peaks,
-    scale: f64,
-) {
+fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
+    if d.legend.is_empty() {
+        return;
+    }
     let pad = 8.0;
     let line_h = 14.0;
     let swatch = 10.0;
     let width = 150.0;
-    let height = line_h * (comps.len() as f32 + 2.0) + pad;
+    let height = line_h * (d.legend.len() as f32 + 2.0) + pad;
     let origin = egui::pos2(rect.max.x - width - 10.0, rect.max.y - height - 10.0);
     painter.rect_filled(
         egui::Rect::from_min_size(origin, egui::vec2(width, height)),
@@ -335,21 +452,25 @@ fn draw_legend(
     painter.text(
         egui::pos2(origin.x + pad, y),
         egui::Align2::LEFT_TOP,
-        format!("Force diagrams (x{scale:.2})"),
+        format!("Force diagrams (x{:.2})", d.scale),
         egui::FontId::proportional(11.0),
         C_LABEL,
     );
     y += line_h;
-    for &c in comps {
+    for row in &d.legend {
         let sw = egui::Rect::from_min_size(
             egui::pos2(origin.x + pad, y + 2.0),
             egui::vec2(swatch, swatch),
         );
-        painter.rect_filled(sw, 1.0, c.color());
+        painter.rect_filled(
+            sw,
+            1.0,
+            egui::Color32::from_rgb(row.color[0], row.color[1], row.color[2]),
+        );
         painter.text(
             egui::pos2(origin.x + pad + swatch + 6.0, y),
             egui::Align2::LEFT_TOP,
-            format!("{}  peak {}", c.label(), fmt_eng(peaks.get(c))),
+            format!("{}  peak {}", row.label, fmt_eng(row.peak)),
             egui::FontId::proportional(10.0),
             C_LABEL,
         );

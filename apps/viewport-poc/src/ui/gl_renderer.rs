@@ -48,12 +48,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use eframe::egui_glow;
 use eframe::glow::{self, HasContext};
 
+use structural_analysis::FrameAnalysisResult3D;
+
 use viewport_poc::camera::Camera3D;
-use viewport_poc::display::ResultDisplayState;
+use viewport_poc::display::{
+    displacement_magnitudes, magnitude_color, max_abs, normalize, ResultDisplayState,
+    ResultViewMode,
+};
+use viewport_poc::edit_model::SupportSpec;
 use viewport_poc::scene::{equivalent_rectangle, ViewportScene};
 use viewport_poc::selection::SelectionState;
 
-use super::theme::{AXIS_X, AXIS_Y, AXIS_Z, BG, GRID_C, MEMBER_C, NODE_C, SELECTED_C};
+use super::theme::{
+    AXIS_X, AXIS_Y, AXIS_Z, BG, DEF_MEMBER, DEF_NODE, GRID_C, LOAD_F_C, LOAD_M_C, MEMBER_C,
+    MEMBER_LOAD_C, NODE_C, SELECTED_C, SUPPORT_C,
+};
 
 /// Floats per interleaved scene vertex: position(3) + normal(3) + colour(4).
 const FLOATS_PER_VERTEX: usize = 10;
@@ -79,6 +88,18 @@ const DESIRED_SAMPLES: i32 = 4;
 const NODE_RADIUS_FRACTION: f64 = 0.015;
 /// Selected nodes are drawn this much larger than unselected ones.
 const SELECTED_NODE_SCALE: f64 = 1.4;
+
+/// Samples per member for the deformed-shape curve (matches the painter path
+/// in [`super::viewport`]).
+const DEFORM_SAMPLES: usize = 12;
+/// World-space length of the nodal-load force arrow (matches the painter).
+const NODAL_ARROW_LEN: f64 = 0.5;
+/// Length of the local-axis triad drawn for the selected member.
+const TRIAD_LEN: f64 = 0.5;
+/// Sides used for round tube cross-sections (moment arcs, arrow shafts).
+const TUBE_SIDES: usize = 8;
+/// Sides used for arrow-head cones.
+const CONE_SIDES: usize = 10;
 
 /// Which viewport renderer is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,11 +322,19 @@ fn rgba(c: egui::Color32) -> [f32; 4] {
 impl GlGeometry {
     /// Build the frame's geometry from the current camera / scene / display
     /// state.  Line widths are given in physical pixels.
+    ///
+    /// Everything that lives in 3-D space — members/nodes, result symbols
+    /// (supports, loads, reactions, end forces), the deformed shape, the
+    /// displacement contour and the local-axis triads — is emitted as
+    /// depth-tested GPU geometry.  Only text annotations (labels, legend,
+    /// help, axis letters) stay on the painter.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         camera: &Camera3D,
         scene: &ViewportScene,
         display: &ResultDisplayState,
         selection: SelectionState,
+        result: Option<&FrameAnalysisResult3D>,
         show_base: bool,
         aspect: f64,
         pixels_per_point: f32,
@@ -318,6 +347,12 @@ impl GlGeometry {
         };
         let mut axes = LineBatch {
             width: 2.5 * ppp,
+            blend: false,
+            verts: Vec::new(),
+        };
+        // Depth-tested 3-D overlay lines (local triads, support hatching).
+        let mut overlay = LineBatch {
+            width: 2.0 * ppp,
             blend: false,
             verts: Vec::new(),
         };
@@ -364,15 +399,31 @@ impl GlGeometry {
             push_line(&mut axes.verts, o, [0.0, 0.0, 1.0], rgba(AXIS_Z));
         }
 
+        // ── Scene-derived scale for the 3-D result symbols ──
+        // Node radius and a slightly larger "glyph" size for supports / loads,
+        // both fractions of the model's bounding-box diagonal so symbols stay
+        // legible at any model scale.
+        let (bmin, bmax) = scene.bounding_box();
+        let diag = ((bmax[0] - bmin[0]).powi(2)
+            + (bmax[1] - bmin[1]).powi(2)
+            + (bmax[2] - bmin[2]).powi(2))
+        .sqrt();
+        let node_r = (NODE_RADIUS_FRACTION * diag).max(1e-6);
+        let glyph = (node_r * 2.0).max(1e-6);
+
+        // ── Displacement magnitudes for the contour colouring (item 5) ──
+        let contour = if display.mode == ResultViewMode::Displacement {
+            result.map(|r| {
+                let mags = displacement_magnitudes(&r.displacements, scene.n_nodes());
+                let max_mag = max_abs(&mags);
+                (mags, max_mag)
+            })
+        } else {
+            None
+        };
+
         // ── Members (extruded prisms) and nodes (spheres) ──
         if show_base {
-            let (bmin, bmax) = scene.bounding_box();
-            let diag = ((bmax[0] - bmin[0]).powi(2)
-                + (bmax[1] - bmin[1]).powi(2)
-                + (bmax[2] - bmin[2]).powi(2))
-            .sqrt();
-            let node_r = (NODE_RADIUS_FRACTION * diag).max(1e-6);
-
             for mi in 0..scene.n_members() {
                 let Some(&(ni, nj)) = scene.member_nodes.get(mi) else {
                     continue;
@@ -395,8 +446,20 @@ impl GlGeometry {
                     .member_ids
                     .get(mi)
                     .is_some_and(|&id| selection == SelectionState::Member(id));
-                let colour = if is_sel { rgba(SELECTED_C) } else { rgba(MEMBER_C) };
-                push_prism(
+                // Contour mode colours the prism along its length by the nodal
+                // displacement magnitude; otherwise selection/member colour.
+                let (ci, cj) = match &contour {
+                    Some((mags, max_mag)) if *max_mag > 0.0 => {
+                        let ti = mags.get(ni).map_or(0.0, |&m| normalize(m, *max_mag));
+                        let tj = mags.get(nj).map_or(0.0, |&m| normalize(m, *max_mag));
+                        (contour_colour(ti), contour_colour(tj))
+                    }
+                    _ => {
+                        let c = if is_sel { rgba(SELECTED_C) } else { rgba(MEMBER_C) };
+                        (c, c)
+                    }
+                };
+                push_prism_grad(
                     &mut solids,
                     pi,
                     pj,
@@ -405,7 +468,8 @@ impl GlGeometry {
                     z_hat,
                     dim_y * 0.5,
                     dim_z * 0.5,
-                    colour,
+                    ci,
+                    cj,
                 );
             }
 
@@ -423,9 +487,293 @@ impl GlGeometry {
             }
         }
 
-        // Axes first (opaque, wins coincident depth), then the blended grid.
+        // ── Support glyphs (item 1) ──
+        if show_base {
+            for (i, &pos) in scene.node_positions.iter().enumerate() {
+                if let Some(spec) = scene.node_supports.get(i).copied().flatten() {
+                    push_support(&mut solids, &mut overlay.verts, pos, spec, glyph);
+                }
+            }
+        }
+
+        // ── Nodal load glyphs (item 2) ──
+        if show_base {
+            for (i, &pos) in scene.node_positions.iter().enumerate() {
+                let Some(load) = scene.node_loads.get(i).copied().flatten() else {
+                    continue;
+                };
+                if load.is_zero() || !load.is_finite() {
+                    continue;
+                }
+                let fmag = load.force_magnitude();
+                if fmag > 1e-12 {
+                    let dir = [load.fx / fmag, load.fy / fmag, load.fz / fmag];
+                    push_arrow(
+                        &mut solids,
+                        pos,
+                        dir,
+                        NODAL_ARROW_LEN,
+                        glyph * 0.22,
+                        NODAL_ARROW_LEN * 0.35,
+                        glyph * 0.55,
+                        rgba(LOAD_F_C),
+                    );
+                }
+                let mmag = load.moment_magnitude();
+                if mmag > 1e-12 {
+                    let axis = [load.mx / mmag, load.my / mmag, load.mz / mmag];
+                    push_moment_arc(&mut solids, pos, axis, glyph * 3.0, glyph * 0.18, rgba(LOAD_M_C));
+                }
+            }
+        }
+
+        // ── Member uniform (distributed) load arrows ──
+        if show_base {
+            for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                let Some(load) = scene.member_loads.get(mi).copied().flatten() else {
+                    continue;
+                };
+                if load.is_zero() || !load.is_finite() {
+                    continue;
+                }
+                let (ni, nj) = scene.member_nodes[mi];
+                let pi = scene.node_positions[ni];
+                let pj = scene.node_positions[nj];
+                let Some((x_hat, y_hat, z_hat)) =
+                    scene.member_local_axes(mi).or_else(|| fallback_local_axes(pi, pj))
+                else {
+                    continue;
+                };
+                let len = scene.member_length(mi).unwrap_or(0.0);
+                if len < 1e-12 {
+                    continue;
+                }
+                let qg = [
+                    load.qx * x_hat[0] + load.qy * y_hat[0] + load.qz * z_hat[0],
+                    load.qx * x_hat[1] + load.qy * y_hat[1] + load.qz * z_hat[1],
+                    load.qx * x_hat[2] + load.qy * y_hat[2] + load.qz * z_hat[2],
+                ];
+                let qmag = qg[0].hypot(qg[1]).hypot(qg[2]);
+                if qmag < 1e-12 {
+                    continue;
+                }
+                let dir = [qg[0] / qmag, qg[1] / qmag, qg[2] / qmag];
+                let arrow_len = (0.3 * len.min(1.0)).max(1e-6);
+                let n_arrows = 5;
+                for k in 1..n_arrows {
+                    let t = k as f64 / n_arrows as f64;
+                    let base = [
+                        pi[0] + t * (pj[0] - pi[0]),
+                        pi[1] + t * (pj[1] - pi[1]),
+                        pi[2] + t * (pj[2] - pi[2]),
+                    ];
+                    push_arrow(
+                        &mut solids,
+                        base,
+                        dir,
+                        arrow_len,
+                        glyph * 0.16,
+                        arrow_len * 0.35,
+                        glyph * 0.42,
+                        rgba(MEMBER_LOAD_C),
+                    );
+                }
+            }
+        }
+
+        // ── Member point load arrows ──
+        if show_base {
+            for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                let Some(loads) = scene.member_point_loads.get(mi) else {
+                    continue;
+                };
+                if loads.is_empty() {
+                    continue;
+                }
+                let (ni, nj) = scene.member_nodes[mi];
+                let pi = scene.node_positions[ni];
+                let pj = scene.node_positions[nj];
+                let Some((x_hat, y_hat, z_hat)) =
+                    scene.member_local_axes(mi).or_else(|| fallback_local_axes(pi, pj))
+                else {
+                    continue;
+                };
+                let len = scene.member_length(mi).unwrap_or(0.0);
+                if len < 1e-12 {
+                    continue;
+                }
+                for pl in loads {
+                    if pl.is_zero() || !pl.is_finite() {
+                        continue;
+                    }
+                    let fg = [
+                        pl.fx * x_hat[0] + pl.fy * y_hat[0] + pl.fz * z_hat[0],
+                        pl.fx * x_hat[1] + pl.fy * y_hat[1] + pl.fz * z_hat[1],
+                        pl.fx * x_hat[2] + pl.fy * y_hat[2] + pl.fz * z_hat[2],
+                    ];
+                    let fmag = fg[0].hypot(fg[1]).hypot(fg[2]);
+                    if fmag < 1e-12 {
+                        continue;
+                    }
+                    let dir = [fg[0] / fmag, fg[1] / fmag, fg[2] / fmag];
+                    let base = [
+                        pi[0] + pl.xi * (pj[0] - pi[0]),
+                        pi[1] + pl.xi * (pj[1] - pi[1]),
+                        pi[2] + pl.xi * (pj[2] - pi[2]),
+                    ];
+                    let arrow_len = (0.25 * len.min(1.0)).max(1e-6);
+                    push_arrow(
+                        &mut solids,
+                        base,
+                        dir,
+                        arrow_len,
+                        glyph * 0.18,
+                        arrow_len * 0.4,
+                        glyph * 0.5,
+                        rgba(MEMBER_LOAD_C),
+                    );
+                }
+            }
+        }
+
+        // ── Deformed shape (item 4) ──
+        // The sampled Hermite curve is swept as a GPU solid (extruded with the
+        // member's equivalent rectangular section).  In deformed mode this
+        // *replaces* the undeformed members unless "show undeformed" is on.
+        if display.mode == ResultViewMode::Deformed {
+            if let Some(res) = result {
+                let scale = display.deformation_scale;
+                let deformed = scene.deformed_positions(&res.displacements, scale);
+                for mi in 0..scene.n_members() {
+                    let len = scene.member_length(mi).unwrap_or(0.0);
+                    let sec = scene.member_section(mi).unwrap_or_default();
+                    let (dy, dz) = equivalent_rectangle(sec.area, sec.iy, sec.iz, len);
+                    let section = rect_section(dy * 0.5, dz * 0.5);
+                    let mut pts: Vec<[f64; 3]> = Vec::with_capacity(DEFORM_SAMPLES);
+                    for s in 0..DEFORM_SAMPLES {
+                        let xi = s as f64 / (DEFORM_SAMPLES - 1) as f64;
+                        match scene.member_deformed_point(mi, xi, &res.displacements, scale) {
+                            Some(p) => pts.push(p),
+                            None => break,
+                        }
+                    }
+                    if pts.len() >= 2 {
+                        push_sweep(&mut solids, &pts, &section, rgba(DEF_MEMBER), true);
+                    }
+                }
+                for &pos in &deformed {
+                    push_sphere(&mut solids, pos, node_r * 0.9, rgba(DEF_NODE));
+                }
+            }
+        }
+
+        // ── Reactions (item 3) ──
+        if display.mode == ResultViewMode::Reaction {
+            if let Some(res) = result {
+                for (i, &pos) in scene.node_positions.iter().enumerate() {
+                    if scene.node_supports.get(i).copied().flatten().is_none() {
+                        continue;
+                    }
+                    let g = |k: usize| res.reactions.get(i * 6 + k).copied().unwrap_or(0.0);
+                    let (fx, fy, fz) = (g(0), g(1), g(2));
+                    let (mx, my, mz) = (g(3), g(4), g(5));
+
+                    let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+                    if fmag > 1e-9 {
+                        let dir = [fx / fmag, fy / fmag, fz / fmag];
+                        let scale = (0.3_f64.min(fmag * 1e-3)).max(glyph);
+                        push_arrow(
+                            &mut solids,
+                            pos,
+                            dir,
+                            scale,
+                            glyph * 0.22,
+                            scale * 0.35,
+                            glyph * 0.55,
+                            rgba(SUPPORT_C),
+                        );
+                    }
+
+                    let mmag = (mx * mx + my * my + mz * mz).sqrt();
+                    if mmag > 1e-9 {
+                        let axis = [mx / mmag, my / mmag, mz / mmag];
+                        push_moment_arc(
+                            &mut solids,
+                            pos,
+                            axis,
+                            glyph * 3.0,
+                            glyph * 0.18,
+                            rgba(LOAD_M_C),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Member end-force arrows (item 3) ──
+        if display.mode == ResultViewMode::MemberEndForces {
+            if let (SelectionState::Member(mid), Some(res)) = (selection, result) {
+                if let Some(mi) = scene.member_index(mid) {
+                    if let Ok(f_global) = res.member_end_forces_global(mi) {
+                        let (ni, nj) = scene.member_nodes[mi];
+                        let pi = scene.node_positions[ni];
+                        let pj = scene.node_positions[nj];
+                        for (end, f) in [(pi, &f_global[0..3]), (pj, &f_global[6..9])] {
+                            let (fx, fy, fz) = (f[0], f[1], f[2]);
+                            let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+                            if fmag <= 1e-9 {
+                                continue;
+                            }
+                            let dir = [fx / fmag, fy / fmag, fz / fmag];
+                            let scale = (0.3_f64.min(fmag * 1e-3)).max(glyph);
+                            push_arrow(
+                                &mut solids,
+                                end,
+                                dir,
+                                scale,
+                                glyph * 0.22,
+                                scale * 0.35,
+                                glyph * 0.55,
+                                rgba(SELECTED_C),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Local member axes (item 6) ──
+        if display.show_local_axes && result.is_some() {
+            if let SelectionState::Member(mid) = selection {
+                if let Some(mi) = scene.member_index(mid) {
+                    if let (Some(mpos), Some((xh, yh, zh))) =
+                        (scene.member_midpoint(mi), scene.member_local_axes(mi))
+                    {
+                        push_triad(&mut overlay.verts, mpos, xh, yh, zh, TRIAD_LEN);
+                    }
+                }
+            }
+        }
+
+        // ── Internal-force diagrams as depth-tested 3-D line strips (item 7) ──
+        // The M/V/N strips are already computed in the member's local y/z; we
+        // emit the same world-space segments the painter path uses, so they
+        // occlude / are occluded correctly.  Labels + legend stay on the
+        // painter (see `diagrams::show_diagram_labels`).
+        if display.show_diagrams {
+            if let Some(res) = result {
+                if let Some(d) = super::diagrams::compute(scene, display, res, selection) {
+                    for l in &d.lines {
+                        push_line(&mut overlay.verts, l.a, l.b, rgb(l.color));
+                    }
+                }
+            }
+        }
+
+        // Axes first (opaque, wins coincident depth), then the depth-tested
+        // overlay lines, then the blended grid.
         let mut line_batches = Vec::new();
-        for b in [axes, grid] {
+        for b in [axes, overlay, grid] {
             if !b.verts.is_empty() {
                 line_batches.push(b);
             }
@@ -475,9 +823,25 @@ fn push_line_fade(
 }
 
 fn push_tri(buf: &mut Vec<f32>, a: [f64; 3], b: [f64; 3], c: [f64; 3], n: [f64; 3], colour: [f32; 4]) {
-    push_vertex(buf, a, n, colour);
-    push_vertex(buf, b, n, colour);
-    push_vertex(buf, c, n, colour);
+    push_tri_c(buf, a, b, c, n, colour, colour, colour);
+}
+
+/// Like [`push_tri`] but with a per-vertex colour (used for the displacement
+/// contour gradient along a member).
+#[allow(clippy::too_many_arguments)]
+fn push_tri_c(
+    buf: &mut Vec<f32>,
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    n: [f64; 3],
+    ca: [f32; 4],
+    cb: [f32; 4],
+    cc: [f32; 4],
+) {
+    push_vertex(buf, a, n, ca);
+    push_vertex(buf, b, n, cb);
+    push_vertex(buf, c, n, cc);
 }
 
 fn push_quad(
@@ -489,8 +853,26 @@ fn push_quad(
     n: [f64; 3],
     colour: [f32; 4],
 ) {
-    push_tri(buf, a, b, c, n, colour);
-    push_tri(buf, a, c, d, n, colour);
+    push_tri_c(buf, a, b, c, n, colour, colour, colour);
+    push_tri_c(buf, a, c, d, n, colour, colour, colour);
+}
+
+/// Like [`push_quad`] but with a per-vertex colour (contour gradient).
+#[allow(clippy::too_many_arguments)]
+fn push_quad_c(
+    buf: &mut Vec<f32>,
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    d: [f64; 3],
+    n: [f64; 3],
+    ca: [f32; 4],
+    cb: [f32; 4],
+    cc: [f32; 4],
+    cd: [f32; 4],
+) {
+    push_tri_c(buf, a, b, c, n, ca, cb, cc);
+    push_tri_c(buf, a, c, d, n, ca, cc, cd);
 }
 
 /// Append a closed rectangular prism from `pi` to `pj`.
@@ -513,6 +895,24 @@ fn push_prism(
     hy: f64,
     hz: f64,
     colour: [f32; 4],
+) {
+    push_prism_grad(buf, pi, pj, x_hat, y_hat, z_hat, hy, hz, colour, colour);
+}
+
+/// Like [`push_prism`] but with an independent colour for the `i` and `j` ends,
+/// interpolated along the prism — used for the displacement contour gradient.
+#[allow(clippy::too_many_arguments)]
+fn push_prism_grad(
+    buf: &mut Vec<f32>,
+    pi: [f64; 3],
+    pj: [f64; 3],
+    x_hat: [f64; 3],
+    y_hat: [f64; 3],
+    z_hat: [f64; 3],
+    hy: f64,
+    hz: f64,
+    ci: [f32; 4],
+    cj: [f32; 4],
 ) {
     let off = |base: [f64; 3], oy: f64, oz: f64| -> [f64; 3] {
         [
@@ -538,18 +938,19 @@ fn push_prism(
     let pz = z_hat;
     let nz = [-pz[0], -pz[1], -pz[2]];
 
-    // End caps: j end faces +x, i end faces −x.
-    push_tri(buf, j0, j1, j2, px, colour);
-    push_tri(buf, j0, j2, j3, px, colour);
-    push_tri(buf, i0, i2, i1, nx, colour);
-    push_tri(buf, i0, i3, i2, nx, colour);
+    // End caps: j end faces +x (colour `cj`), i end faces −x (colour `ci`).
+    push_tri_c(buf, j0, j1, j2, px, cj, cj, cj);
+    push_tri_c(buf, j0, j2, j3, px, cj, cj, cj);
+    push_tri_c(buf, i0, i2, i1, nx, ci, ci, ci);
+    push_tri_c(buf, i0, i3, i2, nx, ci, ci, ci);
 
     // Sides, one per perimeter edge (outward normal in brackets):
-    //   0→1 (+z), 1→2 (−y), 2→3 (−z), 3→0 (+y).
-    push_quad(buf, i0, i1, j1, j0, pz, colour);
-    push_quad(buf, i1, i2, j2, j1, ny, colour);
-    push_quad(buf, i2, i3, j3, j2, nz, colour);
-    push_quad(buf, i3, i0, j0, j3, py, colour);
+    //   0→1 (+z), 1→2 (−y), 2→3 (−z), 3→0 (+y).  The `i` corners carry `ci`
+    // and the `j` corners `cj`, giving a linear gradient along the member.
+    push_quad_c(buf, i0, i1, j1, j0, pz, ci, ci, cj, cj);
+    push_quad_c(buf, i1, i2, j2, j1, ny, ci, ci, cj, cj);
+    push_quad_c(buf, i2, i3, j3, j2, nz, ci, ci, cj, cj);
+    push_quad_c(buf, i3, i0, j0, j3, py, ci, ci, cj, cj);
 }
 
 /// Append a low-poly (icosahedron) shaded sphere of radius `r`.
@@ -564,6 +965,360 @@ fn push_sphere(buf: &mut Vec<f32>, center: [f64; 3], r: f64, colour: [f32; 4]) {
             let p = [center[0] + r * d[0], center[1] + r * d[1], center[2] + r * d[2]];
             push_vertex(buf, p, d, colour);
         }
+    }
+}
+
+// ── 3-D result-symbol builders (Phase P3) ───────────────────────────────
+//
+// All of these emit the same interleaved `pos + normal + colour` vertices as
+// the member prisms / node spheres, so they ride the existing shaded,
+// depth-tested, back-face-culled solids pass (or the unshaded line pass for
+// line triads).  Faces are wound CCW as seen from outside, matching the
+// `GL_CULL_FACE` / `GL_BACK` / `CCW` state used by the renderer.
+
+/// An opaque RGBA colour from an 8-bit RGB triple.
+fn rgb(c: [u8; 3]) -> [f32; 4] {
+    [
+        c[0] as f32 / 255.0,
+        c[1] as f32 / 255.0,
+        c[2] as f32 / 255.0,
+        1.0,
+    ]
+}
+
+/// Displacement-contour colour at normalised magnitude `t ∈ [0, 1]`.
+///
+/// Delegates to [`viewport_poc::display::magnitude_color`] so the GPU
+/// member colouring and the painter legend agree exactly.
+fn contour_colour(t: f64) -> [f32; 4] {
+    rgb(magnitude_color(t))
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn len3(a: [f64; 3]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+/// Outward (well, `(b−a)×(c−a)`) unit normal of a triangle, or zero for a
+/// degenerate triangle.  Used so swept solids always get a correct flat normal
+/// regardless of how the frame twisted.
+fn tri_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    normalize3(cross3(sub3(b, a), sub3(c, a)))
+}
+
+/// A right-handed frame `(u, v)` with `u × v = t`, where `t` is the unit
+/// axis.  Used to lay out round cross-sections (cones, tubes, moment arcs).
+fn frame_for_axis(t: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let t = normalize3(t);
+    let reference = if t[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let v = normalize3(cross3(t, reference));
+    let u = cross3(v, t);
+    (u, v)
+}
+
+/// Append a cone with its apex at `apex` and a circular base (radius `radius`)
+/// centred at `base_center`.  Side triangles plus a base cap, all CCW outward.
+fn push_cone(
+    buf: &mut Vec<f32>,
+    apex: [f64; 3],
+    base_center: [f64; 3],
+    radius: f64,
+    sides: usize,
+    colour: [f32; 4],
+) {
+    let axis = sub3(apex, base_center);
+    let h = len3(axis);
+    if !h.is_finite() || h <= 1e-12 || !(radius > 0.0) || !radius.is_finite() {
+        return;
+    }
+    let t = scale3(axis, 1.0 / h);
+    let (u, v) = frame_for_axis(t);
+    let n = sides.max(3);
+    let ring = |k: usize| -> [f64; 3] {
+        let a = std::f64::consts::TAU * k as f64 / n as f64;
+        let (s, c) = a.sin_cos();
+        add3(base_center, add3(scale3(u, radius * c), scale3(v, radius * s)))
+    };
+    for k in 0..n {
+        let p0 = ring(k);
+        let p1 = ring(k + 1);
+        // p0 → p1 → apex is CCW outward (derived from (b−a)×(c−a)).
+        push_tri(buf, p0, p1, apex, tri_normal(p0, p1, apex), colour);
+    }
+    for k in 0..n {
+        let p0 = ring(k);
+        let p1 = ring(k + 1);
+        // Base cap faces away from the apex.
+        push_tri(
+            buf,
+            base_center,
+            p1,
+            p0,
+            tri_normal(base_center, p1, p0),
+            colour,
+        );
+    }
+}
+
+/// Circular cross-section of `sides` points (radius `r`), CCW in the
+/// `(u, v)` plane of a sweep frame.
+fn circle_section(sides: usize, r: f64) -> Vec<[f64; 2]> {
+    let n = sides.max(3);
+    (0..n)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            [r * a.cos(), r * a.sin()]
+        })
+        .collect()
+}
+
+/// Rectangular cross-section `±hy × ±hz`, CCW in the `(u, v)` plane.
+fn rect_section(hy: f64, hz: f64) -> [[f64; 2]; 4] {
+    [[-hy, -hz], [hy, -hz], [hy, hz], [-hy, hz]]
+}
+
+/// Sweep a flat, CCW cross-section (given as local `(u, v)` offsets) along a
+/// world-space polyline, producing a closed solid.
+///
+/// Frames are propagated by projecting the previous `u` onto the plane
+/// perpendicular to the new tangent (rotation-minimising frames), so swept
+/// solids don't flip or twist wildly.  Caps are added at both ends when `cap`.
+/// Returns nothing for a degenerate polyline.
+fn push_sweep(
+    buf: &mut Vec<f32>,
+    pts: &[[f64; 3]],
+    section: &[[f64; 2]],
+    colour: [f32; 4],
+    cap: bool,
+) {
+    let m = pts.len();
+    if m < 2 || section.len() < 3 {
+        return;
+    }
+    // Segment tangents (averaged at interior points).
+    let mut tangents = Vec::with_capacity(m);
+    for i in 0..m {
+        let d = if i == 0 {
+            sub3(pts[1], pts[0])
+        } else if i == m - 1 {
+            sub3(pts[m - 1], pts[m - 2])
+        } else {
+            sub3(pts[i + 1], pts[i - 1])
+        };
+        let t = normalize3(d);
+        if t == [0.0, 0.0, 0.0] {
+            return; // degenerate / coincident samples
+        }
+        tangents.push(t);
+    }
+    // Rotation-minimising frames by parallel transport.
+    let mut frames: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(m);
+    let mut prev = frame_for_axis(tangents[0]).0;
+    frames.push((prev, cross3(tangents[0], prev)));
+    for i in 1..m {
+        let t = tangents[i];
+        let projected = sub3(prev, scale3(t, dot3(prev, t)));
+        let l = len3(projected);
+        let u = if l > 1e-9 {
+            scale3(projected, 1.0 / l)
+        } else {
+            frame_for_axis(t).0
+        };
+        frames.push((u, cross3(t, u)));
+        prev = u;
+    }
+    // Ring vertex in (u, v).
+    let ring = |i: usize, s: [f64; 2]| -> [f64; 3] {
+        let (u, v) = frames[i];
+        add3(pts[i], add3(scale3(u, s[0]), scale3(v, s[1])))
+    };
+    let poly = section.len();
+    for i in 0..m - 1 {
+        for k in 0..poly {
+            let k1 = (k + 1) % poly;
+            let a = ring(i, section[k]);
+            let b = ring(i, section[k1]);
+            let c = ring(i + 1, section[k1]);
+            let d = ring(i + 1, section[k]);
+            push_quad(buf, a, b, c, d, tri_normal(a, b, c), colour);
+        }
+    }
+    if cap {
+        for k in 0..poly {
+            let k1 = (k + 1) % poly;
+            let a = ring(0, section[k]);
+            let b = ring(0, section[k1]);
+            push_tri(buf, pts[0], b, a, tri_normal(pts[0], b, a), colour);
+            let d = ring(m - 1, section[k]);
+            let e = ring(m - 1, section[k1]);
+            push_tri(buf, pts[m - 1], d, e, tri_normal(pts[m - 1], d, e), colour);
+        }
+    }
+}
+
+/// A round tube of radius `r` along a polyline.
+fn push_tube(buf: &mut Vec<f32>, pts: &[[f64; 3]], r: f64, sides: usize, colour: [f32; 4], cap: bool) {
+    if !(r > 0.0) || !r.is_finite() {
+        return;
+    }
+    let section = circle_section(sides, r);
+    push_sweep(buf, pts, &section, colour, cap);
+}
+
+/// A straight cylinder between `a` and `b`.
+fn push_cylinder(buf: &mut Vec<f32>, a: [f64; 3], b: [f64; 3], r: f64, sides: usize, colour: [f32; 4]) {
+    push_tube(buf, &[a, b], r, sides, colour, true);
+}
+
+/// An arrow: a cylindrical shaft from `base` along `dir` with a conical head.
+///
+/// `length` is the full world-space length; `head_len` / `head_r` size the
+/// cone.  No-op for a degenerate direction / length.
+#[allow(clippy::too_many_arguments)]
+fn push_arrow(
+    buf: &mut Vec<f32>,
+    base: [f64; 3],
+    dir: [f64; 3],
+    length: f64,
+    shaft_r: f64,
+    head_len: f64,
+    head_r: f64,
+    colour: [f32; 4],
+) {
+    let d = normalize3(dir);
+    if d == [0.0, 0.0, 0.0] || !length.is_finite() || length <= 1e-12 {
+        return;
+    }
+    if !base.iter().all(|v| v.is_finite()) || !shaft_r.is_finite() || !head_r.is_finite() {
+        return;
+    }
+    let head_len = head_len.clamp(1e-9, length * 0.9);
+    let tip = add3(base, scale3(d, length));
+    let neck = add3(base, scale3(d, length - head_len));
+    let sr = shaft_r.max(1e-9);
+    push_cylinder(buf, base, neck, sr, TUBE_SIDES, colour);
+    push_cone(buf, tip, neck, head_r.max(sr), CONE_SIDES, colour);
+}
+
+/// A moment glyph: a partial ring (arc) of tube around `axis` centred at
+/// `center`, capped with a small cone to indicate the rotation sense.
+fn push_moment_arc(
+    buf: &mut Vec<f32>,
+    center: [f64; 3],
+    axis: [f64; 3],
+    radius: f64,
+    tube_r: f64,
+    colour: [f32; 4],
+) {
+    let a = normalize3(axis);
+    if a == [0.0, 0.0, 0.0]
+        || !(radius > 0.0)
+        || !radius.is_finite()
+        || !(tube_r > 0.0)
+        || !center.iter().all(|v| v.is_finite())
+    {
+        return;
+    }
+    let (u, v) = frame_for_axis(a);
+    let n = 24;
+    let span = std::f64::consts::TAU * 0.8;
+    let mut pts = Vec::with_capacity(n + 1);
+    for k in 0..=n {
+        let th = span * k as f64 / n as f64;
+        let (s, c) = th.sin_cos();
+        pts.push(add3(
+            center,
+            add3(scale3(u, radius * c), scale3(v, radius * s)),
+        ));
+    }
+    push_tube(buf, &pts, tube_r, 6, colour, false);
+    let last = pts[n];
+    let tan = normalize3(sub3(last, pts[n - 1]));
+    if tan != [0.0, 0.0, 0.0] {
+        push_cone(
+            buf,
+            add3(last, scale3(tan, tube_r * 4.0)),
+            last,
+            tube_r * 2.2,
+            8,
+            colour,
+        );
+    }
+}
+
+/// A support glyph at `pos`, sized by `s`:
+/// * fixed → a flat hatched block (thin slab + diagonal hatch lines),
+/// * pinned → a cone (apex at the node, base below),
+/// * otherwise (custom / free) → a small sphere.
+fn push_support(
+    solids: &mut Vec<f32>,
+    lines: &mut Vec<f32>,
+    pos: [f64; 3],
+    spec: SupportSpec,
+    s: f64,
+) {
+    let colour = rgba(SUPPORT_C);
+    let s = s.max(1e-9);
+    if spec.is_fixed() {
+        let half_y = (s * 0.35).max(1e-9);
+        // A thin slab aligned to the world axes (x–z plane, thin along y).
+        push_prism(
+            solids,
+            [pos[0], pos[1] - half_y, pos[2]],
+            [pos[0], pos[1] + half_y, pos[2]],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            s,
+            s,
+            colour,
+        );
+        // Diagonal hatch lines across the underside.
+        let y = pos[1] - half_y;
+        let n = 4;
+        let step = 2.0 * s / n as f64;
+        for k in 0..=n {
+            let off = -s + step * k as f64;
+            push_line(
+                lines,
+                [pos[0] + off, y, pos[2] - s],
+                [pos[0] - s, y, pos[2] + off],
+                colour,
+            );
+        }
+    } else if spec.is_pinned() {
+        let apex = pos;
+        let base = [pos[0], pos[1] - 2.0 * s, pos[2]];
+        push_cone(solids, apex, base, s, CONE_SIDES, colour);
+    } else {
+        push_sphere(solids, pos, (s * 0.8).max(1e-9), colour);
+    }
+}
+
+/// A 3-D line triad `origin → origin + len·axis` for each local axis.
+fn push_triad(lines: &mut Vec<f32>, origin: [f64; 3], xh: [f64; 3], yh: [f64; 3], zh: [f64; 3], len: f64) {
+    for (axis, col) in [(xh, AXIS_X), (yh, AXIS_Y), (zh, AXIS_Z)] {
+        let end = add3(origin, scale3(axis, len));
+        push_line(lines, origin, end, rgba(col));
     }
 }
 
@@ -1202,7 +1957,24 @@ mod tests {
         let a = m.add_node(0.0, 0.0, 0.0).unwrap();
         let b = m.add_node(3.0, 0.0, 0.0).unwrap();
         m.add_member(a, b).unwrap();
-        m.set_nodal_load(b, NodalLoadSpec::new(0.0, -1.0, 0.0, 0.0, 0.0, 0.0))
+        ViewportScene::from_edit_model(&m)
+    }
+
+    /// A scene carrying a nodal force + moment and a member uniform + point
+    /// load, plus a fixed support, to exercise the 3-D symbol builders.
+    fn scene_with_loads() -> ViewportScene {
+        use viewport_poc::edit_model::{MemberPointLoad3D, MemberUniformLoad3D};
+
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mem = m.add_member(a, b).unwrap();
+        m.fix_node(a).unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(0.0, -1.0, 0.0, 0.0, 0.0, 1.0))
+            .unwrap();
+        m.set_member_uniform_load(mem, MemberUniformLoad3D::new(0.0, -1.0, 0.0))
+            .unwrap();
+        m.add_member_point_load(mem, MemberPointLoad3D::new(0.5, 0.0, -1.0, 0.0))
             .unwrap();
         ViewportScene::from_edit_model(&m)
     }
@@ -1219,7 +1991,7 @@ mod tests {
         let cam = Camera3D::fit([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, true, 4.0 / 3.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 4.0 / 3.0, 1.0);
         // Axes + grid lines.
         assert_eq!(geom.line_batches.len(), 2);
         // One prism + two node spheres worth of triangles.
@@ -1242,7 +2014,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.mode = ResultViewMode::Deformed;
         d.show_undeformed = false;
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, false, 1.0, 1.0);
         // No members/nodes; grid and axes remain (both enabled by default).
         assert!(geom.solids.is_empty());
         assert_eq!(geom.line_batches.len(), 2);
@@ -1254,7 +2026,7 @@ mod tests {
         let s = scene();
         let d = ResultDisplayState::default();
         let sel = SelectionState::Member(s.member_ids[0]);
-        let geom = GlGeometry::build(&cam, &s, &d, sel, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, sel, None, true, 1.0, 1.0);
         assert!(contains_colour(&geom.solids, rgba(SELECTED_C)));
         // The plain member colour is gone; nodes keep their own colour.
         assert!(!contains_colour(&geom.solids, rgba(MEMBER_C)));
@@ -1268,7 +2040,7 @@ mod tests {
         let _ = m.add_node(0.0, 0.0, 0.0).unwrap();
         let s = ViewportScene::from_edit_model(&m);
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
         assert_eq!(geom.line_batches.len(), 2);
         assert_eq!(geom.solids.len(), SPHERE_VERTS * FLOATS_PER_VERTEX);
     }
@@ -1326,7 +2098,7 @@ mod tests {
         let cam = Camera3D::default();
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, false, 1.0, 1.0);
         let grid = geom
             .line_batches
             .iter()
@@ -1391,5 +2163,208 @@ mod tests {
     fn mode_labels() {
         assert_eq!(RenderMode::Software.label(), "Software");
         assert_eq!(RenderMode::Gpu.label(), "GPU");
+    }
+
+    // ── Phase P3: 3-D result-symbol builders ────────────────────────────
+
+    /// Number of vertices a swept solid emits: `6·p·m` (side quads plus two
+    /// capped ends) for `p` section points over `m` polyline points.
+    fn sweep_verts(section_pts: usize, polyline_pts: usize) -> usize {
+        6 * section_pts * polyline_pts
+    }
+
+    #[test]
+    fn tube_vertex_count() {
+        let mut buf = Vec::new();
+        push_tube(
+            &mut buf,
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            0.05,
+            8,
+            [1.0, 1.0, 1.0, 1.0],
+            true,
+        );
+        assert_eq!(buf.len(), sweep_verts(8, 2) * FLOATS_PER_VERTEX);
+        assert!(buf.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn sweep_rect_vertex_count() {
+        let mut buf = Vec::new();
+        let pts = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.3, 0.0]];
+        let section = rect_section(0.1, 0.05);
+        push_sweep(&mut buf, &pts, &section, [1.0, 0.0, 0.0, 1.0], true);
+        assert_eq!(buf.len(), sweep_verts(4, 3) * FLOATS_PER_VERTEX);
+        assert!(buf.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn arrow_is_a_shaft_plus_a_cone() {
+        let mut buf = Vec::new();
+        push_arrow(
+            &mut buf,
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            1.0,
+            0.02,
+            0.3,
+            0.06,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        // Shaft = capped 2-point tube; head = cone.
+        let expected = sweep_verts(TUBE_SIDES, 2) + 6 * CONE_SIDES;
+        assert_eq!(buf.len(), expected * FLOATS_PER_VERTEX);
+        assert!(buf.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn degenerate_arrow_and_cone_emit_nothing() {
+        let mut buf = Vec::new();
+        push_arrow(&mut buf, [0.0; 3], [0.0; 3], 1.0, 0.02, 0.3, 0.06, [1.0; 4]);
+        push_cone(&mut buf, [0.0; 3], [0.0; 3], 0.1, 8, [1.0; 4]);
+        assert!(buf.is_empty());
+    }
+
+    /// The cone's side faces must be wound outward: for an apex above the base
+    /// at the origin, the first side normal points outwards (+x) and upwards.
+    #[test]
+    fn cone_side_normals_point_outward() {
+        let mut buf = Vec::new();
+        push_cone(
+            &mut buf,
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            0.5,
+            6,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        assert_eq!(buf.len(), (6 * 6) * FLOATS_PER_VERTEX);
+        // Normal attribute of the first vertex.
+        assert!(buf[3] > 0.0, "expected outward +x normal, got {}", buf[3]);
+        assert!(buf[4] > 0.0, "expected upward +y normal, got {}", buf[4]);
+    }
+
+    #[test]
+    fn moment_arc_builds_finite_geometry() {
+        let mut buf = Vec::new();
+        push_moment_arc(&mut buf, [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], 0.4, 0.05, [1.0; 4]);
+        assert!(!buf.is_empty());
+        assert!(buf.iter().all(|v| v.is_finite()));
+    }
+
+    /// The contour ramp must be identical to the painter's `magnitude_color`
+    /// so the GPU members and the legend agree.
+    #[test]
+    fn contour_colour_matches_display_ramp() {
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(contour_colour(t), rgb(magnitude_color(t)), "t = {t}");
+        }
+        // Endpoints: blue → red per the documented ramp.
+        assert_eq!(&contour_colour(0.0)[..3], &[80.0 / 255.0, 1.0, 1.0]);
+        assert_eq!(&contour_colour(1.0)[..3], &[1.0, 80.0 / 255.0, 80.0 / 255.0]);
+    }
+
+    /// A scene with loads and a fixed support emits solid symbols (arrow,
+    /// moment arc, support block) and depth-tested hatch lines.
+    #[test]
+    fn loads_and_supports_emit_solid_symbols() {
+        let cam = Camera3D::fit([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
+        let s = scene_with_loads();
+        let d = ResultDisplayState::default();
+        let geom = GlGeometry::build(
+            &cam,
+            &s,
+            &d,
+            SelectionState::None,
+            None,
+            true,
+            4.0 / 3.0,
+            1.0,
+        );
+        // Axes + support hatching + grid.
+        assert_eq!(geom.line_batches.len(), 3);
+        assert!(geom.solids.iter().all(|v| v.is_finite()));
+        assert!(contains_colour(&geom.solids, rgba(SUPPORT_C)));
+        assert!(contains_colour(&geom.solids, rgba(LOAD_F_C)));
+        assert!(contains_colour(&geom.solids, rgba(LOAD_M_C)));
+        assert!(contains_colour(&geom.solids, rgba(MEMBER_LOAD_C)));
+    }
+
+    /// A solved single-member cantilever, used to exercise the result-shape
+    /// builders (deformed / contour / reactions / end forces / local axes).
+    fn solved_scene() -> (ViewportScene, FrameAnalysisResult3D) {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        m.add_member(a, b).unwrap();
+        m.fix_node(a).unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(0.0, -1000.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        let scene = ViewportScene::from_edit_model(&m);
+        let res = m.to_frame_model().unwrap().solve().unwrap();
+        (scene, res)
+    }
+
+    #[test]
+    fn deformed_mode_emits_swept_solids() {
+        let cam = Camera3D::default();
+        let (s, res) = solved_scene();
+        let mut d = ResultDisplayState::default();
+        d.mode = ResultViewMode::Deformed;
+        d.show_undeformed = false;
+        let geom = GlGeometry::build(
+            &cam,
+            &s,
+            &d,
+            SelectionState::None,
+            Some(&res),
+            false,
+            1.0,
+            1.0,
+        );
+        assert!(!geom.solids.is_empty());
+        assert!(geom.solids.iter().all(|v| v.is_finite()));
+        assert!(contains_colour(&geom.solids, rgba(DEF_MEMBER)));
+        assert!(contains_colour(&geom.solids, rgba(DEF_NODE)));
+        assert_eq!(geom.line_batches.len(), 2); // axes + grid only
+    }
+
+    #[test]
+    fn displacement_mode_contours_member_prisms() {
+        let cam = Camera3D::default();
+        let (s, res) = solved_scene();
+        let mut d = ResultDisplayState::default();
+        d.mode = ResultViewMode::Displacement;
+        let geom = GlGeometry::build(
+            &cam,
+            &s,
+            &d,
+            SelectionState::None,
+            Some(&res),
+            true,
+            1.0,
+            1.0,
+        );
+        // The plain member colour is replaced by the contour ramp; the fixed
+        // end has zero displacement, so its end matches the ramp's blue stop.
+        assert!(!contains_colour(&geom.solids, rgba(MEMBER_C)));
+        assert!(contains_colour(&geom.solids, contour_colour(0.0)));
+        assert!(geom.solids.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn diagrams_and_local_axes_emit_depth_tested_lines() {
+        let cam = Camera3D::default();
+        let (s, res) = solved_scene();
+        let mut d = ResultDisplayState::default();
+        d.show_diagrams = true;
+        let sel = SelectionState::Member(s.member_ids[0]);
+        let geom = GlGeometry::build(&cam, &s, &d, sel, Some(&res), true, 1.0, 1.0);
+        // axes + overlay (local triad + diagram strips) + grid.
+        assert_eq!(geom.line_batches.len(), 3);
+        let overlay = &geom.line_batches[1];
+        assert!(!overlay.blend);
+        assert!(overlay.verts.len() > 6 * FLOATS_PER_VERTEX);
+        assert!(overlay.verts.iter().all(|v| v.is_finite()));
     }
 }
