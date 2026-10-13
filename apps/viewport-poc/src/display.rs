@@ -58,6 +58,210 @@ impl ResultViewMode {
     }
 }
 
+// ── Section cut plane (Phase P5) ──────────────────────────────────────
+
+/// Primary axis of the section-cut plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CutAxis {
+    #[default]
+    X,
+    Y,
+    Z,
+}
+
+impl CutAxis {
+    /// All axes in display order.
+    pub const ALL: [CutAxis; 3] = [CutAxis::X, CutAxis::Y, CutAxis::Z];
+
+    /// Short label for GUI buttons.
+    pub const fn label(self) -> &'static str {
+        match self {
+            CutAxis::X => "X",
+            CutAxis::Y => "Y",
+            CutAxis::Z => "Z",
+        }
+    }
+
+    /// Outward unit normal (world) for this axis.
+    pub const fn normal(self) -> [f64; 3] {
+        match self {
+            CutAxis::X => [1.0, 0.0, 0.0],
+            CutAxis::Y => [0.0, 1.0, 0.0],
+            CutAxis::Z => [0.0, 0.0, 1.0],
+        }
+    }
+}
+
+/// **View-only** section-cut plane (Phase P5).  Never serialized — it lives
+/// alongside the other display toggles and is rebuilt from defaults on load.
+///
+/// # Representation
+///
+/// The plane is `dot(n, p) = offset` with a **unit** normal `n` (from
+/// [`axis`](Self::axis), unless an explicit [`normal`](Self::normal) is set).
+/// The signed distance of a point is `dot(n, p) − offset`; the side with a
+/// positive distance is kept, unless [`flip`](Self::flip) reverses it.
+///
+/// `offset` is measured along `n` in **model units** and is clamped to the
+/// scene's projection range (see [`sync_bounds`](Self::sync_bounds)) so the cut
+/// works at any model scale.  [`positioned`](Self::positioned) tracks whether
+/// the offset has been placed for the current axis/scene; while it is `false`
+/// the offset re-centres on the scene the next time it is synced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SectionCut {
+    /// Whether the cut is active.  When `false` nothing is clipped.
+    pub enabled: bool,
+    /// Primary axis (used unless [`normal`](Self::normal) is `Some`).
+    pub axis: CutAxis,
+    /// Optional arbitrary plane normal (world).  `None` = derive from `axis`.
+    pub normal: Option<[f64; 3]>,
+    /// Plane offset along the (unit) normal, in model units.
+    pub offset: f64,
+    /// Reverse the kept half-space (keep the opposite side of the plane).
+    pub flip: bool,
+    /// Has `offset` been placed for the current axis/scene?  Reset to re-centre.
+    pub positioned: bool,
+}
+
+impl Default for SectionCut {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            axis: CutAxis::X,
+            normal: None,
+            offset: 0.0,
+            flip: false,
+            positioned: false,
+        }
+    }
+}
+
+impl SectionCut {
+    /// Unit plane normal: the axis normal, or the normalised custom normal.
+    /// Returns `None` for a zero / non-finite custom normal.
+    pub fn unit_normal(&self) -> Option<[f64; 3]> {
+        match self.normal {
+            None => Some(self.axis.normal()),
+            Some(n) => {
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if len.is_finite() && len > 1e-12 {
+                    Some([n[0] / len, n[1] / len, n[2] / len])
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Signed distance of `p` to the plane (`> 0` on the kept side when not
+    /// flipped).  `None` when the normal is degenerate.
+    pub fn signed_distance(&self, p: [f64; 3]) -> Option<f64> {
+        let n = self.unit_normal()?;
+        Some(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - self.offset)
+    }
+
+    /// The distance written to `gl_ClipDistance[0]`: `> 0` means keep.  `flip`
+    /// reverses the sign.  `None` when the normal is degenerate.
+    pub fn clip_distance(&self, p: [f64; 3]) -> Option<f64> {
+        let d = self.signed_distance(p)?;
+        Some(if self.flip { -d } else { d })
+    }
+
+    /// `true` if `p` is on the kept side.  A disabled or degenerate cut keeps
+    /// everything.
+    pub fn keeps(&self, p: [f64; 3]) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        match self.clip_distance(p) {
+            Some(d) => d >= 0.0,
+            None => true,
+        }
+    }
+
+    /// Clip a segment against the kept half-space.
+    ///
+    /// Returns the (possibly shortened) endpoints, or `None` when the whole
+    /// segment lies outside.  A disabled / degenerate cut returns the segment
+    /// unchanged.
+    pub fn clip_segment(&self, a: [f64; 3], b: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+        if !self.enabled {
+            return Some((a, b));
+        }
+        let (Some(da), Some(db)) = (self.clip_distance(a), self.clip_distance(b)) else {
+            return Some((a, b));
+        };
+        let inside_a = da >= 0.0;
+        let inside_b = db >= 0.0;
+        if inside_a && inside_b {
+            return Some((a, b));
+        }
+        if !inside_a && !inside_b {
+            return None;
+        }
+        // Exactly one endpoint is kept: move the outside endpoint to the
+        // crossing point (linear interpolation of the signed distance).
+        let denom = da - db;
+        if !denom.is_finite() || denom.abs() < 1e-30 {
+            return Some((a, b)); // parallel / on-plane — keep as-is
+        }
+        let t = (da / denom).clamp(0.0, 1.0);
+        let cross = [
+            a[0] + t * (b[0] - a[0]),
+            a[1] + t * (b[1] - a[1]),
+            a[2] + t * (b[2] - a[2]),
+        ];
+        if inside_a {
+            Some((a, cross))
+        } else {
+            Some((cross, b))
+        }
+    }
+
+    /// Place / clamp the offset against the scene projection range `[min, max]`
+    /// (the span of `dot(n, p)` over the model, from
+    /// [`ViewportScene::projection_range`](crate::scene::ViewportScene::projection_range)).
+    ///
+    /// While [`positioned`](Self::positioned) is `false` the offset is centred
+    /// at the range midpoint; afterwards it is clamped into the range so it
+    /// tracks model changes without flying off.  A non-finite range centres at
+    /// `0`.
+    pub fn sync_bounds(&mut self, min: f64, max: f64) {
+        let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+        let (lo, hi) = if lo.is_finite() && hi.is_finite() {
+            (lo, hi)
+        } else {
+            (0.0, 0.0)
+        };
+        if !self.positioned {
+            self.offset = (lo + hi) * 0.5;
+            self.positioned = true;
+        } else {
+            self.offset = self.offset.clamp(lo, hi);
+        }
+    }
+
+    /// Force the plane to re-centre on the scene at the next
+    /// [`sync_bounds`](Self::sync_bounds).
+    pub fn recenter(&mut self) {
+        self.positioned = false;
+    }
+
+    /// The plane as `[n.x, n.y, n.z, offset]`, already flip-applied so a
+    /// positive `gl_ClipDistance` means "keep".  `None` when the normal is
+    /// degenerate (the caller then leaves clipping off).
+    pub fn gpu_plane(&self) -> Option<[f32; 4]> {
+        let n = self.unit_normal()?;
+        let s = if self.flip { -1.0 } else { 1.0 };
+        Some([
+            (s * n[0]) as f32,
+            (s * n[1]) as f32,
+            (s * n[2]) as f32,
+            (s * self.offset) as f32,
+        ])
+    }
+}
+
 // ── Display state ─────────────────────────────────────────────────────
 
 /// Viewport display state: primary mode + independent overlays.
@@ -102,6 +306,8 @@ pub struct ResultDisplayState {
     pub hidden_nodes: HashSet<NodeId>,
     /// **View-only** hidden member IDs (see [`hidden_nodes`](Self::hidden_nodes)).
     pub hidden_members: HashSet<MemberId>,
+    /// **View-only** section-cut plane (Phase P5).  Never serialized.
+    pub section_cut: SectionCut,
 }
 
 impl Default for ResultDisplayState {
@@ -122,6 +328,7 @@ impl Default for ResultDisplayState {
             diagram_all_members: false,
             hidden_nodes: HashSet::new(),
             hidden_members: HashSet::new(),
+            section_cut: SectionCut::default(),
         }
     }
 }
@@ -593,5 +800,158 @@ mod tests {
     fn fmt_eng_value() {
         assert_eq!(fmt_eng(1.23456e-3), "1.2346e-3");
         assert_eq!(fmt_eng(-5.0), "-5.0000e0");
+    }
+
+    // ── Section cut plane ───────────────────────────────────────────────
+
+    fn cut_x(offset: f64) -> SectionCut {
+        SectionCut {
+            enabled: true,
+            axis: CutAxis::X,
+            offset,
+            ..SectionCut::default()
+        }
+    }
+
+    #[test]
+    fn cut_default_is_disabled() {
+        let c = SectionCut::default();
+        assert!(!c.enabled);
+        assert_eq!(c.axis, CutAxis::X);
+        assert!(c.normal.is_none());
+        assert_eq!(c.offset, 0.0);
+        assert!(!c.flip);
+        assert!(!c.positioned);
+        // A disabled cut keeps everything and never clips a segment.
+        assert!(c.keeps([-100.0, 0.0, 0.0]));
+        assert_eq!(
+            c.clip_segment([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            Some(([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]))
+        );
+    }
+
+    #[test]
+    fn cut_axis_labels_and_normals() {
+        assert_eq!(CutAxis::ALL.len(), 3);
+        assert_eq!(CutAxis::X.label(), "X");
+        assert_eq!(CutAxis::Y.label(), "Y");
+        assert_eq!(CutAxis::Z.label(), "Z");
+        assert_eq!(CutAxis::X.normal(), [1.0, 0.0, 0.0]);
+        assert_eq!(CutAxis::Y.normal(), [0.0, 1.0, 0.0]);
+        assert_eq!(CutAxis::Z.normal(), [0.0, 0.0, 1.0]);
+        assert_eq!(CutAxis::default(), CutAxis::X);
+    }
+
+    #[test]
+    fn cut_signed_distance_and_keeps() {
+        let c = cut_x(2.0);
+        assert_eq!(c.signed_distance([5.0, 0.0, 0.0]), Some(3.0));
+        assert_eq!(c.signed_distance([0.0, 0.0, 0.0]), Some(-2.0));
+        assert!(c.keeps([5.0, 0.0, 0.0]));
+        assert!(!c.keeps([0.0, 0.0, 0.0]));
+        // On-plane is kept.
+        assert!(c.keeps([2.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn cut_flip_reverses_kept_side() {
+        let mut c = cut_x(2.0);
+        c.flip = true;
+        assert!(c.keeps([0.0, 0.0, 0.0]));
+        assert!(!c.keeps([5.0, 0.0, 0.0]));
+        // The GPU plane is pre-flipped so a positive distance still means keep.
+        let p = c.gpu_plane().unwrap();
+        assert_eq!(&p[..3], &[-1.0, 0.0, 0.0]);
+        assert_eq!(p[3], -2.0);
+    }
+
+    #[test]
+    fn cut_custom_normal_is_normalised() {
+        let c = SectionCut {
+            enabled: true,
+            normal: Some([0.0, 0.0, 10.0]),
+            offset: 1.0,
+            ..SectionCut::default()
+        };
+        let n = c.unit_normal().unwrap();
+        assert!((n[2] - 1.0).abs() < 1e-15);
+        assert!(c.keeps([0.0, 0.0, 2.0]));
+        assert!(!c.keeps([0.0, 0.0, 0.0]));
+        // Degenerate custom normal disables clipping entirely.
+        let bad = SectionCut {
+            enabled: true,
+            normal: Some([0.0, 0.0, 0.0]),
+            ..SectionCut::default()
+        };
+        assert!(bad.unit_normal().is_none());
+        assert!(bad.keeps([1.0, 2.0, 3.0]));
+        assert!(bad.gpu_plane().is_none());
+    }
+
+    #[test]
+    fn cut_clip_segment_cases() {
+        let c = cut_x(0.0);
+        // Both inside → unchanged.
+        assert_eq!(
+            c.clip_segment([1.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+            Some(([1.0, 0.0, 0.0], [2.0, 0.0, 0.0]))
+        );
+        // Both outside → clipped away.
+        assert_eq!(c.clip_segment([-2.0, 0.0, 0.0], [-1.0, 0.0, 0.0]), None);
+        // Straddling: the outside end is moved to the crossing point.
+        let (a, b) = c.clip_segment([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+        assert!((a[0]).abs() < 1e-15, "crossing x = {}", a[0]);
+        assert_eq!(b, [1.0, 0.0, 0.0]);
+        let (a2, b2) = c.clip_segment([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(a2, [1.0, 0.0, 0.0]);
+        assert!((b2[0]).abs() < 1e-15);
+    }
+
+    #[test]
+    fn cut_sync_bounds_centres_then_clamps() {
+        let mut c = SectionCut {
+            enabled: true,
+            ..SectionCut::default()
+        };
+        // First sync centres at the midpoint and marks positioned.
+        c.sync_bounds(-4.0, 8.0);
+        assert!((c.offset - 2.0).abs() < 1e-15);
+        assert!(c.positioned);
+        // Further syncs clamp instead of re-centring.
+        c.offset = 100.0;
+        c.sync_bounds(-4.0, 8.0);
+        assert_eq!(c.offset, 8.0);
+        c.offset = -100.0;
+        c.sync_bounds(-4.0, 8.0);
+        assert_eq!(c.offset, -4.0);
+        // recenter() forces the midpoint again.
+        c.recenter();
+        c.sync_bounds(-4.0, 8.0);
+        assert!((c.offset - 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn cut_sync_bounds_handles_degenerate_and_non_finite() {
+        let mut c = SectionCut::default();
+        c.sync_bounds(3.0, 3.0); // flat model along the axis
+        assert!((c.offset - 3.0).abs() < 1e-15);
+        let mut c2 = SectionCut::default();
+        c2.sync_bounds(f64::NAN, f64::INFINITY);
+        assert_eq!(c2.offset, 0.0);
+        // Reversed range is ordered.
+        let mut c3 = SectionCut::default();
+        c3.sync_bounds(8.0, -4.0);
+        assert!((c3.offset - 2.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn display_section_cut_defaults_off_and_resets() {
+        let mut d = ResultDisplayState::default();
+        assert!(!d.section_cut.enabled);
+        d.section_cut.enabled = true;
+        d.section_cut.offset = 42.0;
+        d.reset();
+        assert!(!d.section_cut.enabled);
+        assert_eq!(d.section_cut.offset, 0.0);
     }
 }

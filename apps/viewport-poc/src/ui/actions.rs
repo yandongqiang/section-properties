@@ -11,7 +11,7 @@ use egui;
 use structural_analysis::FrameAnalysisResult3D;
 use viewport_poc::app_state::{AppMessage, Project};
 use viewport_poc::camera::{Camera3D, StandardView};
-use viewport_poc::display::{ResultDisplayState, ResultViewMode};
+use viewport_poc::display::{CutAxis, ResultDisplayState, ResultViewMode};
 use viewport_poc::edit_history::EditHistory;
 use viewport_poc::edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodeId};
 use viewport_poc::scene::ViewportScene;
@@ -184,9 +184,53 @@ impl ViewportApp {
                 let (min, max) = s.bounding_box();
                 self.camera = Camera3D::fit(min, max);
             }
+            // Keep the section-cut offset valid for the new model bounds.
+            self.sync_section_cut();
         } else {
             self.scene = None;
         }
+    }
+
+    // ── Phase P5: section cut ───────────────────────────────────────────
+
+    /// The projection range `[min, max]` the section-cut plane can sweep, or
+    /// `None` when there is no scene / a degenerate normal.
+    pub(crate) fn cut_range(&self) -> Option<(f64, f64)> {
+        let scene = self.scene.as_ref()?;
+        let n = self.display.section_cut.unit_normal()?;
+        Some(scene.projection_range(n))
+    }
+
+    /// Re-centre (first time) or clamp the section-cut offset against the
+    /// current scene bounds so it works at any model scale.  A no-op with no
+    /// scene.
+    pub(crate) fn sync_section_cut(&mut self) {
+        if let Some((lo, hi)) = self.cut_range() {
+            self.display.section_cut.sync_bounds(lo, hi);
+        }
+    }
+
+    /// Switch the section-cut axis (re-centres the offset on the scene).
+    pub(crate) fn set_cut_axis(&mut self, axis: CutAxis) {
+        let cut = &mut self.display.section_cut;
+        cut.axis = axis;
+        cut.normal = None;
+        cut.recenter();
+        self.sync_section_cut();
+    }
+
+    /// Enable / disable the section cut, positioning it on first enable.
+    pub(crate) fn set_cut_enabled(&mut self, on: bool) {
+        self.display.section_cut.enabled = on;
+        if on {
+            self.sync_section_cut();
+        }
+    }
+
+    /// Re-centre the section-cut offset on the scene (`Center on model`).
+    pub(crate) fn recenter_section_cut(&mut self) {
+        self.display.section_cut.recenter();
+        self.sync_section_cut();
     }
 
     /// Fit / zoom-extents: aim the camera at the scene bounding box.
@@ -800,6 +844,10 @@ impl ViewportApp {
             if self.display.is_node_hidden(scene.node_ids[i]) {
                 continue;
             }
+            // Ignore nodes the section cut has removed from the view.
+            if !self.display.section_cut.keeps(pos) {
+                continue;
+            }
             if let Some(p) = self.camera.project(pos, w, h) {
                 let d = (p.x - mouse[0]).hypot(p.y - mouse[1]);
                 if d < THRESH && best_node.map_or(true, |(_, bd)| d < bd) {
@@ -818,10 +866,14 @@ impl ViewportApp {
             let Some(pj) = scene.node_positions.get(nj) else {
                 continue;
             };
-            let Some(ps_i) = self.camera.project(*pi, w, h) else {
+            // Hit-test only the part of the centreline that survives the cut.
+            let Some((ca, cb)) = self.display.section_cut.clip_segment(*pi, *pj) else {
                 continue;
             };
-            let Some(ps_j) = self.camera.project(*pj, w, h) else {
+            let Some(ps_i) = self.camera.project(ca, w, h) else {
+                continue;
+            };
+            let Some(ps_j) = self.camera.project(cb, w, h) else {
                 continue;
             };
             let d = project::point_to_segment_dist_2d(mouse, [ps_i.x, ps_i.y], [ps_j.x, ps_j.y]);

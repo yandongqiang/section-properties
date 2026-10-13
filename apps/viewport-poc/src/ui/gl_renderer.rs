@@ -125,6 +125,10 @@ struct LineBatch {
     width: f32,
     /// Whether this batch is alpha-blended (used by the fading ground grid).
     blend: bool,
+    /// Whether the section-cut clip distance applies to this batch.  Reference
+    /// geometry (grid, global axes) is deliberately **exempt** so it stays a
+    /// stable backdrop; entity / result overlays are clipped.
+    clip: bool,
     verts: Vec<f32>,
 }
 
@@ -142,6 +146,9 @@ pub struct GlGeometry {
     solids: Vec<f32>,
     /// Clear colour (the viewport background).
     clear: [f32; 4],
+    /// Section-cut plane as `[n.x, n.y, n.z, offset]`, pre-flipped so a
+    /// positive `gl_ClipDistance[0]` means "keep".  `None` = no cut.
+    clip_plane: Option<[f32; 4]>,
 }
 
 /// Persistent GL resources plus the current render mode and options.
@@ -343,20 +350,35 @@ impl GlGeometry {
         let mut grid = LineBatch {
             width: 1.0 * ppp,
             blend: true,
+            clip: false,
             verts: Vec::new(),
         };
         let mut axes = LineBatch {
             width: 2.5 * ppp,
             blend: false,
+            clip: false,
             verts: Vec::new(),
         };
         // Depth-tested 3-D overlay lines (local triads, support hatching).
         let mut overlay = LineBatch {
             width: 2.0 * ppp,
             blend: false,
+            clip: true,
             verts: Vec::new(),
         };
         let mut solids: Vec<f32> = Vec::new();
+
+        // ── Section cut (Phase P5) ──
+        // A single user clip plane, applied via `gl_ClipDistance[0]`.  The
+        // grid and global axes are deliberately exempt (see their batch's
+        // `clip` flag); the solids pass — members, nodes, deformed/contour
+        // geometry, load/support/reaction/end-force glyphs — and the overlay
+        // lines are clipped so nothing floats in front of the cut.
+        let clip_plane = if display.section_cut.enabled {
+            display.section_cut.gpu_plane()
+        } else {
+            None
+        };
 
         // ── Ground grid (y = 0) with distance fade ──
         // Alpha falls off with distance from the camera so the grid dissolves
@@ -851,6 +873,7 @@ impl GlGeometry {
             line_batches,
             solids,
             clear: rgba(BG),
+            clip_plane,
         }
     }
 }
@@ -1490,6 +1513,8 @@ struct GlRenderer {
     u_mvp: Option<glow::UniformLocation>,
     u_shade: Option<glow::UniformLocation>,
     u_light_dir: Option<glow::UniformLocation>,
+    u_clip_enabled: Option<glow::UniformLocation>,
+    u_clip_plane: Option<glow::UniformLocation>,
     u_blit_tex: Option<glow::UniformLocation>,
 
     /// Single-sample resolve target: colour texture (blitted to the screen) +
@@ -1532,11 +1557,21 @@ in vec3 a_pos;\n\
 in vec3 a_normal;\n\
 in vec4 a_color;\n\
 uniform mat4 u_mvp;\n\
+uniform float u_clip_enabled;\n\
+uniform vec4 u_clip_plane;\n\
 out vec4 v_color;\n\
 out vec3 v_normal;\n\
 void main() {{\n\
     v_color = a_color;\n\
     v_normal = a_normal;\n\
+    // Section cut (Phase P5): user clip plane 0.  Indexing with the constant\n\
+    // 0 sizes the predeclared gl_ClipDistance array to one plane.  A large\n\
+    // positive value means \"keep\" for batches that are exempt from the cut.\n\
+    if (u_clip_enabled > 0.5) {{\n\
+        gl_ClipDistance[0] = dot(a_pos, u_clip_plane.xyz) - u_clip_plane.w;\n\
+    }} else {{\n\
+        gl_ClipDistance[0] = 1.0e30;\n\
+    }}\n\
     gl_Position = u_mvp * vec4(a_pos, 1.0);\n\
 }}\n"
             );
@@ -1588,6 +1623,8 @@ void main() {{\n\
             let u_mvp = gl.get_uniform_location(scene_program, "u_mvp");
             let u_shade = gl.get_uniform_location(scene_program, "u_shade");
             let u_light_dir = gl.get_uniform_location(scene_program, "u_light_dir");
+            let u_clip_enabled = gl.get_uniform_location(scene_program, "u_clip_enabled");
+            let u_clip_plane = gl.get_uniform_location(scene_program, "u_clip_plane");
             let u_blit_tex = gl.get_uniform_location(blit_program, "u_tex");
 
             // Scene geometry buffer + VAO (pos3 + normal3 + colour4).
@@ -1664,6 +1701,8 @@ void main() {{\n\
                 u_mvp,
                 u_shade,
                 u_light_dir,
+                u_clip_enabled,
+                u_clip_plane,
                 u_blit_tex,
                 fbo,
                 color_tex,
@@ -1863,6 +1902,19 @@ void main() {{\n\
                 LIGHT_DIR[1],
                 LIGHT_DIR[2],
             );
+            // Section cut: enable user clip plane 0 for the whole scene pass and
+            // pick the plane per draw via `u_clip_enabled`.  A degenerate plane
+            // is treated as "no cut".
+            let plane = geom.clip_plane.unwrap_or([0.0, 1.0, 0.0, 0.0]);
+            gl.uniform_4_f32(
+                self.u_clip_plane.as_ref(),
+                plane[0],
+                plane[1],
+                plane[2],
+                plane[3],
+            );
+            let cut_on = geom.clip_plane.is_some();
+            gl.enable(glow::CLIP_DISTANCE0);
             gl.bind_vertex_array(Some(self.scene_vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
 
@@ -1873,6 +1925,9 @@ void main() {{\n\
                 if count == 0 {
                     continue;
                 }
+                // Reference geometry (grid / global axes) is exempt from the cut.
+                let clip = if cut_on && batch.clip { 1.0 } else { 0.0 };
+                gl.uniform_1_f32(self.u_clip_enabled.as_ref(), clip);
                 if batch.blend {
                     gl.enable(glow::BLEND);
                     gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -1895,6 +1950,7 @@ void main() {{\n\
                 gl.enable(glow::CULL_FACE);
                 gl.cull_face(glow::BACK);
                 gl.front_face(glow::CCW);
+                gl.uniform_1_f32(self.u_clip_enabled.as_ref(), if cut_on { 1.0 } else { 0.0 });
                 gl.uniform_1_f32(
                     self.u_shade.as_ref(),
                     if want_shade { 1.0 } else { 0.0 },
@@ -1930,6 +1986,11 @@ void main() {{\n\
                 );
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
             }
+
+            // Section cut is only for the 3-D scene: the blit program does not
+            // write gl_ClipDistance, so leaving the plane enabled would clip
+            // the fullscreen quad with undefined distances.
+            gl.disable(glow::CLIP_DISTANCE0);
 
             // ── Pass 2: blit the texture over the egui viewport rect ──
             gl.bind_framebuffer(glow::FRAMEBUFFER, restore);
@@ -2433,5 +2494,62 @@ mod tests {
         assert!(!overlay.blend);
         assert!(overlay.verts.len() > 6 * FLOATS_PER_VERTEX);
         assert!(overlay.verts.iter().all(|v| v.is_finite()));
+    }
+
+    // ── Phase P5: section cut ───────────────────────────────────────────
+
+    /// Disabled cut ⇒ no plane, and reference batches are marked exempt.
+    #[test]
+    fn section_cut_disabled_leaves_clip_plane_none() {
+        let cam = Camera3D::default();
+        let s = scene();
+        let d = ResultDisplayState::default();
+        assert!(!d.section_cut.enabled);
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
+        assert!(geom.clip_plane.is_none());
+        // axes (no clip) then grid (no clip).
+        assert_eq!(geom.line_batches.len(), 2);
+        assert!(geom.line_batches.iter().all(|b| !b.clip));
+    }
+
+    /// Enabled cut ⇒ plane present; solids + overlay clipped, grid/axes exempt.
+    #[test]
+    fn section_cut_marks_batches_and_sets_plane() {
+        let cam = Camera3D::default();
+        let (s, res) = solved_scene();
+        let mut d = ResultDisplayState::default();
+        d.show_diagrams = true;
+        d.section_cut.enabled = true;
+        d.section_cut.axis = viewport_poc::display::CutAxis::X;
+        d.section_cut.offset = 1.5;
+        let sel = SelectionState::Member(s.member_ids[0]);
+        let geom = GlGeometry::build(&cam, &s, &d, sel, Some(&res), true, 1.0, 1.0);
+
+        let plane = geom.clip_plane.expect("plane present when enabled");
+        assert_eq!(&plane[..3], &[1.0, 0.0, 0.0]);
+        assert_eq!(plane[3], 1.5);
+
+        // axes[0] and grid[2] are exempt; overlay[1] is clipped.
+        assert_eq!(geom.line_batches.len(), 3);
+        assert!(!geom.line_batches[0].clip, "axes should be exempt");
+        assert!(geom.line_batches[1].clip, "overlay should be clipped");
+        assert!(!geom.line_batches[2].clip, "grid should be exempt");
+    }
+
+    /// A flipped cut passes a negated plane so a positive clip distance still
+    /// means "keep".
+    #[test]
+    fn section_cut_gpu_plane_reflects_flip() {
+        let cam = Camera3D::default();
+        let s = scene();
+        let mut d = ResultDisplayState::default();
+        d.section_cut.enabled = true;
+        d.section_cut.axis = viewport_poc::display::CutAxis::Y;
+        d.section_cut.offset = 2.0;
+        d.section_cut.flip = true;
+        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
+        let plane = geom.clip_plane.unwrap();
+        assert_eq!(&plane[..3], &[0.0, -1.0, 0.0]);
+        assert_eq!(plane[3], -2.0);
     }
 }

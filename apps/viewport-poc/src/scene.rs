@@ -304,6 +304,31 @@ impl ViewportScene {
         (min, max)
     }
 
+    /// Range `[min, max]` of `dot(normal, p)` over the node positions — i.e.
+    /// the span a section-cut plane can sweep along `normal`.
+    ///
+    /// Used to clamp / centre the section-cut offset relative to the model.
+    /// Returns `(0, 0)` for an empty scene or a zero / non-finite normal.
+    pub fn projection_range(&self, normal: [f64; 3]) -> (f64, f64) {
+        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        if self.node_positions.is_empty() || !len.is_finite() || len <= 1e-12 {
+            return (0.0, 0.0);
+        }
+        let n = [normal[0] / len, normal[1] / len, normal[2] / len];
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &p in &self.node_positions {
+            let d = n[0] * p[0] + n[1] * p[1] + n[2] * p[2];
+            if d < min {
+                min = d;
+            }
+            if d > max {
+                max = d;
+            }
+        }
+        (min, max)
+    }
+
     /// Compute deformed node positions: `original + scale * displacement`.
     ///
     /// This is a **read-only** operation — it does not modify any stored data.
@@ -635,6 +660,39 @@ mod tests {
         let (min, max) = s.bounding_box();
         assert_eq!(min, [0.0; 3]);
         assert_eq!(max, [0.0; 3]);
+    }
+
+    #[test]
+    fn projection_range_axis_aligned() {
+        let s = dummy_scene();
+        // Nodes at (0,0,0), (2,0,0), (0,3,0).
+        assert_eq!(s.projection_range([1.0, 0.0, 0.0]), (0.0, 2.0));
+        assert_eq!(s.projection_range([0.0, 1.0, 0.0]), (0.0, 3.0));
+        // Flat along Z: a degenerate [0, 0] span.
+        assert_eq!(s.projection_range([0.0, 0.0, 1.0]), (0.0, 0.0));
+        // The normal is normalised internally.
+        assert_eq!(s.projection_range([0.0, 0.0, 5.0]), (0.0, 0.0));
+        assert_eq!(s.projection_range([2.0, 0.0, 0.0]), (0.0, 2.0));
+    }
+
+    #[test]
+    fn projection_range_empty_and_degenerate() {
+        let s = ViewportScene {
+            node_positions: vec![],
+            node_ids: vec![],
+            member_nodes: vec![],
+            member_ids: vec![],
+            member_ref_vecs: vec![],
+            node_supports: vec![],
+            node_loads: vec![],
+            member_loads: vec![],
+            member_point_loads: vec![],
+            member_sections: vec![],
+        };
+        assert_eq!(s.projection_range([1.0, 0.0, 0.0]), (0.0, 0.0));
+        let d = dummy_scene();
+        assert_eq!(d.projection_range([0.0, 0.0, 0.0]), (0.0, 0.0));
+        assert_eq!(d.projection_range([f64::NAN, 0.0, 0.0]), (0.0, 0.0));
     }
 
     #[test]

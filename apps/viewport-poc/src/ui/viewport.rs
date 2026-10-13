@@ -13,6 +13,7 @@ use viewport_poc::display::{
     displacement_magnitudes, fmt_eng, magnitude_color, max_abs, normalize, ResultViewMode,
 };
 use viewport_poc::project;
+use viewport_poc::scene::ViewportScene;
 use viewport_poc::selection::SelectionState;
 
 use super::gl_renderer::{self, RenderMode};
@@ -64,7 +65,12 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             let over_gizmo = response
                 .interact_pointer_pos()
                 .is_some_and(|p| gizmo_rect.contains(p));
-            if !over_gizmo {
+            // Alt + primary-drag slides the section-cut plane along its normal
+            // (only meaningful once the cut is enabled); otherwise it orbits.
+            let cut_drag = app.display.section_cut.enabled && ctx.input(|i| i.modifiers.alt);
+            if cut_drag {
+                drag_section_cut(app, response.drag_delta(), w, h);
+            } else if !over_gizmo {
                 let d = response.drag_delta();
                 app.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01);
             }
@@ -147,6 +153,15 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // Determine whether to show base (undeformed) geometry.
         let show_base = app.display.mode != ResultViewMode::Deformed || app.display.show_undeformed;
 
+        // Section-cut plane (Phase P5).  A cheap owned snapshot avoids holding
+        // a borrow of `app` across the rest of the frame.  The **software**
+        // path approximates the GPU clip distance by clipping member lines and
+        // polyline segments at the plane and skipping fully-clipped markers.
+        // The grid and global axes are exempt (drawn unclipped); the
+        // internal-force diagram polylines (owned by `diagrams`) are not
+        // clipped in software mode — see the module docs.
+        let cut = app.display.section_cut.clone();
+
         // Renderer selection (Phase P1): the GPU path draws grid / axes /
         // members / nodes into a depth-tested offscreen buffer and blits it
         // here; the software path keeps drawing them with the painter.
@@ -222,10 +237,14 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 let (ni, nj) = scene.member_nodes[mi];
                 let pi = scene.node_positions[ni];
                 let pj = scene.node_positions[nj];
-                let Some(pa) = app.camera.project(pi, w, h) else {
+                // Clip the centreline at the section-cut plane (best effort).
+                let Some((ca, cb)) = cut.clip_segment(pi, pj) else {
                     continue;
                 };
-                let Some(pb) = app.camera.project(pj, w, h) else {
+                let Some(pa) = app.camera.project(ca, w, h) else {
+                    continue;
+                };
+                let Some(pb) = app.camera.project(cb, w, h) else {
                     continue;
                 };
                 let is_sel = app.selection == SelectionState::Member(scene.member_ids[mi]);
@@ -245,6 +264,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         if show_base && !use_gpu {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
                 if app.display.is_node_hidden(scene.node_ids[i]) {
+                    continue;
+                }
+                if !cut.keeps(pos) {
                     continue;
                 }
                 let Some(p) = app.camera.project(pos, w, h) else {
@@ -267,6 +289,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 let Some(spec) = scene.node_supports.get(i).copied().flatten() else {
                     continue;
                 };
+                if !cut.keeps(pos) {
+                    continue;
+                }
                 let Some(p) = app.camera.project(pos, w, h) else {
                     continue;
                 };
@@ -314,6 +339,11 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     continue;
                 };
                 if load.is_zero() {
+                    continue;
+                }
+                // The load symbol is anchored on the node; drop it when the
+                // node is cut away.
+                if !cut.keeps(pos) {
                     continue;
                 }
                 let Some(p) = app.camera.project(pos, w, h) else {
@@ -415,6 +445,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 for k in 1..n_arrows {
                     let t = k as f64 / n_arrows as f64;
                     let base = [pi[0] + t * dx, pi[1] + t * dy, pi[2] + t * dz];
+                    if !cut.keeps(base) {
+                        continue;
+                    }
                     let tip = [
                         base[0] + dir[0] * arrow_len,
                         base[1] + dir[1] * arrow_len,
@@ -498,6 +531,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     let dir = [f_global[0] / fmag, f_global[1] / fmag, f_global[2] / fmag];
 
                     let base = [pi[0] + pl.xi * dx, pi[1] + pl.xi * dy, pi[2] + pl.xi * dz];
+                    if !cut.keeps(base) {
+                        continue;
+                    }
                     let arrow_len = 0.25 * len.min(1.0);
                     let tip = [
                         base[0] + dir[0] * arrow_len,
@@ -534,7 +570,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         continue;
                     }
                     // Sample the true beam curve (Hermite) member by member.
-                    let mut prev: Option<egui::Pos2> = None;
+                    let mut prev: Option<[f64; 3]> = None;
                     let mut drawn = false;
                     for s in 0..DEFORM_SAMPLES {
                         let xi = s as f64 / (DEFORM_SAMPLES - 1) as f64;
@@ -543,25 +579,29 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         else {
                             break;
                         };
-                        let Some(pa) = app.camera.project(pos, w, h) else {
-                            prev = None;
-                            continue;
-                        };
-                        let p = scr(&pa, rect);
                         if let Some(q) = prev {
-                            painter.line_segment([q, p], stroke);
-                            drawn = true;
+                            // Clip each curve segment at the section-cut plane.
+                            if let Some((ca, cb)) = cut.clip_segment(q, pos) {
+                                if let (Some(pa), Some(pb)) =
+                                    (app.camera.project(ca, w, h), app.camera.project(cb, w, h))
+                                {
+                                    painter
+                                        .line_segment([scr(&pa, rect), scr(&pb, rect)], stroke);
+                                    drawn = true;
+                                }
+                            }
                         }
-                        prev = Some(p);
+                        prev = Some(pos);
                     }
                     if !drawn {
                         // Degenerate local axes: fall back to the straight chord.
                         let (ni, nj) = scene.member_nodes[mi];
-                        if let (Some(pa), Some(pb)) = (
-                            app.camera.project(deformed[ni], w, h),
-                            app.camera.project(deformed[nj], w, h),
-                        ) {
-                            painter.line_segment([scr(&pa, rect), scr(&pb, rect)], stroke);
+                        if let Some((ca, cb)) = cut.clip_segment(deformed[ni], deformed[nj]) {
+                            if let (Some(pa), Some(pb)) =
+                                (app.camera.project(ca, w, h), app.camera.project(cb, w, h))
+                            {
+                                painter.line_segment([scr(&pa, rect), scr(&pb, rect)], stroke);
+                            }
                         }
                     }
                 }
@@ -571,6 +611,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         .get(i)
                         .is_some_and(|&id| app.display.is_node_hidden(id))
                     {
+                        continue;
+                    }
+                    if !cut.keeps(pos) {
                         continue;
                     }
                     let Some(p) = app.camera.project(pos, w, h) else {
@@ -594,6 +637,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                             continue;
                         }
                         let &pos = &scene.node_positions[i];
+                        if !cut.keeps(pos) {
+                            continue;
+                        }
                         let Some(p) = app.camera.project(pos, w, h) else {
                             continue;
                         };
@@ -654,6 +700,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     let Some(_) = scene.node_supports.get(i).copied().flatten() else {
                         continue;
                     };
+                    // Reaction symbols are anchored on the node.
+                    if !cut.keeps(pos) {
+                        continue;
+                    }
                     let fx = result.reactions.get(i * 6).copied().unwrap_or(0.0);
                     let fy = result.reactions.get(i * 6 + 1).copied().unwrap_or(0.0);
                     let fz = result.reactions.get(i * 6 + 2).copied().unwrap_or(0.0);
@@ -721,6 +771,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                                 if fmag <= 1e-9 {
                                     continue;
                                 }
+                                // End-force arrow is anchored at the member end.
+                                if !cut.keeps(end) {
+                                    continue;
+                                }
                                 let dir = [fx / fmag, fy / fmag, fz / fmag];
                                 let scale = 0.3_f64.min(fmag * 1e-3);
                                 let tip_world = [
@@ -765,16 +819,18 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     if let Some(mi) = scene.member_index(mid) {
                         if let Ok((xh, yh, zh)) = result.member_local_axes(mi) {
                             if let Some(mpos) = scene.member_midpoint(mi) {
-                                draw_local_axes(
-                                    &app.camera,
-                                    w,
-                                    h,
-                                    rect,
-                                    &painter,
-                                    mpos,
-                                    [xh, yh, zh],
-                                    0.5,
-                                );
+                                if cut.keeps(mpos) {
+                                    draw_local_axes(
+                                        &app.camera,
+                                        w,
+                                        h,
+                                        rect,
+                                        &painter,
+                                        mpos,
+                                        [xh, yh, zh],
+                                        0.5,
+                                    );
+                                }
                             }
                         }
                     }
@@ -786,6 +842,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         if app.display.show_node_labels {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
                 if app.display.is_node_hidden(scene.node_ids[i]) {
+                    continue;
+                }
+                if !cut.keeps(pos) {
                     continue;
                 }
                 let Some(p) = app.camera.project(pos, w, h) else {
@@ -805,10 +864,13 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         painter.text(
             rect.min + egui::vec2(10.0, rect.height() - 10.0),
             egui::Align2::LEFT_BOTTOM,
-            "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear",
+            "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
             egui::FontId::proportional(11.0),
             HELP_C,
         );
+
+        // ── Section-cut plane indicator (both renderers) ──
+        draw_section_cut_plane(app, scene, rect, &painter, w, h);
 
         // ── View cube (bottom-right) ──
         show_view_cube(app, ui, rect, &painter);
@@ -819,6 +881,144 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
 
 fn scr(p: &ScreenPos, rect: egui::Rect) -> egui::Pos2 {
     egui::pos2(rect.min.x + p.x as f32, rect.min.y + p.y as f32)
+}
+
+fn normalize3(v: [f64; 3]) -> [f64; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if l.is_finite() && l > 1e-12 {
+        [v[0] / l, v[1] / l, v[2] / l]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// In-plane orthonormal basis `(u, v)` for a plane with unit normal `n`.
+fn plane_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let reference = if n[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let u = normalize3(cross3(n, reference));
+    let v = cross3(n, u);
+    (u, v)
+}
+
+/// Draw a translucent indicator for the active section-cut plane.
+///
+/// A painter overlay, so it works in both renderers: a quad spanning the
+/// model bounding box, centred on the point of the plane nearest the model
+/// centre.  Skipped when the cut is off or any corner projects behind the
+/// camera.
+fn draw_section_cut_plane(
+    app: &ViewportApp,
+    scene: &ViewportScene,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+    w: f64,
+    h: f64,
+) {
+    let cut = &app.display.section_cut;
+    if !cut.enabled {
+        return;
+    }
+    let Some(n) = cut.unit_normal() else {
+        return;
+    };
+    let (bmin, bmax) = scene.bounding_box();
+    let center = [
+        (bmin[0] + bmax[0]) * 0.5,
+        (bmin[1] + bmax[1]) * 0.5,
+        (bmin[2] + bmax[2]) * 0.5,
+    ];
+    // Nearest point of the plane to the model centre.
+    let sd = n[0] * center[0] + n[1] * center[1] + n[2] * center[2] - cut.offset;
+    let pc = [
+        center[0] - sd * n[0],
+        center[1] - sd * n[1],
+        center[2] - sd * n[2],
+    ];
+    let (u, v) = plane_basis(n);
+    let extent = ((bmax[0] - bmin[0])
+        .hypot(bmax[1] - bmin[1])
+        .hypot(bmax[2] - bmin[2]))
+    .max(1.0)
+        * 0.6;
+    let corners = [
+        [
+            pc[0] - u[0] * extent - v[0] * extent,
+            pc[1] - u[1] * extent - v[1] * extent,
+            pc[2] - u[2] * extent - v[2] * extent,
+        ],
+        [
+            pc[0] + u[0] * extent - v[0] * extent,
+            pc[1] + u[1] * extent - v[1] * extent,
+            pc[2] + u[2] * extent - v[2] * extent,
+        ],
+        [
+            pc[0] + u[0] * extent + v[0] * extent,
+            pc[1] + u[1] * extent + v[1] * extent,
+            pc[2] + u[2] * extent + v[2] * extent,
+        ],
+        [
+            pc[0] - u[0] * extent + v[0] * extent,
+            pc[1] - u[1] * extent + v[1] * extent,
+            pc[2] - u[2] * extent + v[2] * extent,
+        ],
+    ];
+    let mut pts = Vec::with_capacity(4);
+    for c in corners {
+        let Some(p) = app.camera.project(c, w, h) else {
+            return;
+        };
+        pts.push(scr(&p, rect));
+    }
+    painter.add(egui::Shape::convex_polygon(
+        pts,
+        egui::Color32::from_rgba_unmultiplied(120, 190, 255, 28),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(120, 190, 255, 130)),
+    ));
+}
+
+/// Alt + primary-drag: slide the section-cut plane along its normal.
+///
+/// The offset advances by the component of the drag along the screen-space
+/// direction of the normal, converted to world units at the plane's depth
+/// (first-order — accurate enough for a drag).  Clamped to the scene range.
+fn drag_section_cut(app: &mut ViewportApp, delta: egui::Vec2, w: f64, h: f64) {
+    let Some(n) = app.display.section_cut.unit_normal() else {
+        return;
+    };
+    let offset = app.display.section_cut.offset;
+    let base = [n[0] * offset, n[1] * offset, n[2] * offset];
+    let tip = [base[0] + n[0], base[1] + n[1], base[2] + n[2]];
+    let (Some(p0), Some(p1)) = (
+        app.camera.project(base, w, h),
+        app.camera.project(tip, w, h),
+    ) else {
+        return;
+    };
+    let sx = p1.x - p0.x;
+    let sy = p1.y - p0.y;
+    let len = (sx * sx + sy * sy).sqrt();
+    if !len.is_finite() || len < 1e-6 {
+        return;
+    }
+    // `len` screen pixels corresponds to one world unit at the plane's depth.
+    let amount = (delta.x as f64 * sx / len + delta.y as f64 * sy / len) / len;
+    if !amount.is_finite() {
+        return;
+    }
+    app.display.section_cut.offset += amount;
+    app.sync_section_cut();
 }
 
 /// Hit-test the viewport at `pos` (screen points) using the CPU picker.

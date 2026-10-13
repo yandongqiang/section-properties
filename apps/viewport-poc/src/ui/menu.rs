@@ -3,7 +3,7 @@
 use egui;
 
 use viewport_poc::camera::StandardView;
-use viewport_poc::display::ResultViewMode;
+use viewport_poc::display::{CutAxis, ResultViewMode};
 use viewport_poc::model::PresetModel;
 
 use super::gl_renderer::{self, RenderMode};
@@ -117,6 +117,58 @@ fn view_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
             app.show_all_hidden();
             ui.close_menu();
         }
+        ui.separator();
+        // Section cut plane (Phase P5).
+        ui.menu_button("Section cut", |ui| {
+            let mut enabled = app.display.section_cut.enabled;
+            if ui
+                .checkbox(&mut enabled, "Enable cut plane")
+                .on_hover_text("Clip the model with a plane so the interior is visible")
+                .changed()
+            {
+                app.set_cut_enabled(enabled);
+            }
+
+            let cut_enabled = app.display.section_cut.enabled;
+            ui.add_enabled_ui(cut_enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Axis:");
+                    for axis in CutAxis::ALL {
+                        let selected = app.display.section_cut.axis == axis
+                            && app.display.section_cut.normal.is_none();
+                        if ui.selectable_label(selected, axis.label()).clicked() {
+                            app.set_cut_axis(axis);
+                        }
+                    }
+                });
+                let mut flip = app.display.section_cut.flip;
+                if ui.checkbox(&mut flip, "Flip kept side").changed() {
+                    app.display.section_cut.flip = flip;
+                }
+                // Slider span follows the current model bounds (any model size).
+                if let Some((lo, hi)) = app.cut_range() {
+                    let range = if (hi - lo).abs() < 1e-9 {
+                        (lo - 0.5)..=(hi + 0.5)
+                    } else {
+                        lo..=hi
+                    };
+                    let mut offset = app.display.section_cut.offset;
+                    if ui
+                        .add(egui::Slider::new(&mut offset, range).text("Position"))
+                        .changed()
+                    {
+                        app.display.section_cut.offset = offset;
+                    }
+                }
+                if ui
+                    .button("Center on model")
+                    .on_hover_text("Re-centre the plane on the model bounds")
+                    .clicked()
+                {
+                    app.recenter_section_cut();
+                }
+            });
+        });
         ui.separator();
         ui.label(egui::RichText::new("Renderer").strong());
         let gpu_active = gl_renderer::mode() == RenderMode::Gpu;
