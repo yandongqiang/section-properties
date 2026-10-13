@@ -13,6 +13,7 @@ pub mod model;
 pub mod persistence;
 pub mod project;
 pub mod scene;
+pub mod section_def;
 pub mod selection;
 
 pub use app_state::{AppMessage, MessageLevel, Project};
@@ -24,4 +25,8 @@ pub use edit_model::{
     NodalLoadSpec, NodeId, SupportSpec,
 };
 pub use scene::ViewportScene;
+pub use section_def::{
+    GeometryProperties, MaterialPreset, SectionDef, SectionKind, SectionMaterial, SectionParams,
+    SectionResult, TorsionProperties,
+};
 pub use selection::SelectionState;

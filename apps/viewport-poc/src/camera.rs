@@ -13,6 +13,56 @@ pub struct ScreenPos {
     pub depth: f64,
 }
 
+/// Standard preset viewpoints (MIDAS-style view buttons).
+///
+/// The eye direction is derived from the camera's spherical parameters
+/// (`azimuth`, `elevation`); see [`Camera3D::eye`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardView {
+    /// Isometric: azimuth 45°, elevation 30°.
+    Iso,
+    /// Front: eye on +Z looking towards −Z (the XZ plane, `+Y` up).
+    Front,
+    /// Top: eye (almost) directly above, looking down `−Y`.
+    Top,
+    /// Right: eye on +X looking towards −X (the YZ plane, `+Y` up).
+    Right,
+}
+
+impl StandardView {
+    /// All presets in display order.
+    pub const ALL: [StandardView; 4] = [
+        StandardView::Iso,
+        StandardView::Front,
+        StandardView::Top,
+        StandardView::Right,
+    ];
+
+    /// Short label for GUI buttons.
+    pub const fn label(self) -> &'static str {
+        match self {
+            StandardView::Iso => "Iso",
+            StandardView::Front => "Front",
+            StandardView::Top => "Top",
+            StandardView::Right => "Right",
+        }
+    }
+
+    /// `(azimuth, elevation)` in radians for this preset.
+    ///
+    /// `Top` is kept just below `π/2` so that the `forward × world_up` cross
+    /// product in [`Camera3D::basis`] stays well-conditioned (it degenerates
+    /// when the view direction is exactly parallel to the world up axis).
+    pub const fn angles(self) -> (f64, f64) {
+        match self {
+            StandardView::Iso => (std::f64::consts::FRAC_PI_4, std::f64::consts::FRAC_PI_6),
+            StandardView::Front => (std::f64::consts::FRAC_PI_2, 0.0),
+            StandardView::Top => (std::f64::consts::FRAC_PI_2, 1.55),
+            StandardView::Right => (0.0, 0.0),
+        }
+    }
+}
+
 /// Orbit camera with spherical-coordinate parameterisation.
 #[derive(Debug, Clone)]
 pub struct Camera3D {
@@ -49,6 +99,15 @@ impl Default for Camera3D {
 impl Camera3D {
     /// Create a camera and frame the given bounding box.
     pub fn fit(min: Vec3, max: Vec3) -> Self {
+        let mut cam = Self::default();
+        cam.frame(min, max);
+        cam
+    }
+
+    /// Aim at the centre of a bounding box and pull back far enough to see it,
+    /// **keeping the current orientation**.  Shared by [`fit`](Self::fit) and
+    /// the "Fit / Zoom Extents" command.
+    pub fn frame(&mut self, min: Vec3, max: Vec3) {
         let center = [
             (min[0] + max[0]) * 0.5,
             (min[1] + max[1]) * 0.5,
@@ -60,11 +119,16 @@ impl Camera3D {
             (max[2] - min[2]).max(1e-6),
         ];
         let diag = size[0].hypot(size[1]).hypot(size[2]).max(1.0);
-        Self {
-            target: center,
-            distance: diag * 2.5,
-            ..Default::default()
-        }
+        self.target = center;
+        self.distance = diag * 2.5;
+    }
+
+    /// Apply a standard preset orientation, keeping the current target and
+    /// distance.
+    pub fn set_view(&mut self, view: StandardView) {
+        let (az, el) = view.angles();
+        self.azimuth = az;
+        self.elevation = el;
     }
 
     /// Reset to default orientation while keeping the target.
@@ -198,5 +262,60 @@ mod tests {
         let cam = Camera3D::fit([0.0, 0.0, 0.0], [4.0, 3.0, 0.0]);
         assert!((cam.target[0] - 2.0).abs() < 1e-15);
         assert!((cam.target[1] - 1.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn frame_keeps_orientation() {
+        let mut cam = Camera3D::default();
+        let (az0, el0) = (cam.azimuth, cam.elevation);
+        cam.frame([-1.0, -2.0, -3.0], [1.0, 2.0, 3.0]);
+        assert_eq!(cam.azimuth, az0);
+        assert_eq!(cam.elevation, el0);
+        assert!((cam.target[0]).abs() < 1e-15);
+        assert!(cam.distance > 0.0);
+    }
+
+    #[test]
+    fn frame_matches_fit() {
+        let (min, max) = ([0.0, 0.0, 0.0], [4.0, 3.0, 2.0]);
+        let fitted = Camera3D::fit(min, max);
+        let mut framed = Camera3D::default();
+        framed.frame(min, max);
+        assert!((fitted.target[0] - framed.target[0]).abs() < 1e-15);
+        assert!((fitted.target[1] - framed.target[1]).abs() < 1e-15);
+        assert!((fitted.distance - framed.distance).abs() < 1e-15);
+    }
+
+    #[test]
+    fn set_view_updates_angles_only() {
+        let mut cam = Camera3D::default();
+        cam.target = [1.0, 2.0, 3.0];
+        cam.distance = 42.0;
+        cam.set_view(StandardView::Front);
+        assert_eq!(cam.azimuth, StandardView::Front.angles().0);
+        assert_eq!(cam.elevation, StandardView::Front.angles().1);
+        assert_eq!(cam.target, [1.0, 2.0, 3.0]);
+        assert_eq!(cam.distance, 42.0);
+    }
+
+    #[test]
+    fn all_presets_produce_finite_basis() {
+        for view in StandardView::ALL {
+            let mut cam = Camera3D::default();
+            cam.set_view(view);
+            let (f, r, u) = cam.basis();
+            for v in [f, r, u] {
+                assert!(v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn top_view_is_not_degenerate_and_looks_down() {
+        let mut cam = Camera3D::default();
+        cam.set_view(StandardView::Top);
+        let (forward, _, _) = cam.basis();
+        // Looking downward: forward points towards −Y.
+        assert!(forward[1] < -0.9);
     }
 }

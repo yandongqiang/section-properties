@@ -15,7 +15,7 @@
 //! so that new entities created after loading do not collide with
 //! existing IDs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,7 @@ use crate::edit_model::{
     EditMember, EditModel, EditNode, MemberId, MemberPointLoad3D, MemberUniformLoad3D,
     NodalLoadSpec, NodeId, SupportSpec,
 };
+use crate::section_def::SectionDef;
 use structural_analysis::FrameSection3D;
 
 // ── File format version ───────────────────────────────────────────────
@@ -127,13 +128,6 @@ pub struct MemberUniformLoadFileV2 {
 
 // ── V3 DTO types ─────────────────────────────────────────────────────
 
-/// Top-level project file (version 3).
-#[derive(Serialize, Deserialize)]
-pub struct ProjectFileV3 {
-    pub format_version: u32,
-    pub model: ModelFileV3,
-}
-
 /// Model data within a project file (version 3).
 #[derive(Serialize, Deserialize)]
 pub struct ModelFileV3 {
@@ -155,6 +149,23 @@ pub struct MemberPointLoadFileV3 {
     pub fx: f64,
     pub fy: f64,
     pub fz: f64,
+}
+
+// ── Section-module state (additive, optional) ────────────────────────
+
+/// Top-level project file (version 3).
+///
+/// The `section` field is an **additive, optional** extension: it is skipped
+/// when `None` (so files written before this feature existed are byte-for-byte
+/// unchanged) and defaults to `None` when absent (so old files still load).
+/// Readers that do not know the field ignore it, since this format does not
+/// use `deny_unknown_fields`.
+#[derive(Serialize, Deserialize)]
+pub struct ProjectFileV3 {
+    pub format_version: u32,
+    pub model: ModelFileV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionDef>,
 }
 
 // ── Errors ───────────────────────────────────────────────────────────
@@ -826,21 +837,51 @@ fn validate_dto(dto: &ModelFileV1) -> Result<(), PersistenceError> {
 
 // ── Serialization API ───────────────────────────────────────────────
 
-/// Serialize an EditModel to a JSON string.
+/// A project loaded from disk: the structural model plus the optional
+/// Section-module state stored alongside it.
+///
+/// `section` is `None` for project files written before the section state was
+/// persisted (or when the writing app had no section to store).
+pub struct LoadedProject {
+    pub model: EditModel,
+    pub section: Option<SectionDef>,
+}
+
+/// Serialize an EditModel to a JSON string (no section state).
 pub fn serialize_project(model: &EditModel) -> Result<String, PersistenceError> {
+    serialize_project_with_section(model, None)
+}
+
+/// Serialize an EditModel plus optional Section-module state to JSON.
+///
+/// The section is an **additive, optional** top-level field, so a call with
+/// `None` produces exactly the same bytes as [`serialize_project`].
+pub fn serialize_project_with_section(
+    model: &EditModel,
+    section: Option<&SectionDef>,
+) -> Result<String, PersistenceError> {
     let file = ProjectFileV3 {
         format_version: CURRENT_FORMAT_VERSION,
         model: model_to_dto_v3(model),
+        section: section.cloned(),
     };
     serde_json::to_string_pretty(&file).map_err(|e| PersistenceError::JsonError(e.to_string()))
 }
 
-/// Deserialize a JSON string to an EditModel.
+/// Deserialize a JSON string to an EditModel (dropping any section state).
 ///
 /// Supports version 1 (legacy, no member loads), version 2 (member
 /// uniform loads only), and version 3 (current, with member uniform
-/// and point loads) files.
+/// and point loads plus optional Section-module state).
 pub fn deserialize_project(json: &str) -> Result<EditModel, PersistenceError> {
+    Ok(deserialize_loaded_project(json)?.model)
+}
+
+/// Deserialize a JSON string into a [`LoadedProject`] (model + section state).
+///
+/// Version 1 and 2 files carry no section state; version 3 files may or may
+/// not (the field is optional), so both old-style and new-style payloads load.
+pub fn deserialize_loaded_project(json: &str) -> Result<LoadedProject, PersistenceError> {
     #[derive(Deserialize)]
     struct VersionProbe {
         format_version: u32,
@@ -853,17 +894,26 @@ pub fn deserialize_project(json: &str) -> Result<EditModel, PersistenceError> {
         1 => {
             let file: ProjectFileV1 = serde_json::from_str(json)
                 .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
-            dto_to_model(&file.model)
+            Ok(LoadedProject {
+                model: dto_to_model(&file.model)?,
+                section: None,
+            })
         }
         2 => {
             let file: ProjectFileV2 = serde_json::from_str(json)
                 .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
-            dto_v2_to_model(&file.model)
+            Ok(LoadedProject {
+                model: dto_v2_to_model(&file.model)?,
+                section: None,
+            })
         }
         3 => {
             let file: ProjectFileV3 = serde_json::from_str(json)
                 .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
-            dto_v3_to_model(&file.model)
+            Ok(LoadedProject {
+                model: dto_v3_to_model(&file.model)?,
+                section: file.section,
+            })
         }
         found => Err(PersistenceError::UnsupportedVersion {
             found,
@@ -872,22 +922,26 @@ pub fn deserialize_project(json: &str) -> Result<EditModel, PersistenceError> {
     }
 }
 
-/// Save an EditModel to a `.saproject` file.
+/// Write `contents` to `path` via a temporary file, then rename atomically.
 ///
-/// Writes to a temporary file first, then renames atomically.
-/// On Windows, rename-over-existing is not guaranteed atomic, but
-/// is the best available strategy without requiring filesystem locks.
-pub fn save_project(path: &Path, model: &EditModel) -> Result<(), PersistenceError> {
-    let json = serialize_project(model)?;
+/// The parent directory is created if necessary.  On Windows, rename-over-
+/// existing is not guaranteed atomic, but is the best available strategy
+/// without requiring filesystem locks.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), PersistenceError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| PersistenceError::IoError(e.to_string()))?;
+    }
 
     let mut tmp_path = path.to_path_buf();
-    let stem = path
-        .file_stem()
+    let file_name = path
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "tmp".to_string());
-    tmp_path.set_file_name(format!(".{stem}.saproject.tmp"));
+    tmp_path.set_file_name(format!(".{file_name}.tmp"));
 
-    std::fs::write(&tmp_path, json.as_bytes())
+    std::fs::write(&tmp_path, contents.as_bytes())
         .map_err(|e| PersistenceError::IoError(e.to_string()))?;
 
     std::fs::rename(&tmp_path, path).map_err(|e| {
@@ -898,15 +952,128 @@ pub fn save_project(path: &Path, model: &EditModel) -> Result<(), PersistenceErr
     Ok(())
 }
 
-/// Load an EditModel from a `.saproject` file.
+/// Save an EditModel to a `.saproject` file (no section state).
+pub fn save_project(path: &Path, model: &EditModel) -> Result<(), PersistenceError> {
+    save_project_with_section(path, model, None)
+}
+
+/// Save an EditModel plus optional Section-module state to a `.saproject` file.
 ///
-/// Reads and validates the file fully before returning.
-/// Does not modify any existing model — the caller is responsible
-/// for transactional replacement.
+/// Writes to a temporary file first, then renames atomically.
+pub fn save_project_with_section(
+    path: &Path,
+    model: &EditModel,
+    section: Option<&SectionDef>,
+) -> Result<(), PersistenceError> {
+    let json = serialize_project_with_section(model, section)?;
+    write_atomic(path, &json)
+}
+
+/// Load an EditModel from a `.saproject` file (dropping any section state).
 pub fn load_project(path: &Path) -> Result<EditModel, PersistenceError> {
+    Ok(load_project_with_section(path)?.model)
+}
+
+/// Load a [`LoadedProject`] (model + section state) from a `.saproject` file.
+///
+/// Reads and validates the file fully before returning.  Does not modify any
+/// existing model — the caller is responsible for transactional replacement.
+pub fn load_project_with_section(path: &Path) -> Result<LoadedProject, PersistenceError> {
     let contents =
         std::fs::read_to_string(path).map_err(|e| PersistenceError::IoError(e.to_string()))?;
-    deserialize_project(&contents)
+    deserialize_loaded_project(&contents)
+}
+
+// ── App settings ─────────────────────────────────────────────────────
+
+/// Window geometry persisted between sessions (in egui points).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowPrefs {
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Application settings persisted outside of any project.
+///
+/// Kept deliberately small: the chrome theme plus the cheaply captured window
+/// size.  Panel widths are **not** stored — egui already remembers those in
+/// its own memory, and re-implementing a layout store here would be needless
+/// complexity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// egui chrome theme (`true` = dark).
+    #[serde(default = "default_dark_mode")]
+    pub dark_mode: bool,
+    /// Last window size, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPrefs>,
+}
+
+/// Dark chrome is the historical default.
+fn default_dark_mode() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            dark_mode: default_dark_mode(),
+            window: None,
+        }
+    }
+}
+
+/// The per-user settings file path.
+///
+/// Resolved without any extra dependency:
+///
+/// * Windows: `%APPDATA%\section-properties\settings.json`
+/// * otherwise: `$XDG_CONFIG_HOME/section-properties/settings.json`, or
+///   `$HOME/.config/section-properties/settings.json`
+/// * fallback (neither env var set): `section-properties-settings.json` in the
+///   current working directory.
+pub fn settings_path() -> PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    };
+    match base {
+        Some(dir) => dir.join("section-properties").join("settings.json"),
+        None => PathBuf::from("section-properties-settings.json"),
+    }
+}
+
+/// Load settings from `path`, falling back to [`AppSettings::default`].
+///
+/// A *missing* file is not an error (first run) and produces no warning.  A
+/// file that exists but cannot be read or parsed also yields defaults, but the
+/// problem is returned as the second tuple element so the caller can surface
+/// it (e.g. in the message dock) rather than silently swallowing it.
+pub fn load_settings_or_default(path: &Path) -> (AppSettings, Option<String>) {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (AppSettings::default(), None),
+        Err(e) => (
+            AppSettings::default(),
+            Some(format!("could not read {} ({e})", path.display())),
+        ),
+        Ok(text) => match serde_json::from_str::<AppSettings>(&text) {
+            Ok(settings) => (settings, None),
+            Err(e) => (
+                AppSettings::default(),
+                Some(format!("settings file {} is corrupt ({e})", path.display())),
+            ),
+        },
+    }
+}
+
+/// Save settings to `path` (creating the parent directory if needed).
+pub fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), PersistenceError> {
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+    write_atomic(path, &json)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -915,6 +1082,7 @@ pub fn load_project(path: &Path) -> Result<EditModel, PersistenceError> {
 mod tests {
     use super::*;
     use crate::edit_model::{EditModel, MemberId, NodalLoadSpec, SupportSpec};
+    use crate::section_def::{MaterialPreset, SectionKind, SectionMaterial, SectionParams};
 
     fn sample_model() -> EditModel {
         let mut m = EditModel::new();
@@ -1093,5 +1261,142 @@ mod tests {
 
         let _ = std::fs::remove_file(&path_good);
         let _ = std::fs::remove_file(&path_bad);
+    }
+
+    // ── App settings ─────────────────────────────────────────────────
+
+    #[test]
+    fn settings_round_trip() {
+        let path = std::env::temp_dir().join("test_settings_round_trip.json");
+        let _ = std::fs::remove_file(&path);
+        let settings = AppSettings {
+            dark_mode: false,
+            window: Some(WindowPrefs {
+                width: 1280.0,
+                height: 720.0,
+            }),
+        };
+        save_settings(&path, &settings).unwrap();
+        let (loaded, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded, settings);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_default_when_missing() {
+        let path = std::env::temp_dir().join("test_settings_missing_xyz.json");
+        let _ = std::fs::remove_file(&path);
+        let (loaded, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none(), "missing file must not warn");
+        assert_eq!(loaded, AppSettings::default());
+        assert!(loaded.dark_mode, "default theme is dark");
+        assert!(loaded.window.is_none());
+    }
+
+    #[test]
+    fn settings_corrupt_file_falls_back_with_warning() {
+        let path = std::env::temp_dir().join("test_settings_corrupt.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let (loaded, warning) = load_settings_or_default(&path);
+        assert_eq!(loaded, AppSettings::default());
+        assert!(warning.is_some(), "corrupt file must be reported, not masked");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_partial_json_uses_field_defaults() {
+        // Only `window` present → `dark_mode` falls back to the dark default.
+        let path = std::env::temp_dir().join("test_settings_partial.json");
+        std::fs::write(&path, br#"{"window":{"width":800.0,"height":600.0}}"#).unwrap();
+        let (loaded, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert!(loaded.dark_mode);
+        assert_eq!(
+            loaded.window,
+            Some(WindowPrefs {
+                width: 800.0,
+                height: 600.0
+            })
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Section state in the project file ─────────────────────────────
+
+    fn sample_section() -> SectionDef {
+        SectionDef {
+            kind: SectionKind::IBeam,
+            params: SectionParams {
+                height: 300.0,
+                width: 150.0,
+                web_thickness: 7.0,
+                thickness: 10.0,
+                radius: 12.0,
+                ..SectionKind::IBeam.default_params()
+            },
+            material: SectionMaterial {
+                preset: MaterialPreset::Steel,
+                custom_e: 210e9,
+                custom_nu: 0.3,
+            },
+        }
+    }
+
+    #[test]
+    fn section_def_in_project_round_trip() {
+        let model = sample_model();
+        let section = sample_section();
+        let json = serialize_project_with_section(&model, Some(&section)).unwrap();
+        let loaded = deserialize_loaded_project(&json).unwrap();
+        assert_eq!(loaded.model.nodes().len(), model.nodes().len());
+        assert_eq!(loaded.section, Some(section));
+    }
+
+    #[test]
+    fn section_def_filesystem_round_trip() {
+        let path = std::env::temp_dir().join("test_section_state_round_trip.saproject");
+        let model = sample_model();
+        let section = sample_section();
+        save_project_with_section(&path, &model, Some(&section)).unwrap();
+        let loaded = load_project_with_section(&path).unwrap();
+        assert_eq!(loaded.section, Some(section));
+        assert_eq!(loaded.model.members().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn serialized_project_without_section_omits_field() {
+        // Backward compatibility: the legacy API must not emit the new field,
+        // so files written before this feature are byte-for-byte unchanged.
+        let json = serialize_project(&sample_model()).unwrap();
+        assert!(!json.contains("\"section\""), "{json}");
+    }
+
+    #[test]
+    fn old_style_v3_payload_loads_without_section() {
+        // A version-3 file with no `section` key (as written before this feature).
+        let json = r#"{"format_version":3,"model":{"next_node_id":2,"next_member_id":1,"nodes":[{"id":0,"x":0.0,"y":0.0,"z":0.0},{"id":1,"x":3.0,"y":0.0,"z":0.0}],"members":[{"id":0,"node_i":0,"node_j":1,"ref_vec":[0.0,0.0,1.0],"e":200e9,"g":80e9,"area":1e-3,"iy":2e-6,"iz":1e-6,"j":3e-6}],"supports":[],"nodal_loads":[],"member_uniform_loads":[],"member_point_loads":[]}}"#;
+        let loaded = deserialize_loaded_project(json).unwrap();
+        assert!(loaded.section.is_none());
+        assert_eq!(loaded.model.n_members(), 1);
+    }
+
+    #[test]
+    fn old_style_v1_payload_loads_without_section() {
+        let json = r#"{"format_version":1,"model":{"next_node_id":2,"next_member_id":1,"nodes":[{"id":0,"x":0.0,"y":0.0,"z":0.0},{"id":1,"x":3.0,"y":0.0,"z":0.0}],"members":[{"id":0,"node_i":0,"node_j":1,"ref_vec":[0.0,0.0,1.0],"e":200e9,"g":80e9,"area":1e-3,"iy":2e-6,"iz":1e-6,"j":3e-6}],"supports":[],"nodal_loads":[]}}"#;
+        let loaded = deserialize_loaded_project(json).unwrap();
+        assert!(loaded.section.is_none());
+        assert_eq!(loaded.model.n_members(), 1);
+    }
+
+    #[test]
+    fn unknown_fields_in_project_file_are_ignored() {
+        // Forward compatibility: a future writer that adds fields must not
+        // break this reader.
+        let json = r#"{"format_version":3,"future_extra":42,"model":{"next_node_id":0,"next_member_id":0,"nodes":[],"members":[],"supports":[],"nodal_loads":[],"member_uniform_loads":[],"member_point_loads":[]}}"#;
+        let loaded = deserialize_loaded_project(json).unwrap();
+        assert!(loaded.section.is_none());
+        assert_eq!(loaded.model.n_nodes(), 0);
     }
 }

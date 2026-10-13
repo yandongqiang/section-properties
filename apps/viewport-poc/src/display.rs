@@ -77,6 +77,18 @@ pub struct ResultDisplayState {
     pub show_global_axes: bool,
     /// Show node labels.
     pub show_node_labels: bool,
+    /// Show member internal-force diagrams (N / V / M) as an overlay.
+    pub show_diagrams: bool,
+    /// Include the axial-force diagram (N).
+    pub diagram_axial: bool,
+    /// Include the shear-force diagrams (Vy / Vz).
+    pub diagram_shear: bool,
+    /// Include the bending-moment diagrams (Mz / My).
+    pub diagram_moment: bool,
+    /// Diagram amplitude multiplier (1.0 = auto-scaled to member length).
+    pub diagram_scale: f64,
+    /// `true` = draw diagrams for every member; `false` = selected member only.
+    pub diagram_all_members: bool,
 }
 
 impl Default for ResultDisplayState {
@@ -89,6 +101,12 @@ impl Default for ResultDisplayState {
             show_grid: true,
             show_global_axes: true,
             show_node_labels: true,
+            show_diagrams: false,
+            diagram_axial: true,
+            diagram_shear: true,
+            diagram_moment: true,
+            diagram_scale: 1.0,
+            diagram_all_members: false,
         }
     }
 }
@@ -257,6 +275,29 @@ mod tests {
         assert_eq!(d.mode, ResultViewMode::Model);
         assert!((d.deformation_scale - 100.0).abs() < 1e-15);
         assert!(d.show_undeformed);
+    }
+
+    #[test]
+    fn display_diagram_defaults() {
+        let d = ResultDisplayState::default();
+        assert!(!d.show_diagrams);
+        assert!(d.diagram_axial);
+        assert!(d.diagram_shear);
+        assert!(d.diagram_moment);
+        assert!((d.diagram_scale - 1.0).abs() < 1e-15);
+        assert!(!d.diagram_all_members);
+    }
+
+    #[test]
+    fn display_reset_clears_diagrams() {
+        let mut d = ResultDisplayState::default();
+        d.show_diagrams = true;
+        d.diagram_scale = 5.0;
+        d.diagram_all_members = true;
+        d.reset();
+        assert!(!d.show_diagrams);
+        assert!((d.diagram_scale - 1.0).abs() < 1e-15);
+        assert!(!d.diagram_all_members);
     }
 
     #[test]

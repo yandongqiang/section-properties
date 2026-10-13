@@ -5,8 +5,10 @@
 //! analysis results directly; solving is an explicit operation via
 //! [`Project::solve`].
 
-use structural_analysis::FrameAnalysisResult3D;
+use section_properties::SolverSelection;
+use structural_analysis::{FrameAnalysisResult3D, FrameSolver3D};
 
+use crate::display;
 use crate::edit_model::EditModel;
 
 // ── Messages ───────────────────────────────────────────────────────────
@@ -74,23 +76,107 @@ pub enum AnalysisStatus {
     Failed,
 }
 
+// ── Solver options ─────────────────────────────────────────────────────
+
+/// Linear-solver backend exposed in the Analysis job panel.
+///
+/// This is the **only** tunable the 3D frame solver actually honours.  It
+/// maps 1:1 onto [`section_properties::SolverSelection`] and ultimately onto
+/// [`structural_analysis::FrameSolver3D::set_solver`].  The default is
+/// [`SolverBackend::Auto`], which reproduces the historical behaviour
+/// (`FrameModel3D::solve` uses `SolverSelection::Auto`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolverBackend {
+    /// Registry-based automatic selection.
+    #[default]
+    Auto,
+    /// Dense Gaussian elimination (general, any size; best for small systems).
+    Dense,
+    /// Skyline LDLᵀ (symmetric, positive definite only).
+    SkylineLdlt,
+    /// Sparse LU (general; best for medium/large systems).
+    SparseLu,
+    /// Conjugate gradient (symmetric, positive definite only).
+    Cg,
+    /// Incomplete-Cholesky preconditioned CG (symmetric, positive definite).
+    Iccg,
+}
+
+impl SolverBackend {
+    /// All backends in menu order.
+    pub const ALL: [SolverBackend; 6] = [
+        SolverBackend::Auto,
+        SolverBackend::Dense,
+        SolverBackend::SkylineLdlt,
+        SolverBackend::SparseLu,
+        SolverBackend::Cg,
+        SolverBackend::Iccg,
+    ];
+
+    /// Short label for the GUI combo box.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SolverBackend::Auto => "Auto",
+            SolverBackend::Dense => "Dense (Gaussian)",
+            SolverBackend::SkylineLdlt => "Skyline LDLᵀ",
+            SolverBackend::SparseLu => "Sparse LU",
+            SolverBackend::Cg => "CG",
+            SolverBackend::Iccg => "ICCG",
+        }
+    }
+
+    /// Canonical registry name, or `None` for [`SolverBackend::Auto`].
+    pub const fn name(self) -> Option<&'static str> {
+        match self {
+            SolverBackend::Auto => None,
+            SolverBackend::Dense => Some("dense"),
+            SolverBackend::SkylineLdlt => Some("skyline_ldlt"),
+            SolverBackend::SparseLu => Some("sparse_lu"),
+            SolverBackend::Cg => Some("cg"),
+            SolverBackend::Iccg => Some("iccg"),
+        }
+    }
+
+    /// Convert to the crate's solver selection.
+    ///
+    /// Explicit backends are *authoritative*: if the requested backend cannot
+    /// legally handle the matrix, the solve returns an error (it is never
+    /// silently substituted).
+    pub fn to_selection(self) -> SolverSelection {
+        match self.name() {
+            Some(name) => SolverSelection::named(name),
+            None => SolverSelection::Auto,
+        }
+    }
+}
+
 // ── Analysis result ────────────────────────────────────────────────────
 
-/// Analysis result paired with the model revision it was produced from.
+/// Analysis result paired with the model revision and solver backend it was
+/// produced from.
 ///
 /// The [`solved_revision`](Self::solved_revision) is captured at solve
 /// time so that subsequent edits can be detected by comparing it against
-/// the model's current revision.
+/// the model's current revision.  [`solved_backend`](Self::solved_backend)
+/// records the requested solver so that changing the backend also marks the
+/// result stale.
 pub struct AnalysisResult {
     pub result: FrameAnalysisResult3D,
     pub solved_revision: u64,
+    /// Solver backend requested for the solve that produced this result.
+    pub solved_backend: SolverBackend,
 }
 
 impl AnalysisResult {
-    pub fn new(result: FrameAnalysisResult3D, solved_revision: u64) -> Self {
+    pub fn new(
+        result: FrameAnalysisResult3D,
+        solved_revision: u64,
+        solved_backend: SolverBackend,
+    ) -> Self {
         Self {
             result,
             solved_revision,
+            solved_backend,
         }
     }
 }
@@ -106,7 +192,11 @@ pub struct Project {
     pub name: String,
     pub model: Option<EditModel>,
     pub analysis: Option<AnalysisResult>,
+    /// Solver backend selected for the next solve.
+    solver_backend: SolverBackend,
     last_solve_failed: bool,
+    /// Message from the most recent failed solve attempt (for the job panel).
+    last_solve_error: Option<String>,
 }
 
 impl Default for Project {
@@ -122,7 +212,9 @@ impl Project {
             name: "Untitled".to_string(),
             model: None,
             analysis: None,
+            solver_backend: SolverBackend::default(),
             last_solve_failed: false,
+            last_solve_error: None,
         }
     }
 
@@ -141,12 +233,45 @@ impl Project {
         match (&self.model, &self.analysis) {
             (None, _) | (Some(_), None) => AnalysisStatus::NeverSolved,
             (Some(model), Some(a)) => {
-                if a.solved_revision == model.revision() {
+                if a.solved_revision == model.revision() && a.solved_backend == self.solver_backend {
                     AnalysisStatus::Current
                 } else {
                     AnalysisStatus::Stale
                 }
             }
+        }
+    }
+
+    /// Solver backend selected for the next solve.
+    pub fn solver_backend(&self) -> SolverBackend {
+        self.solver_backend
+    }
+
+    /// Select the solver backend.
+    ///
+    /// Existing results become [`AnalysisStatus::Stale`] when the backend
+    /// differs from the one that produced them — the panel prompts a re-run
+    /// rather than presenting results from a different solver as current.
+    pub fn set_solver_backend(&mut self, backend: SolverBackend) {
+        self.solver_backend = backend;
+    }
+
+    /// Reset solver options to their defaults (currently just the backend).
+    pub fn reset_solver_options(&mut self) {
+        self.solver_backend = SolverBackend::default();
+    }
+
+    /// Message from the most recent failed solve attempt, if any.
+    pub fn last_solve_error(&self) -> Option<&str> {
+        self.last_solve_error.as_deref()
+    }
+
+    /// Solver backend that produced the current result, if results are current.
+    pub fn solved_backend(&self) -> Option<SolverBackend> {
+        if self.analysis_status() == AnalysisStatus::Current {
+            self.analysis.as_ref().map(|a| a.solved_backend)
+        } else {
+            None
         }
     }
 
@@ -188,6 +313,7 @@ impl Project {
         self.model = Some(model);
         self.analysis = None;
         self.last_solve_failed = false;
+        self.last_solve_error = None;
     }
 
     /// Run the FEM analysis on the current model.
@@ -202,6 +328,7 @@ impl Project {
     pub fn solve(&mut self) -> Result<(), String> {
         let outcome = self.run_analysis();
         self.last_solve_failed = outcome.is_err();
+        self.last_solve_error = outcome.as_ref().err().cloned();
         outcome
     }
 
@@ -210,9 +337,12 @@ impl Project {
     fn run_analysis(&mut self) -> Result<(), String> {
         let edit = self.model.as_ref().ok_or("No model loaded")?;
         let revision = edit.revision();
+        let backend = self.solver_backend;
         let frame_model = edit.to_frame_model().map_err(|e| e.message())?;
-        let result = frame_model.solve().map_err(|e| format!("{e}"))?;
-        self.analysis = Some(AnalysisResult::new(result, revision));
+        let mut solver = FrameSolver3D::from_model(&frame_model).map_err(|e| format!("{e}"))?;
+        solver.set_solver(backend.to_selection());
+        let result = solver.solve().map_err(|e| format!("{e}"))?;
+        self.analysis = Some(AnalysisResult::new(result, revision, backend));
         Ok(())
     }
 
@@ -227,6 +357,7 @@ impl Project {
         self.model = Some(model);
         self.analysis = None;
         self.last_solve_failed = false;
+        self.last_solve_error = None;
     }
 
     /// Clear the project to the empty state.
@@ -235,6 +366,152 @@ impl Project {
         self.model = None;
         self.analysis = None;
         self.last_solve_failed = false;
+        self.last_solve_error = None;
+    }
+}
+
+// ── Model / result summaries ───────────────────────────────────────────
+
+/// Read-only counts and validity warnings for the model, as shown in the
+/// Analysis job panel.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelSummary {
+    pub n_nodes: usize,
+    pub n_members: usize,
+    /// Total degrees of freedom (`6 × nodes`).
+    pub total_dof: usize,
+    /// DOFs constrained by supports.
+    pub constrained_dof: usize,
+    pub n_supports: usize,
+    pub n_nodal_loads: usize,
+    /// Uniform distributed loads + member point loads.
+    pub n_member_loads: usize,
+    /// Distinct member materials, identified by their `(E, G)` pair.
+    pub n_materials: usize,
+    /// Human-readable model-validity warnings (empty = none).
+    pub warnings: Vec<String>,
+}
+
+impl ModelSummary {
+    /// Build a summary from an editable model.
+    pub fn from_model(model: &EditModel) -> Self {
+        let n_nodes = model.n_nodes();
+        let n_members = model.n_members();
+        let total_dof = n_nodes * 6;
+
+        let n_supports = model.supports().len();
+        let constrained_dof: usize = model
+            .supports()
+            .iter()
+            .map(|(_, spec)| spec.n_constrained())
+            .sum();
+
+        let n_nodal_loads = model.nodal_loads().len();
+        let n_member_loads =
+            model.member_uniform_loads().len() + model.member_point_loads().len();
+
+        // Distinct materials by (E, G) bit patterns (f64 has no Hash/Eq).
+        let mut materials: Vec<(u64, u64)> = Vec::new();
+        for m in model.members() {
+            let key = (m.section.E().to_bits(), m.section.G().to_bits());
+            if !materials.contains(&key) {
+                materials.push(key);
+            }
+        }
+
+        let mut warnings = Vec::new();
+        if n_nodes == 0 {
+            warnings.push("Model has no nodes.".to_string());
+        }
+        if n_members == 0 {
+            warnings.push("Model has no members.".to_string());
+        }
+        if n_nodes > 0 && n_supports == 0 {
+            warnings.push(
+                "No supports defined \u{2014} the structure is unconstrained and the solve \
+                 will fail."
+                    .to_string(),
+            );
+        }
+
+        Self {
+            n_nodes,
+            n_members,
+            total_dof,
+            constrained_dof,
+            n_supports,
+            n_nodal_loads,
+            n_member_loads,
+            n_materials: materials.len(),
+            warnings,
+        }
+    }
+
+    /// Number of unconstrained (free) DOFs.
+    pub fn free_dof(&self) -> usize {
+        self.total_dof.saturating_sub(self.constrained_dof)
+    }
+
+    /// `true` if the model has no nodes.
+    pub fn is_empty(&self) -> bool {
+        self.n_nodes == 0
+    }
+}
+
+/// Read-only headline figures from a successful analysis result.
+///
+/// The 3D frame solver returns displacements, reactions and member end
+/// forces only — it exposes **no** equilibrium report, iteration count or
+/// residual, so none are shown here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResultsSummary {
+    pub n_nodes: usize,
+    pub n_members: usize,
+    pub total_dof: usize,
+    pub constrained_dof: usize,
+    /// Largest translational displacement magnitude `max |u|` (m).
+    pub max_translation: f64,
+    /// Largest rotational displacement magnitude `max |\u{03b8}|` (rad).
+    pub max_rotation: f64,
+    /// Largest absolute reaction component (N for forces, N\u{00b7}m for moments).
+    pub max_reaction: f64,
+}
+
+impl ResultsSummary {
+    /// Build a summary from an analysis result snapshot.
+    pub fn from_result(result: &FrameAnalysisResult3D) -> Self {
+        let n_nodes = result.n_nodes;
+        let translations = display::displacement_magnitudes(&result.displacements, n_nodes);
+        let max_translation = display::max_abs(&translations);
+
+        let mut max_rotation = 0.0_f64;
+        for i in 0..n_nodes {
+            let base = i * 6 + 3;
+            if base + 2 < result.displacements.len() {
+                let r = (result.displacements[base] * result.displacements[base]
+                    + result.displacements[base + 1] * result.displacements[base + 1]
+                    + result.displacements[base + 2] * result.displacements[base + 2])
+                    .sqrt();
+                if r.is_finite() {
+                    max_rotation = max_rotation.max(r);
+                }
+            }
+        }
+
+        Self {
+            n_nodes,
+            n_members: result.n_members,
+            total_dof: n_nodes * 6,
+            constrained_dof: result.constrained_dofs.len(),
+            max_translation,
+            max_rotation,
+            max_reaction: display::max_abs(&result.reactions),
+        }
+    }
+
+    /// Number of unconstrained (free) DOFs.
+    pub fn free_dof(&self) -> usize {
+        self.total_dof.saturating_sub(self.constrained_dof)
     }
 }
 
@@ -376,5 +653,144 @@ mod tests {
         let m2 = m.clone();
         assert_eq!(m.level, m2.level);
         assert_eq!(m.text, m2.text);
+    }
+
+    // ── Solver options ──
+
+    #[test]
+    fn solver_backend_default_is_auto() {
+        let p = Project::empty();
+        assert_eq!(p.solver_backend(), SolverBackend::Auto);
+        assert_eq!(SolverBackend::default(), SolverBackend::Auto);
+    }
+
+    #[test]
+    fn solver_backend_names_and_selection() {
+        assert_eq!(SolverBackend::Auto.name(), None);
+        assert_eq!(SolverBackend::Dense.name(), Some("dense"));
+        assert_eq!(SolverBackend::SkylineLdlt.name(), Some("skyline_ldlt"));
+        assert_eq!(SolverBackend::SparseLu.name(), Some("sparse_lu"));
+        assert_eq!(SolverBackend::Cg.name(), Some("cg"));
+        assert_eq!(SolverBackend::Iccg.name(), Some("iccg"));
+
+        assert_eq!(SolverBackend::Auto.to_selection(), SolverSelection::Auto);
+        assert_eq!(
+            SolverBackend::SparseLu.to_selection(),
+            SolverSelection::named("sparse_lu")
+        );
+        // ALL has one entry per backend, all labels non-empty.
+        assert_eq!(SolverBackend::ALL.len(), 6);
+        for b in SolverBackend::ALL {
+            assert!(!b.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn changing_solver_backend_marks_results_stale() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        p.solve().unwrap();
+        assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+
+        p.set_solver_backend(SolverBackend::SparseLu);
+        assert_eq!(p.analysis_status(), AnalysisStatus::Stale);
+        assert!(p.analysis_result().is_none());
+
+        // Re-solving with the new backend restores Current.
+        p.solve().unwrap();
+        assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+        assert_eq!(p.solved_backend(), Some(SolverBackend::SparseLu));
+    }
+
+    #[test]
+    fn reset_solver_options_restores_default() {
+        let mut p = Project::empty();
+        p.set_solver_backend(SolverBackend::Cg);
+        p.reset_solver_options();
+        assert_eq!(p.solver_backend(), SolverBackend::Auto);
+    }
+
+    #[test]
+    fn solve_records_solved_backend() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        assert_eq!(p.solved_backend(), None);
+        p.solve().unwrap();
+        assert_eq!(p.solved_backend(), Some(SolverBackend::Auto));
+    }
+
+    // ── Error surfacing ──
+
+    #[test]
+    fn failed_solve_records_and_clears_error() {
+        let mut p = Project::empty();
+        // No model → Failed with a stored message (never a silent zero).
+        assert!(p.solve().is_err());
+        assert!(p.last_solve_error().is_some());
+        assert_eq!(p.analysis_status(), AnalysisStatus::Failed);
+
+        // A successful solve clears the stored error.
+        p.load_model("Portal".into(), model::build_portal_edit());
+        p.solve().unwrap();
+        assert!(p.last_solve_error().is_none());
+    }
+
+    // ── Model summary ──
+
+    #[test]
+    fn model_summary_portal() {
+        let m = model::build_portal_edit();
+        let s = ModelSummary::from_model(&m);
+        assert_eq!(s.n_nodes, 4);
+        assert_eq!(s.n_members, 3);
+        assert_eq!(s.total_dof, 24);
+        assert_eq!(s.constrained_dof, 12); // two fixed nodes × 6 DOF
+        assert_eq!(s.free_dof(), 12);
+        assert_eq!(s.n_supports, 2);
+        assert_eq!(s.n_nodal_loads, 1);
+        assert_eq!(s.n_member_loads, 0);
+        assert_eq!(s.n_materials, 1);
+        assert!(s.warnings.is_empty());
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn model_summary_empty_warns() {
+        let s = ModelSummary::from_model(&EditModel::new());
+        assert!(s.is_empty());
+        assert_eq!(s.total_dof, 0);
+        // "no nodes" + "no members" (no unsupported warning without nodes).
+        assert_eq!(s.warnings.len(), 2);
+    }
+
+    // ── Results summary ──
+
+    #[test]
+    fn results_summary_portal() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        p.solve().unwrap();
+        let r = p.analysis_result().unwrap();
+        let s = ResultsSummary::from_result(r);
+        assert_eq!(s.n_nodes, 4);
+        assert_eq!(s.n_members, 3);
+        assert_eq!(s.total_dof, 24);
+        assert_eq!(s.constrained_dof, 12);
+        assert_eq!(s.free_dof(), 12);
+        assert!(s.max_translation > 0.0);
+        assert!(s.max_reaction > 0.0);
+    }
+
+    #[test]
+    fn results_summary_matches_model_counts() {
+        let mut p = Project::empty();
+        p.load_model("Inclined".into(), model::build_inclined_edit());
+        p.solve().unwrap();
+        let m = ModelSummary::from_model(p.model.as_ref().unwrap());
+        let r = ResultsSummary::from_result(p.analysis_result().unwrap());
+        assert_eq!(r.n_nodes, m.n_nodes);
+        assert_eq!(r.n_members, m.n_members);
+        assert_eq!(r.total_dof, m.total_dof);
+        assert_eq!(r.constrained_dof, m.constrained_dof);
     }
 }
