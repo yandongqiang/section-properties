@@ -956,6 +956,7 @@ impl eframe::App for ViewportApp {
             }
 
             // ── Draw support symbols ──
+            // Fixed = square, Pinned = triangle, Custom = circle
             if show_base {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
                     let Some(spec) = scene.node_supports.get(i).copied().flatten() else {
@@ -965,11 +966,7 @@ impl eframe::App for ViewportApp {
                         continue;
                     };
                     let center = scr(&p, rect);
-                    painter.circle_stroke(
-                        center,
-                        10.0,
-                        egui::Stroke::new(2.0_f32, SUPPORT_C),
-                    );
+                    let stroke = egui::Stroke::new(2.0_f32, SUPPORT_C);
                     let label = if spec.is_fixed() {
                         "F".to_string()
                     } else if spec.is_pinned() {
@@ -977,6 +974,24 @@ impl eframe::App for ViewportApp {
                     } else {
                         format!("C{}", spec.n_constrained())
                     };
+                    if spec.is_fixed() {
+                        let half = 10.0_f32;
+                        let sq = egui::Rect::from_center_size(
+                            center,
+                            egui::vec2(half * 2.0, half * 2.0),
+                        );
+                        painter.rect_stroke(sq, 0.0, stroke);
+                    } else if spec.is_pinned() {
+                        let r = 12.0_f32;
+                        let p1 = center + egui::vec2(0.0, -r);
+                        let p2 = center + egui::vec2(-r * 0.866, r * 0.5);
+                        let p3 = center + egui::vec2(r * 0.866, r * 0.5);
+                        painter.line_segment([p1, p2], stroke);
+                        painter.line_segment([p2, p3], stroke);
+                        painter.line_segment([p3, p1], stroke);
+                    } else {
+                        painter.circle_stroke(center, 10.0, stroke);
+                    }
                     painter.text(
                         center,
                         egui::Align2::CENTER_CENTER,
