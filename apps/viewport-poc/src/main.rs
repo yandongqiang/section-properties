@@ -66,6 +66,11 @@ struct ViewportApp {
     last_persisted_dark_mode: bool,
     /// Last observed window size (points), captured each frame for persistence.
     window_size: Option<[f32; 2]>,
+    /// Entity that was under the cursor when the viewport context menu opened
+    /// (captured on the right-click frame so the menu content is stable).
+    ctx_menu_target: SelectionState,
+    /// Double-click quick-edit popup state; `None` = closed.
+    quick_edit: Option<QuickEdit>,
 }
 
 /// Action waiting for unsaved-changes confirmation.
@@ -122,6 +127,25 @@ impl Default for MemberEditBuffer {
     }
 }
 
+/// Transient state for the double-click quick-edit popup.
+///
+/// Node edits use the `x/y/z` fields; member edits reuse the shared
+/// [`MemberEditBuffer`] for the section numbers and carry the connectivity
+/// text fields here.  Kept in memory only — never serialized.
+struct QuickEdit {
+    /// Entity being edited (always `Node` or `Member`).
+    target: SelectionState,
+    /// Screen position to anchor the popup near the cursor.
+    anchor: egui::Pos2,
+    /// Node coordinates (used for `Node` targets).
+    x: f64,
+    y: f64,
+    z: f64,
+    /// Member `i` / `j` node IDs as text (used for `Member` targets).
+    node_i: String,
+    node_j: String,
+}
+
 impl eframe::App for ViewportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ui::theme::apply_theme(ctx, self.dark_mode);
@@ -150,6 +174,9 @@ impl eframe::App for ViewportApp {
 
         // ── Center: 3D viewport (must be last) ──────────────────────────
         ui::viewport::show_viewport(self, ctx);
+
+        // ── Double-click quick-edit popup (floats over the viewport) ────
+        ui::viewport::show_quick_edit(self, ctx);
 
         // ── Persist settings ────────────────────────────────────────────
         // The theme is toggled directly by the menu module, so detect the

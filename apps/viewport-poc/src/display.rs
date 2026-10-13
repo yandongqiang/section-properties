@@ -5,6 +5,10 @@
 //! (undeformed reference, grid, axes, labels) remain as separate booleans
 //! in [`ResultDisplayState`].
 
+use std::collections::HashSet;
+
+use crate::edit_model::{MemberId, NodeId};
+
 // ── Display mode ──────────────────────────────────────────────────────
 
 /// Primary result visualization mode.
@@ -89,6 +93,15 @@ pub struct ResultDisplayState {
     pub diagram_scale: f64,
     /// `true` = draw diagrams for every member; `false` = selected member only.
     pub diagram_all_members: bool,
+    /// **View-only** hidden node IDs.  Never touches the model, the solve, or
+    /// the saved file — default is empty (nothing hidden).
+    ///
+    /// Hiding a node hides only its marker and label; members attached to it
+    /// stay visible (see `ResultDisplayState::is_node_hidden` callers).  This
+    /// keeps a member whose end nodes are hidden from visually collapsing.
+    pub hidden_nodes: HashSet<NodeId>,
+    /// **View-only** hidden member IDs (see [`hidden_nodes`](Self::hidden_nodes)).
+    pub hidden_members: HashSet<MemberId>,
 }
 
 impl Default for ResultDisplayState {
@@ -107,6 +120,8 @@ impl Default for ResultDisplayState {
             diagram_moment: true,
             diagram_scale: 1.0,
             diagram_all_members: false,
+            hidden_nodes: HashSet::new(),
+            hidden_members: HashSet::new(),
         }
     }
 }
@@ -121,6 +136,74 @@ impl ResultDisplayState {
     /// available (non-`None`).
     pub fn needs_result(&self) -> bool {
         self.mode.requires_result()
+    }
+
+    // ── View-only visibility ───────────────────────────────────────────
+
+    /// Is this node hidden in the viewport?
+    pub fn is_node_hidden(&self, id: NodeId) -> bool {
+        self.hidden_nodes.contains(&id)
+    }
+
+    /// Is this member hidden in the viewport?
+    pub fn is_member_hidden(&self, id: MemberId) -> bool {
+        self.hidden_members.contains(&id)
+    }
+
+    /// Hide a single node (view-only).
+    pub fn hide_node(&mut self, id: NodeId) {
+        self.hidden_nodes.insert(id);
+    }
+
+    /// Hide a single member (view-only).
+    pub fn hide_member(&mut self, id: MemberId) {
+        self.hidden_members.insert(id);
+    }
+
+    /// Unhide everything (`Show all`).
+    pub fn show_all(&mut self) {
+        self.hidden_nodes.clear();
+        self.hidden_members.clear();
+    }
+
+    /// `true` if anything is currently hidden.
+    pub fn has_hidden(&self) -> bool {
+        !self.hidden_nodes.is_empty() || !self.hidden_members.is_empty()
+    }
+
+    /// Isolate a node: hide every other node, plus every member not attached to
+    /// `keep` (`Hide others` on a node).  `all_*` are the full ID sets; the
+    /// caller derives `keep_members` from the member connectivity.
+    pub fn isolate_node(
+        &mut self,
+        all_nodes: &[NodeId],
+        all_members: &[MemberId],
+        keep: NodeId,
+        keep_members: &[MemberId],
+    ) {
+        self.hidden_nodes = all_nodes.iter().copied().filter(|&n| n != keep).collect();
+        self.hidden_members = all_members
+            .iter()
+            .copied()
+            .filter(|m| !keep_members.contains(m))
+            .collect();
+    }
+
+    /// Isolate a member: hide every other member, plus every node not on the
+    /// kept member (`Hide others` on a member).
+    pub fn isolate_member(
+        &mut self,
+        all_nodes: &[NodeId],
+        all_members: &[MemberId],
+        keep: MemberId,
+        keep_nodes: &[NodeId],
+    ) {
+        self.hidden_members = all_members.iter().copied().filter(|&m| m != keep).collect();
+        self.hidden_nodes = all_nodes
+            .iter()
+            .copied()
+            .filter(|n| !keep_nodes.contains(n))
+            .collect();
     }
 }
 
@@ -308,6 +391,64 @@ mod tests {
         assert!(d.needs_result());
         d.mode = ResultViewMode::Displacement;
         assert!(d.needs_result());
+    }
+
+    // ── View-only visibility ──
+
+    #[test]
+    fn visibility_defaults_to_nothing_hidden() {
+        let d = ResultDisplayState::default();
+        assert!(!d.has_hidden());
+        assert!(!d.is_node_hidden(NodeId(0)));
+        assert!(!d.is_member_hidden(MemberId(0)));
+    }
+
+    #[test]
+    fn hide_and_show_all_roundtrip() {
+        let mut d = ResultDisplayState::default();
+        d.hide_node(NodeId(3));
+        d.hide_member(MemberId(7));
+        assert!(d.is_node_hidden(NodeId(3)));
+        assert!(d.is_member_hidden(MemberId(7)));
+        assert!(d.has_hidden());
+        d.show_all();
+        assert!(!d.has_hidden());
+        assert!(!d.is_node_hidden(NodeId(3)));
+    }
+
+    #[test]
+    fn reset_clears_visibility() {
+        let mut d = ResultDisplayState::default();
+        d.hide_node(NodeId(1));
+        d.reset();
+        assert!(!d.has_hidden());
+    }
+
+    #[test]
+    fn isolate_node_keeps_node_and_its_members() {
+        let all_nodes = [NodeId(0), NodeId(1), NodeId(2)];
+        let all_members = [MemberId(0), MemberId(1)];
+        let mut d = ResultDisplayState::default();
+        // Node 1 belongs to member 1 only.
+        d.isolate_node(&all_nodes, &all_members, NodeId(1), &[MemberId(1)]);
+        assert!(!d.is_node_hidden(NodeId(1)));
+        assert!(d.is_node_hidden(NodeId(0)));
+        assert!(d.is_node_hidden(NodeId(2)));
+        assert!(!d.is_member_hidden(MemberId(1)));
+        assert!(d.is_member_hidden(MemberId(0)));
+    }
+
+    #[test]
+    fn isolate_member_keeps_member_and_its_nodes() {
+        let all_nodes = [NodeId(0), NodeId(1), NodeId(2)];
+        let all_members = [MemberId(0), MemberId(1)];
+        let mut d = ResultDisplayState::default();
+        d.isolate_member(&all_nodes, &all_members, MemberId(0), &[NodeId(0), NodeId(1)]);
+        assert!(!d.is_member_hidden(MemberId(0)));
+        assert!(d.is_member_hidden(MemberId(1)));
+        assert!(!d.is_node_hidden(NodeId(0)));
+        assert!(!d.is_node_hidden(NodeId(1)));
+        assert!(d.is_node_hidden(NodeId(2)));
     }
 
     // ── Displacement magnitude ──

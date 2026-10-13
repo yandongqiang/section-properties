@@ -17,6 +17,7 @@ use egui;
 use viewport_poc::app_state::AnalysisStatus;
 use viewport_poc::camera::StandardView;
 use viewport_poc::display::ResultViewMode;
+use viewport_poc::selection::SelectionState;
 
 use super::icons::{self, IconFn};
 use super::module::WorkModule;
@@ -45,6 +46,8 @@ enum RibbonAction {
     Save,
     Undo,
     Redo,
+    /// Delete the current selection (nodes cascade to attached members).
+    Delete,
     /// Switch the active work module (sidebar / tab target).
     Module(WorkModule),
     Solve,
@@ -70,6 +73,7 @@ impl RibbonAction {
         match self {
             RibbonAction::Undo => app.history.can_undo(),
             RibbonAction::Redo => app.history.can_redo(),
+            RibbonAction::Delete => app.selection != SelectionState::None,
             RibbonAction::Solve => app.can_run_analysis(),
             RibbonAction::Placeholder => false,
             _ => true,
@@ -98,6 +102,9 @@ impl RibbonAction {
             }
             RibbonAction::Undo => app.do_undo(),
             RibbonAction::Redo => app.do_redo(),
+            RibbonAction::Delete => {
+                app.delete_selection();
+            }
             RibbonAction::Module(m) => app.module = m,
             RibbonAction::Solve => app.run_solve(),
             RibbonAction::ResultMode(m) => app.display.mode = m,
@@ -122,8 +129,8 @@ struct Button {
 
 // ── Group contents (single source of truth) ─────────────────────────────
 // Placeholder buttons use `RibbonAction::Placeholder` and are rendered
-// disabled.  The full set of placeholders is: Delete, Support, Node Load,
-// Mem Load, Tables, Pan, Zoom.
+// disabled.  The full set of placeholders is: Support, Node Load, Mem Load,
+// Tables, Pan, Zoom.
 
 const FILE: &[Button] = &[
     Button {
@@ -163,7 +170,7 @@ const EDIT: &[Button] = &[
         icon: icons::trash,
         caption: "Delete",
         tooltip: "Delete the current selection",
-        action: RibbonAction::Placeholder,
+        action: RibbonAction::Delete,
     },
 ];
 

@@ -27,6 +27,12 @@ pub enum StandardView {
     Top,
     /// Right: eye on +X looking towards −X (the YZ plane, `+Y` up).
     Right,
+    /// Back: eye on −Z looking towards +Z.
+    Back,
+    /// Left: eye on −X looking towards +X.
+    Left,
+    /// Bottom: eye (almost) directly below, looking up `+Y`.
+    Bottom,
 }
 
 impl StandardView {
@@ -38,6 +44,19 @@ impl StandardView {
         StandardView::Right,
     ];
 
+    /// The six axis-aligned cube faces plus `Iso` — the full set exposed by the
+    /// view-cube gizmo.  Deliberately a superset of [`ALL`](Self::ALL): the View
+    /// menu keeps showing the four primary presets.
+    pub const CUBE: [StandardView; 7] = [
+        StandardView::Iso,
+        StandardView::Front,
+        StandardView::Back,
+        StandardView::Left,
+        StandardView::Right,
+        StandardView::Top,
+        StandardView::Bottom,
+    ];
+
     /// Short label for GUI buttons.
     pub const fn label(self) -> &'static str {
         match self {
@@ -45,20 +64,27 @@ impl StandardView {
             StandardView::Front => "Front",
             StandardView::Top => "Top",
             StandardView::Right => "Right",
+            StandardView::Back => "Back",
+            StandardView::Left => "Left",
+            StandardView::Bottom => "Bottom",
         }
     }
 
     /// `(azimuth, elevation)` in radians for this preset.
     ///
-    /// `Top` is kept just below `π/2` so that the `forward × world_up` cross
-    /// product in [`Camera3D::basis`] stays well-conditioned (it degenerates
-    /// when the view direction is exactly parallel to the world up axis).
+    /// `Top` / `Bottom` are kept just inside `±π/2` so that the
+    /// `forward × world_up` cross product in [`Camera3D::basis`] stays
+    /// well-conditioned (it degenerates when the view direction is exactly
+    /// parallel to the world up axis).
     pub const fn angles(self) -> (f64, f64) {
         match self {
             StandardView::Iso => (std::f64::consts::FRAC_PI_4, std::f64::consts::FRAC_PI_6),
             StandardView::Front => (std::f64::consts::FRAC_PI_2, 0.0),
-            StandardView::Top => (std::f64::consts::FRAC_PI_2, 1.55),
+            StandardView::Back => (-std::f64::consts::FRAC_PI_2, 0.0),
             StandardView::Right => (0.0, 0.0),
+            StandardView::Left => (std::f64::consts::PI, 0.0),
+            StandardView::Top => (std::f64::consts::FRAC_PI_2, 1.55),
+            StandardView::Bottom => (std::f64::consts::FRAC_PI_2, -1.55),
         }
     }
 }
@@ -413,6 +439,37 @@ mod tests {
                 assert!(v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
             }
         }
+    }
+
+    #[test]
+    fn view_cube_presets_are_finite_and_distinct() {
+        assert_eq!(StandardView::CUBE.len(), 7);
+        let mut seen: Vec<[i64; 2]> = Vec::new();
+        for view in StandardView::CUBE {
+            let mut cam = Camera3D::default();
+            cam.set_view(view);
+            let (f, r, u) = cam.basis();
+            for v in [f, r, u] {
+                assert!(v.iter().all(|c| c.is_finite()), "{view:?} non-finite basis");
+            }
+            // Each preset must point somewhere distinct (angles rounded).
+            let (az, el) = view.angles();
+            let key = [(az * 1000.0) as i64, (el * 1000.0) as i64];
+            assert!(!seen.contains(&key), "duplicate angles for {view:?}");
+            seen.push(key);
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_look_oppositely() {
+        let mut top = Camera3D::default();
+        top.set_view(StandardView::Top);
+        let mut bottom = Camera3D::default();
+        bottom.set_view(StandardView::Bottom);
+        let (ft, _, _) = top.basis();
+        let (fb, _, _) = bottom.basis();
+        assert!(ft[1] < -0.9, "Top should look down, got {ft:?}");
+        assert!(fb[1] > 0.9, "Bottom should look up, got {fb:?}");
     }
 
     #[test]

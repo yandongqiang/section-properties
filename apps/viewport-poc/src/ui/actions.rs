@@ -11,7 +11,7 @@ use egui;
 use structural_analysis::FrameAnalysisResult3D;
 use viewport_poc::app_state::{AppMessage, Project};
 use viewport_poc::camera::{Camera3D, StandardView};
-use viewport_poc::display::ResultDisplayState;
+use viewport_poc::display::{ResultDisplayState, ResultViewMode};
 use viewport_poc::edit_history::EditHistory;
 use viewport_poc::edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodeId};
 use viewport_poc::scene::ViewportScene;
@@ -20,7 +20,7 @@ use viewport_poc::{model, persistence, project};
 
 use super::module::WorkModule;
 use super::status::BottomTab;
-use crate::{MemberEditBuffer, PendingAction, ViewportApp};
+use crate::{MemberEditBuffer, PendingAction, QuickEdit, ViewportApp};
 
 impl ViewportApp {
     /// Build the application, threading in settings loaded from disk (and an
@@ -64,6 +64,8 @@ impl ViewportApp {
             settings_path,
             last_persisted_dark_mode: settings.dark_mode,
             window_size: settings.window.map(|w| [w.width, w.height]),
+            ctx_menu_target: SelectionState::None,
+            quick_edit: None,
         }
     }
 
@@ -194,6 +196,306 @@ impl ViewportApp {
     /// Apply a standard preset camera orientation (keeps target / distance).
     pub(crate) fn set_standard_view(&mut self, view: StandardView) {
         self.camera.set_view(view);
+    }
+
+    // ── Phase P4: viewport interaction commands ────────────────────────
+
+    /// Zoom the camera onto a node (keep orientation, move the target).
+    pub(crate) fn zoom_to_node(&mut self, id: NodeId) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let Some(idx) = scene.node_index(id) else {
+            return;
+        };
+        let p = scene.node_positions[idx];
+        self.camera.target = p;
+        self.camera.distance = (self.scene_diag() * 0.35).clamp(0.2, 1e5);
+    }
+
+    /// Zoom the camera onto a member (frame its two ends).
+    pub(crate) fn zoom_to_member(&mut self, id: MemberId) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let Some(idx) = scene.member_index(id) else {
+            return;
+        };
+        let Some(mid) = scene.member_midpoint(idx) else {
+            return;
+        };
+        let len = scene.member_length(idx).unwrap_or(1.0);
+        self.camera.target = mid;
+        self.camera.distance = (len * 2.0).clamp(0.2, 1e5);
+    }
+
+    /// Bounding-box diagonal of the scene (≥ 1.0), for framing zooms.
+    fn scene_diag(&self) -> f64 {
+        let Some(scene) = &self.scene else {
+            return 1.0;
+        };
+        let (min, max) = scene.bounding_box();
+        (max[0] - min[0])
+            .hypot(max[1] - min[1])
+            .hypot(max[2] - min[2])
+            .max(1.0)
+    }
+
+    /// Select an entity and switch to the module whose inspector edits it.
+    ///
+    /// Reuses the inspector's existing edit paths — this never duplicates the
+    /// support / load / section mechanics, it only routes the user there.
+    pub(crate) fn select_and_open(&mut self, sel: SelectionState, module: WorkModule) {
+        self.selection = sel;
+        self.module = module;
+    }
+
+    /// Select a member and switch the result view to its end forces.
+    pub(crate) fn show_member_end_forces(&mut self, id: MemberId) {
+        self.selection = SelectionState::Member(id);
+        self.display.mode = ResultViewMode::MemberEndForces;
+    }
+
+    /// Hide one node (view-only; never touches the model).
+    pub(crate) fn hide_node(&mut self, id: NodeId) {
+        self.display.hide_node(id);
+    }
+
+    /// Hide one member (view-only).
+    pub(crate) fn hide_member(&mut self, id: MemberId) {
+        self.display.hide_member(id);
+    }
+
+    /// `Hide others` for the current selection.
+    pub(crate) fn hide_others_for_selection(&mut self) {
+        match self.selection {
+            SelectionState::Node(id) => self.hide_others_node(id),
+            SelectionState::Member(id) => self.hide_others_member(id),
+            SelectionState::None => {}
+        }
+    }
+
+    fn hide_others_node(&mut self, keep: NodeId) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let all_nodes: Vec<NodeId> = scene.node_ids.clone();
+        let all_members: Vec<MemberId> = scene.member_ids.clone();
+        // Members attached to the kept node.
+        let keep_members: Vec<MemberId> = (0..scene.n_members())
+            .filter(|&mi| {
+                let (a, b) = scene.member_nodes[mi];
+                scene.node_ids.get(a) == Some(&keep) || scene.node_ids.get(b) == Some(&keep)
+            })
+            .map(|mi| scene.member_ids[mi])
+            .collect();
+        self.display
+            .isolate_node(&all_nodes, &all_members, keep, &keep_members);
+    }
+
+    fn hide_others_member(&mut self, keep: MemberId) {
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let all_nodes: Vec<NodeId> = scene.node_ids.clone();
+        let all_members: Vec<MemberId> = scene.member_ids.clone();
+        let Some(mi) = scene.member_index(keep) else {
+            return;
+        };
+        let (a, b) = scene.member_nodes[mi];
+        let keep_nodes: Vec<NodeId> =
+            [scene.node_ids.get(a).copied(), scene.node_ids.get(b).copied()]
+                .into_iter()
+                .flatten()
+                .collect();
+        self.display
+            .isolate_member(&all_nodes, &all_members, keep, &keep_nodes);
+    }
+
+    /// Unhide everything (`Show all`).
+    pub(crate) fn show_all_hidden(&mut self) {
+        self.display.show_all();
+    }
+
+    /// Update a node's coordinates (undoable; reuses the inspector's rule).
+    pub(crate) fn apply_node_edit(&mut self, id: NodeId, x: f64, y: f64, z: f64) {
+        let Some(model) = self.project.model.as_ref() else {
+            self.messages.push(AppMessage::error("No model loaded"));
+            return;
+        };
+        let mut candidate = model.clone();
+        match candidate.update_node(id, x, y, z) {
+            Ok(()) => {
+                if candidate.revision() != model.revision() {
+                    self.commit_edit(candidate);
+                    self.messages
+                        .push(AppMessage::info(format!("Updated node N{}", id.0)));
+                }
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
+    }
+
+    /// Delete the current selection (undoable).  A node cascades to its
+    /// attached members; a member removes its own loads.  Returns `true` if
+    /// something was selected and a delete was attempted.
+    pub(crate) fn delete_selection(&mut self) -> bool {
+        match self.selection {
+            SelectionState::Node(id) => {
+                self.delete_node(id);
+                true
+            }
+            SelectionState::Member(id) => {
+                self.delete_member(id);
+                true
+            }
+            SelectionState::None => false,
+        }
+    }
+
+    /// Undoable cascade delete of a node and its attached members.
+    pub(crate) fn delete_node(&mut self, id: NodeId) {
+        let Some(model) = self.project.model.as_ref() else {
+            self.messages.push(AppMessage::error("No model loaded"));
+            return;
+        };
+        if model.node(id).is_none() {
+            self.messages
+                .push(AppMessage::warning(format!("Node N{} no longer exists", id.0)));
+            return;
+        }
+        let mut candidate = model.clone();
+        match candidate.delete_node_cascade(id) {
+            Ok(removed) => {
+                self.commit_edit(candidate);
+                self.validate_selection();
+                let extra = if removed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" and {} member(s)", removed.len())
+                };
+                self.messages
+                    .push(AppMessage::info(format!("Deleted node N{}{}", id.0, extra)));
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
+    }
+
+    /// Undoable delete of a member.
+    pub(crate) fn delete_member(&mut self, id: MemberId) {
+        let Some(model) = self.project.model.as_ref() else {
+            self.messages.push(AppMessage::error("No model loaded"));
+            return;
+        };
+        if model.member(id).is_none() {
+            self.messages
+                .push(AppMessage::warning(format!("Member M{} no longer exists", id.0)));
+            return;
+        }
+        let mut candidate = model.clone();
+        match candidate.delete_member(id) {
+            Ok(()) => {
+                self.commit_edit(candidate);
+                self.validate_selection();
+                self.messages
+                    .push(AppMessage::info(format!("Deleted member M{}", id.0)));
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
+    }
+
+    // ── Phase P4: double-click quick edit ──────────────────────────────
+
+    /// Open the double-click quick-edit popup for the entity under the cursor.
+    pub(crate) fn open_quick_edit(&mut self, hit: SelectionState, anchor: egui::Pos2) {
+        match hit {
+            SelectionState::Node(id) => {
+                let Some((x, y, z)) = self
+                    .project
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.node(id))
+                    .map(|n| (n.x, n.y, n.z))
+                else {
+                    return;
+                };
+                self.quick_edit = Some(QuickEdit {
+                    target: hit,
+                    anchor,
+                    x,
+                    y,
+                    z,
+                    node_i: String::new(),
+                    node_j: String::new(),
+                });
+            }
+            SelectionState::Member(id) => {
+                self.sync_member_edit_buffer(id);
+                let Some((ni, nj)) = self
+                    .project
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.member(id))
+                    .map(|m| (m.node_i.0, m.node_j.0))
+                else {
+                    return;
+                };
+                self.quick_edit = Some(QuickEdit {
+                    target: hit,
+                    anchor,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    node_i: ni.to_string(),
+                    node_j: nj.to_string(),
+                });
+            }
+            SelectionState::None => {}
+        }
+    }
+
+    /// Apply the quick-edit popup and close it.  Nodes reuse the coordinate
+    /// update rule; members reuse the inspector's member-edit apply path (with
+    /// an optional connectivity change first).
+    pub(crate) fn apply_quick_edit(&mut self) {
+        let Some(qe) = self.quick_edit.take() else {
+            return;
+        };
+        match qe.target {
+            SelectionState::Node(id) => self.apply_node_edit(id, qe.x, qe.y, qe.z),
+            SelectionState::Member(id) => {
+                self.apply_member_connectivity_from_strings(id, &qe.node_i, &qe.node_j);
+                self.apply_member_edit(id);
+            }
+            SelectionState::None => {}
+        }
+    }
+
+    /// Change a member's `i` / `j` nodes from text fields, if they parse and
+    /// differ from the current values.
+    fn apply_member_connectivity_from_strings(&mut self, id: MemberId, i: &str, j: &str) {
+        let (Ok(ni), Ok(nj)) = (i.trim().parse::<u32>(), j.trim().parse::<u32>()) else {
+            return;
+        };
+        let Some(model) = self.project.model.as_ref() else {
+            return;
+        };
+        let Some(m) = model.member(id) else {
+            return;
+        };
+        if m.node_i == NodeId(ni) && m.node_j == NodeId(nj) {
+            return;
+        }
+        let mut candidate = model.clone();
+        match candidate.set_member_nodes(id, NodeId(ni), NodeId(nj)) {
+            Ok(()) => {
+                let changed = candidate.revision() != model.revision();
+                if changed {
+                    self.commit_edit(candidate);
+                }
+            }
+            Err(e) => self.messages.push(AppMessage::error(e.message())),
+        }
     }
 
     /// Sync the member edit buffer when the selected member changes.
@@ -489,6 +791,9 @@ impl ViewportApp {
 
         let mut best_node: Option<(usize, f64)> = None;
         for (i, &pos) in scene.node_positions.iter().enumerate() {
+            if self.display.is_node_hidden(scene.node_ids[i]) {
+                continue;
+            }
             if let Some(p) = self.camera.project(pos, w, h) {
                 let d = (p.x - mouse[0]).hypot(p.y - mouse[1]);
                 if d < THRESH && best_node.map_or(true, |(_, bd)| d < bd) {
@@ -498,6 +803,9 @@ impl ViewportApp {
         }
         let mut best_mem: Option<(usize, f64)> = None;
         for (i, &(ni, nj)) in scene.member_nodes.iter().enumerate() {
+            if self.display.is_member_hidden(scene.member_ids[i]) {
+                continue;
+            }
             let Some(pi) = scene.node_positions.get(ni) else {
                 continue;
             };

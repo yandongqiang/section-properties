@@ -618,6 +618,40 @@ impl EditModel {
         Ok(())
     }
 
+    /// Delete a node **and every member attached to it** (cascade delete).
+    ///
+    /// Returns the stable IDs of the members that were removed.  The node's
+    /// support and nodal load are removed with it, and each removed member's
+    /// uniform and point loads are removed too.
+    ///
+    /// Unlike [`delete_node`](Self::delete_node) — which refuses to remove a
+    /// node still referenced by a member and reports the blockers — this is
+    /// the "delete the selection" variant used by the viewport context menu
+    /// and the ribbon Delete command.  Remaining nodes and members keep their
+    /// stable IDs; only their storage order can change.
+    pub fn delete_node_cascade(&mut self, id: NodeId) -> Result<Vec<MemberId>, EditError> {
+        if self.nodes.iter().all(|n| n.id != id) {
+            return Err(EditError::NodeNotFound(id));
+        }
+        let removed: Vec<MemberId> = self
+            .members
+            .iter()
+            .filter(|m| m.node_i == id || m.node_j == id)
+            .map(|m| m.id)
+            .collect();
+        self.members
+            .retain(|m| m.node_i != id && m.node_j != id);
+        self.member_uniform_loads
+            .retain(|(mid, _)| !removed.contains(mid));
+        self.member_point_loads
+            .retain(|(mid, _)| !removed.contains(mid));
+        self.nodes.retain(|n| n.id != id);
+        self.supports.retain(|(nid, _)| *nid != id);
+        self.nodal_loads.retain(|(nid, _)| *nid != id);
+        self.bump_revision();
+        Ok(removed)
+    }
+
     // ── Member operations ─────────────────────────────────────────────
 
     /// Add a member between two existing nodes.
@@ -670,6 +704,60 @@ impl EditModel {
         self.members.retain(|m| m.id != id);
         self.member_uniform_loads.retain(|(mid, _)| *mid != id);
         self.member_point_loads.retain(|(mid, _)| *mid != id);
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Change a member's connectivity (its `i` / `j` nodes).
+    ///
+    /// Validates like [`add_member`](Self::add_member): both nodes must exist,
+    /// differ, and not create a zero-length or duplicate member (a duplicate
+    /// between the *same* pair in either direction is rejected; this member's
+    /// own current connectivity is excluded from the check).  A no-op call
+    /// (same endpoints) leaves the model unchanged.
+    pub fn set_member_nodes(
+        &mut self,
+        id: MemberId,
+        node_i: NodeId,
+        node_j: NodeId,
+    ) -> Result<(), EditError> {
+        if node_i == node_j {
+            return Err(EditError::SelfConnection);
+        }
+        if self.nodes.iter().all(|n| n.id != node_i) {
+            return Err(EditError::NodeNotFound(node_i));
+        }
+        if self.nodes.iter().all(|n| n.id != node_j) {
+            return Err(EditError::NodeNotFound(node_j));
+        }
+        let (old_i, old_j) = {
+            let m = self
+                .members
+                .iter()
+                .find(|m| m.id == id)
+                .ok_or(EditError::MemberNotFound(id))?;
+            (m.node_i, m.node_j)
+        };
+        if (old_i, old_j) == (node_i, node_j) {
+            return Ok(());
+        }
+        let pi = self.node(node_i).unwrap();
+        let pj = self.node(node_j).unwrap();
+        let len = (pj.x - pi.x).hypot(pj.y - pi.y).hypot(pj.z - pi.z);
+        if len < 1e-12 {
+            return Err(EditError::ZeroLengthMember);
+        }
+        let dup = self.members.iter().any(|m| {
+            m.id != id
+                && ((m.node_i == node_i && m.node_j == node_j)
+                    || (m.node_i == node_j && m.node_j == node_i))
+        });
+        if dup {
+            return Err(EditError::DuplicateMember);
+        }
+        let m = self.members.iter_mut().find(|m| m.id == id).unwrap();
+        m.node_i = node_i;
+        m.node_j = node_j;
         self.bump_revision();
         Ok(())
     }
@@ -2309,5 +2397,155 @@ mod tests {
         assert!((s.iy() - 2e-6).abs() < 1e-15);
         assert!((s.iz() - 1e-6).abs() < 1e-15);
         assert!((s.j() - 3e-6).abs() < 1e-15);
+    }
+
+    // ── Cascade delete ────────────────────────────────────────────────
+
+    #[test]
+    fn cascade_delete_removes_attached_members() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let m1 = m.add_member(a, b).unwrap();
+        let m2 = m.add_member(a, c).unwrap();
+        let m3 = m.add_member(b, c).unwrap();
+
+        let removed = m.delete_node_cascade(a).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&m1));
+        assert!(removed.contains(&m2));
+        assert!(m.member(m3).is_some(), "unrelated member must survive");
+        assert_eq!(m.n_nodes(), 2);
+        assert_eq!(m.n_members(), 1);
+        // The surviving member still references existing nodes.
+        let surv = m.member(m3).unwrap();
+        assert!(m.node(surv.node_i).is_some());
+        assert!(m.node(surv.node_j).is_some());
+    }
+
+    #[test]
+    fn cascade_delete_removes_member_loads_and_node_support_load() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_uniform_load(mid, MemberUniformLoad3D::new(0.0, -1.0, 0.0))
+            .unwrap();
+        m.add_member_point_load(mid, MemberPointLoad3D::new(0.5, 0.0, -1.0, 0.0))
+            .unwrap();
+        m.set_support(b, SupportSpec::fixed()).unwrap();
+        m.set_nodal_load(b, NodalLoadSpec::new(1e3, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+
+        m.delete_node_cascade(b).unwrap();
+        assert_eq!(m.n_nodes(), 1);
+        assert_eq!(m.n_members(), 0);
+        assert!(m.member_uniform_loads().is_empty());
+        assert!(m.member_point_loads().is_empty());
+        assert!(!m.has_support(b));
+        assert!(!m.has_nodal_load(b));
+    }
+
+    #[test]
+    fn cascade_delete_not_found() {
+        let mut m = EditModel::new();
+        assert_eq!(
+            m.delete_node_cascade(NodeId(99)),
+            Err(EditError::NodeNotFound(NodeId(99)))
+        );
+    }
+
+    #[test]
+    fn cascade_delete_keeps_ids_stable() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let d = m.add_node(0.0, 0.0, 3.0).unwrap();
+        m.add_member(a, b).unwrap();
+        let keep = m.add_member(c, d).unwrap();
+
+        m.delete_node_cascade(a).unwrap();
+        // Remaining nodes keep their IDs and the surviving member its ID.
+        let ids: Vec<NodeId> = m.nodes().iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![b, c, d]);
+        assert!(m.member(keep).is_some());
+        // Rebuild a frame model to prove the surviving structure is consistent.
+        assert!(m.to_frame_model().is_ok());
+    }
+
+    // ── Connectivity edit ─────────────────────────────────────────────
+
+    #[test]
+    fn set_member_nodes_success() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.set_member_nodes(mid, b, c).unwrap();
+        let mm = m.member(mid).unwrap();
+        assert_eq!(mm.node_i, b);
+        assert_eq!(mm.node_j, c);
+    }
+
+    #[test]
+    fn set_member_nodes_noop_is_ok() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        let rev = m.revision();
+        m.set_member_nodes(mid, a, b).unwrap();
+        assert_eq!(m.revision(), rev);
+    }
+
+    #[test]
+    fn set_member_nodes_rejects_bad_inputs() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(6.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        m.add_member(b, c).unwrap();
+
+        assert_eq!(m.set_member_nodes(mid, a, a), Err(EditError::SelfConnection));
+        assert_eq!(
+            m.set_member_nodes(mid, a, NodeId(99)),
+            Err(EditError::NodeNotFound(NodeId(99)))
+        );
+        // Re-wiring a—b onto b—c duplicates the existing b—c member.
+        assert_eq!(m.set_member_nodes(mid, b, c), Err(EditError::DuplicateMember));
+        // Unchanged after every rejected attempt.
+        assert_eq!(m.member(mid).unwrap().node_i, a);
+        assert_eq!(m.member(mid).unwrap().node_j, b);
+    }
+
+    #[test]
+    fn set_member_nodes_rejects_zero_length() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let d = m.add_node(0.0, 3.0, 0.0).unwrap(); // coincident with c
+        let mid = m.add_member(a, b).unwrap();
+        assert_eq!(m.set_member_nodes(mid, c, d), Err(EditError::ZeroLengthMember));
+    }
+
+    // ── Member id stability after edits ───────────────────────────────
+
+    #[test]
+    fn member_indices_track_after_delete() {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(0.0, 3.0, 0.0).unwrap();
+        let m1 = m.add_member(a, b).unwrap();
+        let m2 = m.add_member(b, c).unwrap();
+        m.delete_member(m1).unwrap();
+        // m2 is now at index 0 but keeps its stable ID.
+        assert_eq!(m.member_index(m2), Some(0));
+        assert_eq!(m.member_index(m1), None);
     }
 }

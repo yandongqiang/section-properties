@@ -106,6 +106,17 @@ fn view_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
         ui.checkbox(&mut app.display.show_global_axes, "Global axes");
         ui.checkbox(&mut app.display.show_node_labels, "Node labels");
         ui.checkbox(&mut app.display.show_local_axes, "Local axes (selected)");
+        if ui
+            .add_enabled(
+                app.display.has_hidden(),
+                egui::Button::new("Show all (unhide)"),
+            )
+            .on_hover_text("Unhide every node and member hidden from the viewport")
+            .clicked()
+        {
+            app.show_all_hidden();
+            ui.close_menu();
+        }
         ui.separator();
         ui.label(egui::RichText::new("Renderer").strong());
         let gpu_active = gl_renderer::mode() == RenderMode::Gpu;

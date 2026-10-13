@@ -425,6 +425,13 @@ impl GlGeometry {
         // ── Members (extruded prisms) and nodes (spheres) ──
         if show_base {
             for mi in 0..scene.n_members() {
+                if scene
+                    .member_ids
+                    .get(mi)
+                    .is_some_and(|&id| display.is_member_hidden(id))
+                {
+                    continue;
+                }
                 let Some(&(ni, nj)) = scene.member_nodes.get(mi) else {
                     continue;
                 };
@@ -474,6 +481,13 @@ impl GlGeometry {
             }
 
             for (i, &pos) in scene.node_positions.iter().enumerate() {
+                if scene
+                    .node_ids
+                    .get(i)
+                    .is_some_and(|&id| display.is_node_hidden(id))
+                {
+                    continue;
+                }
                 let is_sel = scene
                     .node_ids
                     .get(i)
@@ -490,6 +504,13 @@ impl GlGeometry {
         // ── Support glyphs (item 1) ──
         if show_base {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
+                if scene
+                    .node_ids
+                    .get(i)
+                    .is_some_and(|&id| display.is_node_hidden(id))
+                {
+                    continue;
+                }
                 if let Some(spec) = scene.node_supports.get(i).copied().flatten() {
                     push_support(&mut solids, &mut overlay.verts, pos, spec, glyph);
                 }
@@ -499,6 +520,13 @@ impl GlGeometry {
         // ── Nodal load glyphs (item 2) ──
         if show_base {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
+                if scene
+                    .node_ids
+                    .get(i)
+                    .is_some_and(|&id| display.is_node_hidden(id))
+                {
+                    continue;
+                }
                 let Some(load) = scene.node_loads.get(i).copied().flatten() else {
                     continue;
                 };
@@ -530,6 +558,13 @@ impl GlGeometry {
         // ── Member uniform (distributed) load arrows ──
         if show_base {
             for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                if scene
+                    .member_ids
+                    .get(mi)
+                    .is_some_and(|&id| display.is_member_hidden(id))
+                {
+                    continue;
+                }
                 let Some(load) = scene.member_loads.get(mi).copied().flatten() else {
                     continue;
                 };
@@ -584,6 +619,13 @@ impl GlGeometry {
         // ── Member point load arrows ──
         if show_base {
             for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                if scene
+                    .member_ids
+                    .get(mi)
+                    .is_some_and(|&id| display.is_member_hidden(id))
+                {
+                    continue;
+                }
                 let Some(loads) = scene.member_point_loads.get(mi) else {
                     continue;
                 };
@@ -645,6 +687,13 @@ impl GlGeometry {
                 let scale = display.deformation_scale;
                 let deformed = scene.deformed_positions(&res.displacements, scale);
                 for mi in 0..scene.n_members() {
+                    if scene
+                        .member_ids
+                        .get(mi)
+                        .is_some_and(|&id| display.is_member_hidden(id))
+                    {
+                        continue;
+                    }
                     let len = scene.member_length(mi).unwrap_or(0.0);
                     let sec = scene.member_section(mi).unwrap_or_default();
                     let (dy, dz) = equivalent_rectangle(sec.area, sec.iy, sec.iz, len);
@@ -661,7 +710,14 @@ impl GlGeometry {
                         push_sweep(&mut solids, &pts, &section, rgba(DEF_MEMBER), true);
                     }
                 }
-                for &pos in &deformed {
+                for (i, &pos) in deformed.iter().enumerate() {
+                    if scene
+                        .node_ids
+                        .get(i)
+                        .is_some_and(|&id| display.is_node_hidden(id))
+                    {
+                        continue;
+                    }
                     push_sphere(&mut solids, pos, node_r * 0.9, rgba(DEF_NODE));
                 }
             }
@@ -671,6 +727,13 @@ impl GlGeometry {
         if display.mode == ResultViewMode::Reaction {
             if let Some(res) = result {
                 for (i, &pos) in scene.node_positions.iter().enumerate() {
+                    if scene
+                        .node_ids
+                        .get(i)
+                        .is_some_and(|&id| display.is_node_hidden(id))
+                    {
+                        continue;
+                    }
                     if scene.node_supports.get(i).copied().flatten().is_none() {
                         continue;
                     }
@@ -714,28 +777,30 @@ impl GlGeometry {
         if display.mode == ResultViewMode::MemberEndForces {
             if let (SelectionState::Member(mid), Some(res)) = (selection, result) {
                 if let Some(mi) = scene.member_index(mid) {
-                    if let Ok(f_global) = res.member_end_forces_global(mi) {
-                        let (ni, nj) = scene.member_nodes[mi];
-                        let pi = scene.node_positions[ni];
-                        let pj = scene.node_positions[nj];
-                        for (end, f) in [(pi, &f_global[0..3]), (pj, &f_global[6..9])] {
-                            let (fx, fy, fz) = (f[0], f[1], f[2]);
-                            let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
-                            if fmag <= 1e-9 {
-                                continue;
+                    if !display.is_member_hidden(mid) {
+                        if let Ok(f_global) = res.member_end_forces_global(mi) {
+                            let (ni, nj) = scene.member_nodes[mi];
+                            let pi = scene.node_positions[ni];
+                            let pj = scene.node_positions[nj];
+                            for (end, f) in [(pi, &f_global[0..3]), (pj, &f_global[6..9])] {
+                                let (fx, fy, fz) = (f[0], f[1], f[2]);
+                                let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+                                if fmag <= 1e-9 {
+                                    continue;
+                                }
+                                let dir = [fx / fmag, fy / fmag, fz / fmag];
+                                let scale = (0.3_f64.min(fmag * 1e-3)).max(glyph);
+                                push_arrow(
+                                    &mut solids,
+                                    end,
+                                    dir,
+                                    scale,
+                                    glyph * 0.22,
+                                    scale * 0.35,
+                                    glyph * 0.55,
+                                    rgba(SELECTED_C),
+                                );
                             }
-                            let dir = [fx / fmag, fy / fmag, fz / fmag];
-                            let scale = (0.3_f64.min(fmag * 1e-3)).max(glyph);
-                            push_arrow(
-                                &mut solids,
-                                end,
-                                dir,
-                                scale,
-                                glyph * 0.22,
-                                scale * 0.35,
-                                glyph * 0.55,
-                                rgba(SELECTED_C),
-                            );
                         }
                     }
                 }
@@ -746,10 +811,12 @@ impl GlGeometry {
         if display.show_local_axes && result.is_some() {
             if let SelectionState::Member(mid) = selection {
                 if let Some(mi) = scene.member_index(mid) {
-                    if let (Some(mpos), Some((xh, yh, zh))) =
-                        (scene.member_midpoint(mi), scene.member_local_axes(mi))
-                    {
-                        push_triad(&mut overlay.verts, mpos, xh, yh, zh, TRIAD_LEN);
+                    if !display.is_member_hidden(mid) {
+                        if let (Some(mpos), Some((xh, yh, zh))) =
+                            (scene.member_midpoint(mi), scene.member_local_axes(mi))
+                        {
+                            push_triad(&mut overlay.verts, mpos, xh, yh, zh, TRIAD_LEN);
+                        }
                     }
                 }
             }
