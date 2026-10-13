@@ -17,7 +17,6 @@ use egui;
 use viewport_poc::app_state::AnalysisStatus;
 use viewport_poc::camera::StandardView;
 use viewport_poc::display::ResultViewMode;
-use viewport_poc::selection::SelectionState;
 
 use super::icons::{self, IconFn};
 use super::module::WorkModule;
@@ -73,7 +72,7 @@ impl RibbonAction {
         match self {
             RibbonAction::Undo => app.history.can_undo(),
             RibbonAction::Redo => app.history.can_redo(),
-            RibbonAction::Delete => app.selection != SelectionState::None,
+            RibbonAction::Delete => !app.selected.is_empty(),
             RibbonAction::Solve => app.can_run_analysis(),
             RibbonAction::Placeholder => false,
             _ => true,

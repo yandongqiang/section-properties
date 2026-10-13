@@ -94,7 +94,7 @@ fn edit_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
         }
         ui.separator();
         if ui.button("Clear selection").clicked() {
-            app.selection = viewport_poc::selection::SelectionState::None;
+            app.clear_selection();
             ui.close_menu();
         }
     });
@@ -333,6 +333,11 @@ fn help_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
         ui.label("Scroll: zoom");
         ui.label("R: reset view");
         ui.label("Click: select");
+        ui.label("Shift+click: toggle in selection");
+        ui.label("Ctrl+click: add to selection");
+        ui.label("Shift-drag: box select");
+        ui.label("Ctrl+A: select all visible");
+        ui.label("Delete: delete selection");
         ui.label("Esc: clear selection");
         ui.label("Ctrl+Z / Ctrl+Y: undo / redo");
         ui.separator();

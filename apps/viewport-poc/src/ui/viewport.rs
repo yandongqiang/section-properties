@@ -14,7 +14,7 @@ use viewport_poc::display::{
 };
 use viewport_poc::project;
 use viewport_poc::scene::ViewportScene;
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::{ScreenRect, SelectionState};
 
 use super::gl_renderer::{self, RenderMode};
 use super::module::WorkModule;
@@ -61,6 +61,16 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // Camera input — does NOT trigger solve.  A primary drag that starts on
         // the view cube is left to the gizmo (which orbits itself), so the two
         // handlers never double up.
+        //
+        // Phase P6: a Shift (or Ctrl/Cmd) + primary drag is a **box select**
+        // rubber band instead of an orbit.  The plain primary drag still orbits
+        // and the Alt + primary drag still slides the section cut.
+        let box_modifier = ctx.input(|i| i.modifiers.shift || i.modifiers.command);
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            app.box_select_start = response
+                .interact_pointer_pos()
+                .filter(|p| box_modifier && !gizmo_rect.contains(*p));
+        }
         if response.dragged_by(egui::PointerButton::Primary) {
             let over_gizmo = response
                 .interact_pointer_pos()
@@ -68,11 +78,32 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             // Alt + primary-drag slides the section-cut plane along its normal
             // (only meaningful once the cut is enabled); otherwise it orbits.
             let cut_drag = app.display.section_cut.enabled && ctx.input(|i| i.modifiers.alt);
-            if cut_drag {
+            if app.box_select_start.is_some() && !over_gizmo {
+                // Rubber band in progress — leave the camera untouched.
+            } else if cut_drag {
                 drag_section_cut(app, response.drag_delta(), w, h);
             } else if !over_gizmo {
                 let d = response.drag_delta();
                 app.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01);
+            }
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some(start) = app.box_select_start.take() {
+                let end = response
+                    .interact_pointer_pos()
+                    .or_else(|| ctx.input(|i| i.pointer.interact_pos()));
+                if let Some(end) = end {
+                    let local = |p: egui::Pos2| {
+                        [p.x as f64 - rect.min.x as f64, p.y as f64 - rect.min.y as f64]
+                    };
+                    let sr = ScreenRect::from_corners(local(start), local(end));
+                    if !sr.is_click() {
+                        // Ctrl/Cmd held ⇒ add to the existing selection.
+                        let add = ctx.input(|i| i.modifiers.command);
+                        app.box_select(sr, [w, h], add);
+                        app.quick_edit = None;
+                    }
+                }
             }
         }
         if response.dragged_by(egui::PointerButton::Secondary) {
@@ -92,16 +123,26 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // Escape closes the quick-edit popup first; only clear the selection
         // when nothing else is open.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && app.quick_edit.is_none() {
-            app.selection = SelectionState::None;
+            app.clear_selection();
         }
 
         // Selection on click — does NOT trigger solve.  Clicks on the view cube
         // are handled by the gizmo, not by picking.  A click in the viewport
         // also dismisses the quick-edit popup ("click away to close").
+        //
+        // Phase P6 modifiers: plain = replace, Shift = toggle, Ctrl/Cmd = add.
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if !gizmo_rect.contains(pos) {
-                    app.selection = pick_at(app, pos, rect, w, h);
+                    let hit = pick_at(app, pos, rect, w, h);
+                    let mods = ctx.input(|i| i.modifiers);
+                    if mods.shift {
+                        app.select_toggle(hit);
+                    } else if mods.command {
+                        app.select_add(hit);
+                    } else {
+                        app.select_only(hit);
+                    }
                     app.quick_edit = None;
                 }
             }
@@ -172,7 +213,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 &app.camera,
                 scene,
                 &app.display,
-                app.selection,
+                &app.selected,
                 app.analysis_result(),
                 show_base,
                 w / h,
@@ -247,7 +288,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 let Some(pb) = app.camera.project(cb, w, h) else {
                     continue;
                 };
-                let is_sel = app.selection == SelectionState::Member(scene.member_ids[mi]);
+                let is_sel = app.selected.contains_member(scene.member_ids[mi]);
                 let (wd, col) = if is_sel {
                     (4.0, SELECTED_C)
                 } else {
@@ -272,7 +313,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 let Some(p) = app.camera.project(pos, w, h) else {
                     continue;
                 };
-                let is_sel = app.selection == SelectionState::Node(scene.node_ids[i]);
+                let is_sel = app.selected.contains_node(scene.node_ids[i]);
                 let r = if is_sel { 7.0 } else { 5.0 };
                 let col = if is_sel { SELECTED_C } else { NODE_C };
                 painter.circle_filled(scr(&p, rect), r, col);
@@ -753,8 +794,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
 
         // ── Draw member end-force indicators (Software only; GPU 3-D arrows) ──
         if !use_gpu && app.display.mode == ResultViewMode::MemberEndForces {
-            if let (SelectionState::Member(mid), Some(result)) =
-                (app.selection, app.analysis_result())
+            if let (Some(mid), Some(result)) =
+                (app.selected.primary().member_id(), app.analysis_result())
             {
                 if let Some(mi) = scene.member_index(mid) {
                     if !app.display.is_member_hidden(mid) {
@@ -812,8 +853,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
 
         // ── Draw local axes for selected member (Software only; GPU triads) ──
         if !use_gpu {
-            if let (SelectionState::Member(mid), Some(result)) =
-                (app.selection, app.analysis_result())
+            if let (Some(mid), Some(result)) =
+                (app.selected.primary().member_id(), app.analysis_result())
             {
                 if app.display.show_local_axes && !app.display.is_member_hidden(mid) {
                     if let Some(mi) = scene.member_index(mid) {
@@ -864,10 +905,25 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         painter.text(
             rect.min + egui::vec2(10.0, rect.height() - 10.0),
             egui::Align2::LEFT_BOTTOM,
-            "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
+            "Drag: orbit | Shift-drag: box select | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Shift/Ctrl-click: add | Ctrl+A: all | Del: delete | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
             egui::FontId::proportional(11.0),
             HELP_C,
         );
+
+        // ── Box-select rubber band (drawn over the scene) ──
+        if let Some(start) = app.box_select_start {
+            if response.dragged_by(egui::PointerButton::Primary) {
+                if let Some(cur) = response.interact_pointer_pos() {
+                    let band = egui::Rect::from_two_pos(start, cur);
+                    painter.rect_filled(
+                        band,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 190, 255, 40),
+                    );
+                    painter.rect_stroke(band, 0.0, egui::Stroke::new(1.0_f32, SELECTED_C));
+                }
+            }
+        }
 
         // ── Section-cut plane indicator (both renderers) ──
         draw_section_cut_plane(app, scene, rect, &painter, w, h);
@@ -1046,17 +1102,24 @@ fn viewport_context_menu(app: &mut ViewportApp, ui: &mut egui::Ui, target: Selec
         SelectionState::Node(id) => {
             ui.label(egui::RichText::new(format!("Node N{}", id.0)).strong());
             ui.separator();
-            if ui.button("Delete node").clicked() {
-                app.delete_node(id);
+            let target = SelectionState::Node(id);
+            let multi = app.selected.contains_state(target) && app.selected.len() > 1;
+            let del_label = if multi {
+                format!("Delete selection ({})", app.selected.len())
+            } else {
+                "Delete node".to_string()
+            };
+            if ui.button(del_label).clicked() {
+                app.delete_target_or_selection(target);
                 ui.close_menu();
             }
-            if ui.button("Hide node").clicked() {
-                app.selection = SelectionState::Node(id);
-                app.hide_node(id);
+            let hide_label = if multi { "Hide selection" } else { "Hide node" };
+            if ui.button(hide_label).clicked() {
+                app.hide_target_or_selection(target);
                 ui.close_menu();
             }
             if ui.button("Hide others").clicked() {
-                app.selection = SelectionState::Node(id);
+                app.select_only(target);
                 app.hide_others_for_selection();
                 ui.close_menu();
             }
@@ -1082,17 +1145,24 @@ fn viewport_context_menu(app: &mut ViewportApp, ui: &mut egui::Ui, target: Selec
         SelectionState::Member(id) => {
             ui.label(egui::RichText::new(format!("Member M{}", id.0)).strong());
             ui.separator();
-            if ui.button("Delete member").clicked() {
-                app.delete_member(id);
+            let target = SelectionState::Member(id);
+            let multi = app.selected.contains_state(target) && app.selected.len() > 1;
+            let del_label = if multi {
+                format!("Delete selection ({})", app.selected.len())
+            } else {
+                "Delete member".to_string()
+            };
+            if ui.button(del_label).clicked() {
+                app.delete_target_or_selection(target);
                 ui.close_menu();
             }
-            if ui.button("Hide member").clicked() {
-                app.selection = SelectionState::Member(id);
-                app.hide_member(id);
+            let hide_label = if multi { "Hide selection" } else { "Hide member" };
+            if ui.button(hide_label).clicked() {
+                app.hide_target_or_selection(target);
                 ui.close_menu();
             }
             if ui.button("Hide others").clicked() {
-                app.selection = SelectionState::Member(id);
+                app.select_only(target);
                 app.hide_others_for_selection();
                 ui.close_menu();
             }

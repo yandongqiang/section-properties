@@ -9,7 +9,7 @@ use egui;
 use structural_analysis::FrameAnalysisResult3D;
 use viewport_poc::display::{displacement_magnitudes, fmt_eng};
 use viewport_poc::edit_model::EditModel;
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::{SelectionSet, SelectionState};
 
 use crate::ViewportApp;
 
@@ -41,7 +41,7 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
             ui.heading("Model Browser");
             ui.separator();
 
-            let selection = app.selection;
+            let selection = app.selected.clone();
             let result = app.analysis_result();
             let mut clicked: Option<SelectionState> = None;
 
@@ -49,14 +49,23 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        clicked = render_tree(ui, model, result, selection);
+                        clicked = render_tree(ui, model, result, &selection);
                     });
             } else {
                 ui.label("No model loaded");
             }
 
+            // Phase P6: modifier-aware tree clicks, matching the viewport
+            // (plain = replace, Shift = toggle, Ctrl/Cmd = add).
             if let Some(sel) = clicked {
-                app.selection = sel;
+                let mods = ctx.input(|i| i.modifiers);
+                if mods.shift {
+                    app.select_toggle(sel);
+                } else if mods.command {
+                    app.select_add(sel);
+                } else {
+                    app.select_only(sel);
+                }
             }
 
             ui.separator();
@@ -69,7 +78,7 @@ fn render_tree(
     ui: &mut egui::Ui,
     model: &EditModel,
     result: Option<&FrameAnalysisResult3D>,
-    selection: SelectionState,
+    selection: &SelectionSet,
 ) -> Option<SelectionState> {
     let mut clicked: Option<SelectionState> = None;
 
@@ -91,14 +100,14 @@ fn render_tree(
 fn nodes_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     egui::CollapsingHeader::new(format!("Nodes ({})", model.n_nodes()))
         .default_open(true)
         .show(ui, |ui| {
             for node in model.nodes() {
-                let is_sel = selection == SelectionState::Node(node.id);
+                let is_sel = selection.contains_node(node.id);
                 let sup_label = match model.support(node.id) {
                     Some(spec) => format!(" [{}]", spec.label()),
                     None => String::new(),
@@ -121,14 +130,14 @@ fn nodes_branch(
 fn members_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     egui::CollapsingHeader::new(format!("Members ({})", model.n_members()))
         .default_open(true)
         .show(ui, |ui| {
             for member in model.members() {
-                let is_sel = selection == SelectionState::Member(member.id);
+                let is_sel = selection.contains_member(member.id);
                 let load_label = match model.member_uniform_load(member.id) {
                     Some(spec) if !spec.is_zero() => " [L]".to_string(),
                     _ => String::new(),
@@ -152,7 +161,7 @@ fn members_branch(
 fn materials_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     egui::CollapsingHeader::new(format!("Materials ({})", model.n_members()))
@@ -162,7 +171,7 @@ fn materials_branch(
                 let Some(sec) = model.member_section(member.id) else {
                     continue;
                 };
-                let is_sel = selection == SelectionState::Member(member.id);
+                let is_sel = selection.contains_member(member.id);
                 let text = format!(
                     "M{}: E={:.3e} G={:.3e}",
                     member.id.0,
@@ -179,7 +188,7 @@ fn materials_branch(
 fn sections_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     egui::CollapsingHeader::new(format!("Sections ({})", model.n_members()))
@@ -189,7 +198,7 @@ fn sections_branch(
                 let Some(sec) = model.member_section(member.id) else {
                     continue;
                 };
-                let is_sel = selection == SelectionState::Member(member.id);
+                let is_sel = selection.contains_member(member.id);
                 let text = format!(
                     "M{}: A={:.3e} Iy={:.3e} Iz={:.3e} J={:.3e}",
                     member.id.0,
@@ -208,7 +217,7 @@ fn sections_branch(
 fn supports_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     let supported: Vec<_> = model
@@ -220,7 +229,7 @@ fn supports_branch(
         .default_open(false)
         .show(ui, |ui| {
             for (id, label) in supported {
-                let is_sel = selection == SelectionState::Node(id);
+                let is_sel = selection.contains_node(id);
                 if ui
                     .selectable_label(is_sel, format!("N{}: {}", id.0, label))
                     .clicked()
@@ -234,7 +243,7 @@ fn supports_branch(
 fn loads_branch(
     ui: &mut egui::Ui,
     model: &EditModel,
-    selection: SelectionState,
+    selection: &SelectionSet,
     clicked: &mut Option<SelectionState>,
 ) {
     let nodal: Vec<_> = model
@@ -275,7 +284,7 @@ fn loads_branch(
         .default_open(false)
         .show(ui, |ui| {
             for (id, spec) in &nodal {
-                let is_sel = selection == SelectionState::Node(*id);
+                let is_sel = selection.contains_node(*id);
                 let text = format!(
                     "N{}: F=({:.3e}, {:.3e}, {:.3e}) M=({:.3e}, {:.3e}, {:.3e})",
                     id.0, spec.fx, spec.fy, spec.fz, spec.mx, spec.my, spec.mz
@@ -285,7 +294,7 @@ fn loads_branch(
                 }
             }
             for (id, spec) in &uniform {
-                let is_sel = selection == SelectionState::Member(*id);
+                let is_sel = selection.contains_member(*id);
                 let text = format!(
                     "M{}: q=({:.3e}, {:.3e}, {:.3e})",
                     id.0, spec.qx, spec.qy, spec.qz
@@ -295,7 +304,7 @@ fn loads_branch(
                 }
             }
             for (id, loads) in &points {
-                let is_sel = selection == SelectionState::Member(*id);
+                let is_sel = selection.contains_member(*id);
                 for pl in loads {
                     let text = format!(
                         "M{}: P @ {:.2} = ({:.3e}, {:.3e}, {:.3e})",

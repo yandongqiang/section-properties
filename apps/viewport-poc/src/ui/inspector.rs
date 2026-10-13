@@ -12,7 +12,7 @@ use structural_analysis::Dof3D;
 use viewport_poc::app_state::{AnalysisStatus, ModelSummary, ResultsSummary, SolverBackend};
 use viewport_poc::display::ResultViewMode;
 use viewport_poc::edit_model::{MemberPointLoad3D, NodalLoadSpec, SupportSpec};
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::{SelectionSet, SelectionState};
 
 use super::module::WorkModule;
 use super::theme;
@@ -490,20 +490,75 @@ fn show_add_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
 // ── Selection: geometry & supports (Model module) ───────────────────────
 
 fn show_selection_geometry(app: &mut ViewportApp, ui: &mut egui::Ui) {
-    let sel = app.selection;
+    let set = app.selected.clone();
     egui::CollapsingHeader::new("Selection")
         .default_open(true)
-        .show(ui, |ui| match sel {
-            SelectionState::None => {
+        .show(ui, |ui| match set.single() {
+            Some(SelectionState::Node(id)) => show_node_geometry(app, ui, id),
+            Some(SelectionState::Member(id)) => show_member_geometry(app, ui, id),
+            _ if set.is_empty() => {
                 ui.label("Nothing selected. Click a node or member.");
             }
-            SelectionState::Node(id) => {
-                show_node_geometry(app, ui, id);
-            }
-            SelectionState::Member(id) => {
-                show_member_geometry(app, ui, id);
-            }
+            _ => show_multi_selection(app, ui, &set),
         });
+}
+
+/// Compact summary + bulk actions shown when more than one entity is selected.
+///
+/// Replaces the per-entity detail fields (which are meaningless for a mixed
+/// selection) with the actions that *are* meaningful in bulk: delete the whole
+/// selection in one undo step, hide it, or route to the Section module when the
+/// selection contains members.
+fn show_multi_selection(app: &mut ViewportApp, ui: &mut egui::Ui, set: &SelectionSet) {
+    ui.strong(format!("{} entities selected", set.len()));
+    ui.label(format!(
+        "{} node(s), {} member(s)",
+        set.node_count(),
+        set.member_count()
+    ));
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("Delete")
+            .on_hover_text("Delete the whole selection (single undo step)")
+            .clicked()
+        {
+            app.delete_selection();
+        }
+        if ui
+            .button("Hide")
+            .on_hover_text("Hide the whole selection (view only)")
+            .clicked()
+        {
+            app.hide_selected();
+        }
+    });
+    if set.member_count() > 0 && ui.button("Assign section\u{2026}").clicked() {
+        app.module = WorkModule::Section;
+    }
+    // A short, deterministic preview of what is selected.
+    let preview: Vec<String> = set
+        .iter()
+        .take(8)
+        .map(|s| match s {
+            SelectionState::Node(id) => format!("N{}", id.0),
+            SelectionState::Member(id) => format!("M{}", id.0),
+            SelectionState::None => String::new(),
+        })
+        .collect();
+    if !preview.is_empty() {
+        let more = set.len().saturating_sub(preview.len());
+        let suffix = if more > 0 {
+            format!(" \u{2026} (+{more})")
+        } else {
+            String::new()
+        };
+        ui.label(
+            egui::RichText::new(format!("{}{}", preview.join(", "), suffix))
+                .color(theme::HELP_C)
+                .small(),
+        );
+    }
 }
 
 fn show_node_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc::edit_model::NodeId) {
@@ -678,7 +733,7 @@ fn show_node_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc
                 Ok(()) => {
                     if candidate.revision() != model.revision() {
                         app.commit_edit(candidate);
-                        app.selection = SelectionState::None;
+                        app.clear_selection();
                         app.messages.push(viewport_poc::app_state::AppMessage::info(format!(
                             "Deleted node N{}",
                             id.0
@@ -806,7 +861,7 @@ fn show_member_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_p
                 Ok(()) => {
                     if candidate.revision() != model.revision() {
                         app.commit_edit(candidate);
-                        app.selection = SelectionState::None;
+                        app.clear_selection();
                         app.messages.push(viewport_poc::app_state::AppMessage::info(format!(
                             "Deleted member M{}",
                             id.0
@@ -822,20 +877,32 @@ fn show_member_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_p
 // ── Selection: loads (Load module) ──────────────────────────────────────
 
 fn show_selection_loads(app: &mut ViewportApp, ui: &mut egui::Ui) {
-    let sel = app.selection;
+    let set = app.selected.clone();
     egui::CollapsingHeader::new("Selection")
         .default_open(true)
-        .show(ui, |ui| match sel {
-            SelectionState::None => {
-                ui.label("Nothing selected. Click a node or member.");
-            }
-            SelectionState::Node(id) => {
+        .show(ui, |ui| match set.single() {
+            Some(SelectionState::Node(id)) => {
                 ui.strong(format!("Node N{}", id.0));
                 show_node_loads(app, ui, id);
             }
-            SelectionState::Member(id) => {
+            Some(SelectionState::Member(id)) => {
                 ui.strong(format!("Member M{}", id.0));
                 show_member_loads(app, ui, id);
+            }
+            _ if set.is_empty() => {
+                ui.label("Nothing selected. Click a node or member.");
+            }
+            _ => {
+                ui.strong(format!("{} entities selected", set.len()));
+                ui.label(format!(
+                    "{} node(s), {} member(s)",
+                    set.node_count(),
+                    set.member_count()
+                ));
+                ui.label(
+                    egui::RichText::new("Select a single entity to edit its load.")
+                        .color(theme::HELP_C),
+                );
             }
         });
 }
@@ -1081,7 +1148,10 @@ fn show_member_loads(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc:
 // ── Selection: read-only results (Results module) ───────────────────────
 
 fn show_selection_results(app: &mut ViewportApp, ui: &mut egui::Ui) {
-    let SelectionState::Member(id) = app.selection else {
+    // Read-only member results need a single member; with a multi-selection we
+    // simply show nothing here (the detail lives on the primary member via the
+    // viewport's end-force / local-axis overlays).
+    let Some(SelectionState::Member(id)) = app.selected.single() else {
         return;
     };
     egui::CollapsingHeader::new(format!("Member M{} results", id.0))

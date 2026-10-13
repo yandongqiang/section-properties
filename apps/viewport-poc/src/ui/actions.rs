@@ -15,7 +15,7 @@ use viewport_poc::display::{CutAxis, ResultDisplayState, ResultViewMode};
 use viewport_poc::edit_history::EditHistory;
 use viewport_poc::edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodeId};
 use viewport_poc::scene::ViewportScene;
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::{ScreenRect, SelectionSet, SelectionState};
 use viewport_poc::{model, persistence, project};
 
 use super::module::WorkModule;
@@ -40,6 +40,7 @@ impl ViewportApp {
             project: Project::empty(),
             scene: None,
             camera: Camera3D::default(),
+            selected: SelectionSet::default(),
             selection: SelectionState::None,
             display: ResultDisplayState::default(),
             messages,
@@ -66,6 +67,7 @@ impl ViewportApp {
             window_size: settings.window.map(|w| [w.width, w.height]),
             ctx_menu_target: SelectionState::None,
             quick_edit: None,
+            box_select_start: None,
         }
     }
 
@@ -291,18 +293,160 @@ impl ViewportApp {
             .max(1.0)
     }
 
+    // ── Phase P6: multi-selection ──────────────────────────────────────
+
+    /// Replace the whole selection with `set`, keeping the single-entity
+    /// projection ([`selection`](crate::ViewportApp::selection)) in lock-step.
+    ///
+    /// This is the **only** place the two representations are written, so the
+    /// authoritative [`selected`](crate::ViewportApp::selected) set and its
+    /// primary projection can never drift apart.
+    pub(crate) fn set_selection(&mut self, set: SelectionSet) {
+        self.selected = set;
+        self.selection = self.selected.primary();
+    }
+
+    /// Replace the selection with a single entity (plain click / tree click).
+    pub(crate) fn select_only(&mut self, state: SelectionState) {
+        self.set_selection(SelectionSet::from_single(state));
+    }
+
+    /// Toggle one entity in/out of the selection (Shift+click).  `None` is a
+    /// no-op.
+    pub(crate) fn select_toggle(&mut self, state: SelectionState) {
+        if state == SelectionState::None {
+            return;
+        }
+        let mut set = self.selected.clone();
+        set.toggle_state(state);
+        self.set_selection(set);
+    }
+
+    /// Add one entity to the selection (Ctrl+click).  `None` is a no-op.
+    pub(crate) fn select_add(&mut self, state: SelectionState) {
+        if state == SelectionState::None {
+            return;
+        }
+        let mut set = self.selected.clone();
+        set.add_state(state);
+        self.set_selection(set);
+    }
+
+    /// Clear the selection.
+    pub(crate) fn clear_selection(&mut self) {
+        self.set_selection(SelectionSet::default());
+    }
+
+    /// Select every currently **visible** node and member (Ctrl+A).  Hidden
+    /// entities (and, implicitly, ones removed by the section cut's markers)
+    /// are skipped, matching the box-select rule.
+    pub(crate) fn select_all_visible(&mut self) {
+        let (nodes, members) = {
+            let Some(scene) = self.scene.as_ref() else {
+                self.clear_selection();
+                return;
+            };
+            let nodes: Vec<NodeId> = scene
+                .node_ids
+                .iter()
+                .copied()
+                .filter(|&id| !self.display.is_node_hidden(id))
+                .collect();
+            let members: Vec<MemberId> = scene
+                .member_ids
+                .iter()
+                .copied()
+                .filter(|&id| !self.display.is_member_hidden(id))
+                .collect();
+            (nodes, members)
+        };
+        let mut set = SelectionSet::default();
+        for id in nodes {
+            set.add_node(id);
+        }
+        for id in members {
+            set.add_member(id);
+        }
+        self.set_selection(set);
+    }
+
+    /// Rubber-band box select (Shift/Ctrl + primary drag).
+    ///
+    /// `box` is in **viewport-local points** (origin at the viewport's top-left,
+    /// matching [`Camera3D::project`]); `screen` is `[w, h]`.  Every visible
+    /// node whose projection falls inside the box is selected, and every
+    /// visible member whose **both** projected endpoints fall inside it.  When
+    /// `add` is `true` the hits are added to the current selection, otherwise
+    /// they replace it.
+    pub(crate) fn box_select(&mut self, box_: ScreenRect, screen: [f64; 2], add: bool) {
+        let (w, h) = (screen[0], screen[1]);
+        let mut set = if add {
+            self.selected.clone()
+        } else {
+            SelectionSet::default()
+        };
+        {
+            let Some(scene) = self.scene.as_ref() else {
+                self.set_selection(set);
+                return;
+            };
+            for (i, &pos) in scene.node_positions.iter().enumerate() {
+                let Some(&id) = scene.node_ids.get(i) else {
+                    continue;
+                };
+                if self.display.is_node_hidden(id) || !self.display.section_cut.keeps(pos) {
+                    continue;
+                }
+                if let Some(p) = self.camera.project(pos, w, h) {
+                    if box_.hits_point([p.x, p.y]) {
+                        set.add_node(id);
+                    }
+                }
+            }
+            for mi in 0..scene.n_members() {
+                let Some(&id) = scene.member_ids.get(mi) else {
+                    continue;
+                };
+                if self.display.is_member_hidden(id) {
+                    continue;
+                }
+                let Some(&(ni, nj)) = scene.member_nodes.get(mi) else {
+                    continue;
+                };
+                let (Some(&pi), Some(&pj)) = (
+                    scene.node_positions.get(ni),
+                    scene.node_positions.get(nj),
+                ) else {
+                    continue;
+                };
+                let Some((ca, cb)) = self.display.section_cut.clip_segment(pi, pj) else {
+                    continue;
+                };
+                if let (Some(pa), Some(pb)) = (
+                    self.camera.project(ca, w, h),
+                    self.camera.project(cb, w, h),
+                ) {
+                    if box_.hits_segment([pa.x, pa.y], [pb.x, pb.y]) {
+                        set.add_member(id);
+                    }
+                }
+            }
+        }
+        self.set_selection(set);
+    }
+
     /// Select an entity and switch to the module whose inspector edits it.
     ///
     /// Reuses the inspector's existing edit paths — this never duplicates the
     /// support / load / section mechanics, it only routes the user there.
     pub(crate) fn select_and_open(&mut self, sel: SelectionState, module: WorkModule) {
-        self.selection = sel;
+        self.select_only(sel);
         self.module = module;
     }
 
     /// Select a member and switch the result view to its end forces.
     pub(crate) fn show_member_end_forces(&mut self, id: MemberId) {
-        self.selection = SelectionState::Member(id);
+        self.select_only(SelectionState::Member(id));
         self.display.mode = ResultViewMode::MemberEndForces;
     }
 
@@ -314,6 +458,28 @@ impl ViewportApp {
     /// Hide one member (view-only).
     pub(crate) fn hide_member(&mut self, id: MemberId) {
         self.display.hide_member(id);
+    }
+
+    /// Hide the whole current selection (view-only; never touches the model).
+    pub(crate) fn hide_selected(&mut self) {
+        let nodes: Vec<NodeId> = self.selected.nodes().to_vec();
+        let members: Vec<MemberId> = self.selected.members().to_vec();
+        for id in nodes {
+            self.hide_node(id);
+        }
+        for id in members {
+            self.hide_member(id);
+        }
+    }
+
+    /// Context-menu helper: hide the clicked `target`.  When `target` is part
+    /// of a multi-selection the whole selection is hidden, otherwise the single
+    /// target is selected and hidden.
+    pub(crate) fn hide_target_or_selection(&mut self, target: SelectionState) {
+        if !self.selected.contains_state(target) {
+            self.select_only(target);
+        }
+        self.hide_selected();
     }
 
     /// `Hide others` for the current selection.
@@ -386,72 +552,60 @@ impl ViewportApp {
         }
     }
 
-    /// Delete the current selection (undoable).  A node cascades to its
-    /// attached members; a member removes its own loads.  Returns `true` if
-    /// something was selected and a delete was attempted.
+    /// Delete the current selection (undoable) in **one atomic step**.
+    ///
+    /// Members are removed explicitly first, then nodes are cascade-deleted
+    /// (taking any still-attached members with them).  Because the whole
+    /// mutation runs on a single cloned model committed once via
+    /// [`commit_edit`](Self::commit_edit), it produces exactly one undo entry.
+    /// Returns `true` when something was selected and deleted.
     pub(crate) fn delete_selection(&mut self) -> bool {
-        match self.selection {
-            SelectionState::Node(id) => {
-                self.delete_node(id);
-                true
-            }
-            SelectionState::Member(id) => {
-                self.delete_member(id);
-                true
-            }
-            SelectionState::None => false,
+        if self.selected.is_empty() {
+            return false;
         }
-    }
-
-    /// Undoable cascade delete of a node and its attached members.
-    pub(crate) fn delete_node(&mut self, id: NodeId) {
+        let node_ids: Vec<NodeId> = self.selected.nodes().to_vec();
+        let member_ids: Vec<MemberId> = self.selected.members().to_vec();
         let Some(model) = self.project.model.as_ref() else {
             self.messages.push(AppMessage::error("No model loaded"));
-            return;
+            return false;
         };
-        if model.node(id).is_none() {
-            self.messages
-                .push(AppMessage::warning(format!("Node N{} no longer exists", id.0)));
-            return;
-        }
         let mut candidate = model.clone();
-        match candidate.delete_node_cascade(id) {
-            Ok(removed) => {
-                self.commit_edit(candidate);
-                self.validate_selection();
-                let extra = if removed.is_empty() {
-                    String::new()
-                } else {
-                    format!(" and {} member(s)", removed.len())
-                };
-                self.messages
-                    .push(AppMessage::info(format!("Deleted node N{}{}", id.0, extra)));
+        let mut n_nodes = 0usize;
+        let mut n_members = 0usize;
+        // Explicit member deletions first; then cascade node deletions (which
+        // may remove further attached members).
+        for mid in member_ids {
+            if candidate.member(mid).is_some() && candidate.delete_member(mid).is_ok() {
+                n_members += 1;
             }
-            Err(e) => self.messages.push(AppMessage::error(e.message())),
         }
+        for nid in node_ids {
+            if candidate.node(nid).is_some() {
+                if let Ok(removed) = candidate.delete_node_cascade(nid) {
+                    n_nodes += 1;
+                    n_members += removed.len();
+                }
+            }
+        }
+        if n_nodes == 0 && n_members == 0 {
+            return false;
+        }
+        self.commit_edit(candidate);
+        self.clear_selection();
+        self.messages.push(AppMessage::info(format!(
+            "Deleted {n_nodes} node(s) and {n_members} member(s)"
+        )));
+        true
     }
 
-    /// Undoable delete of a member.
-    pub(crate) fn delete_member(&mut self, id: MemberId) {
-        let Some(model) = self.project.model.as_ref() else {
-            self.messages.push(AppMessage::error("No model loaded"));
-            return;
-        };
-        if model.member(id).is_none() {
-            self.messages
-                .push(AppMessage::warning(format!("Member M{} no longer exists", id.0)));
-            return;
+    /// Context-menu helper: delete the clicked `target`.  When `target` is part
+    /// of a multi-selection the whole selection is deleted atomically,
+    /// otherwise the single target is selected and deleted.
+    pub(crate) fn delete_target_or_selection(&mut self, target: SelectionState) {
+        if !self.selected.contains_state(target) {
+            self.select_only(target);
         }
-        let mut candidate = model.clone();
-        match candidate.delete_member(id) {
-            Ok(()) => {
-                self.commit_edit(candidate);
-                self.validate_selection();
-                self.messages
-                    .push(AppMessage::info(format!("Deleted member M{}", id.0)));
-            }
-            Err(e) => self.messages.push(AppMessage::error(e.message())),
-        }
+        self.delete_selection();
     }
 
     // ── Phase P4: double-click quick edit ──────────────────────────────
@@ -671,7 +825,7 @@ impl ViewportApp {
     pub(crate) fn clear_project(&mut self) {
         self.project.clear();
         self.scene = None;
-        self.selection = SelectionState::None;
+        self.clear_selection();
         self.project_path = None;
         self.saved_fingerprint = None;
         self.history.clear();
@@ -695,7 +849,7 @@ impl ViewportApp {
     pub(crate) fn do_new(&mut self) {
         self.project.load_model("Untitled".into(), EditModel::new());
         self.rebuild_scene();
-        self.selection = SelectionState::None;
+        self.clear_selection();
         self.project_path = None;
         self.saved_fingerprint = None;
         self.history.clear();
@@ -726,7 +880,7 @@ impl ViewportApp {
                     self.section_editor.set_def(section);
                 }
                 self.rebuild_scene();
-                self.selection = SelectionState::None;
+                self.clear_selection();
                 self.project_path = Some(path);
                 self.saved_fingerprint = Some(fp);
                 self.history.clear();
@@ -813,20 +967,20 @@ impl ViewportApp {
         self.show_unsaved_dialog = false;
     }
 
-    /// Clear selection if it points to a node/member that no longer exists.
+    /// Drop selected IDs that no longer exist in the model (after an edit /
+    /// delete / undo), keeping the rest of the selection valid.
     pub(crate) fn validate_selection(&mut self) {
-        if let Some(ref scene) = self.scene {
-            match self.selection {
-                SelectionState::Node(id) if scene.node_index(id).is_none() => {
-                    self.selection = SelectionState::None;
-                }
-                SelectionState::Member(id) if scene.member_index(id).is_none() => {
-                    self.selection = SelectionState::None;
-                }
-                _ => {}
-            }
-        } else {
-            self.selection = SelectionState::None;
+        let retained: Option<SelectionSet> = self.scene.as_ref().map(|scene| {
+            let mut set = self.selected.clone();
+            set.retain(
+                |n| scene.node_index(n).is_some(),
+                |m| scene.member_index(m).is_some(),
+            );
+            set
+        });
+        match retained {
+            Some(set) => self.set_selection(set),
+            None => self.clear_selection(),
         }
     }
 
@@ -1042,6 +1196,14 @@ impl ViewportApp {
             // Ctrl+I toggles the right-hand inspector panel.
             if ctx.input(|i| i.key_pressed(egui::Key::I) && i.modifiers.ctrl) {
                 self.inspector_collapsed = !self.inspector_collapsed;
+            }
+            // Phase P6: Ctrl+A selects every visible node/member; Delete
+            // removes the whole selection as one undoable step.
+            if ctx.input(|i| i.key_pressed(egui::Key::A) && i.modifiers.ctrl) {
+                self.select_all_visible();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+                self.delete_selection();
             }
             // View shortcuts: F = fit, 1..4 = standard views.
             if ctx.input(|i| i.key_pressed(egui::Key::F)) {

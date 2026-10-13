@@ -4,7 +4,7 @@ use egui;
 
 use structural_analysis::Dof3D;
 use viewport_poc::app_state::{AnalysisStatus, MessageLevel};
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::{SelectionSet, SelectionState};
 
 use super::module::WorkModule;
 use super::theme;
@@ -234,14 +234,30 @@ fn status_line(app: &ViewportApp, ui: &mut egui::Ui) {
         ui.separator();
         ui.label(format!("Module: {}", WorkModule::label(app.module)));
         ui.separator();
-        ui.label(selection_summary(app.selection));
+        ui.label(selection_summary(&app.selected));
     });
 }
 
-fn selection_summary(selection: SelectionState) -> String {
-    match selection {
-        SelectionState::None => "Selection: none".to_string(),
-        SelectionState::Node(id) => format!("Selection: N{}", id.0),
-        SelectionState::Member(id) => format!("Selection: M{}", id.0),
+/// Status-bar summary of the current multi-selection.
+///
+/// A single entity keeps the compact `N{id}` / `M{id}` form (unchanged
+/// behaviour); a multi-selection reports counts, e.g. `3 nodes, 2 members`.
+fn selection_summary(selection: &SelectionSet) -> String {
+    match selection.single() {
+        Some(SelectionState::Node(id)) => format!("Selection: N{}", id.0),
+        Some(SelectionState::Member(id)) => format!("Selection: M{}", id.0),
+        _ if selection.is_empty() => "Selection: none".to_string(),
+        _ => {
+            let mut parts = Vec::new();
+            let n = selection.node_count();
+            if n > 0 {
+                parts.push(format!("{n} node{}", if n == 1 { "" } else { "s" }));
+            }
+            let m = selection.member_count();
+            if m > 0 {
+                parts.push(format!("{m} member{}", if m == 1 { "" } else { "s" }));
+            }
+            format!("Selection: {}", parts.join(", "))
+        }
     }
 }

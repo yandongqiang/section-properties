@@ -19,7 +19,7 @@ use viewport_poc::{
     edit_model::{MemberId, MemberPointLoad3D},
     model, persistence,
     scene::ViewportScene,
-    selection::SelectionState,
+    selection::{SelectionSet, SelectionState},
 };
 
 use ui::status::BottomTab;
@@ -30,6 +30,13 @@ struct ViewportApp {
     project: Project,
     scene: Option<ViewportScene>,
     camera: Camera3D,
+    /// Authoritative multi-selection (Phase P6).
+    selected: SelectionSet,
+    /// Single-entity projection of [`selected`](Self::selected): the
+    /// *primary* (last-clicked) entity.  Kept in lock-step with
+    /// [`selected`](Self::selected) by [`ViewportApp::set_selection`]; it exists
+    /// only so the legacy single-entity consumers (`ui/diagrams.rs`,
+    /// `ui/section.rs`) keep reading a plain [`SelectionState`].
     selection: SelectionState,
     display: ResultDisplayState,
     messages: Vec<AppMessage>,
@@ -71,6 +78,9 @@ struct ViewportApp {
     ctx_menu_target: SelectionState,
     /// Double-click quick-edit popup state; `None` = closed.
     quick_edit: Option<QuickEdit>,
+    /// Screen position where a rubber-band box-select drag began
+    /// (Shift/Ctrl + primary drag), or `None` when no box select is active.
+    box_select_start: Option<egui::Pos2>,
 }
 
 /// Action waiting for unsaved-changes confirmation.
@@ -149,6 +159,10 @@ struct QuickEdit {
 impl eframe::App for ViewportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ui::theme::apply_theme(ctx, self.dark_mode);
+
+        // Keep the legacy single-entity projection in lock-step with the
+        // authoritative multi-selection (see `ViewportApp::set_selection`).
+        self.selection = self.selected.primary();
 
         // Capture the current window size (cheap) so it can be persisted.
         let size = ctx.input(|i| i.screen_rect().size());

@@ -57,7 +57,7 @@ use viewport_poc::display::{
 };
 use viewport_poc::edit_model::SupportSpec;
 use viewport_poc::scene::{equivalent_rectangle, ViewportScene};
-use viewport_poc::selection::SelectionState;
+use viewport_poc::selection::SelectionSet;
 
 use super::theme::{
     AXIS_X, AXIS_Y, AXIS_Z, BG, DEF_MEMBER, DEF_NODE, GRID_C, LOAD_F_C, LOAD_M_C, MEMBER_C,
@@ -340,7 +340,7 @@ impl GlGeometry {
         camera: &Camera3D,
         scene: &ViewportScene,
         display: &ResultDisplayState,
-        selection: SelectionState,
+        selected: &SelectionSet,
         result: Option<&FrameAnalysisResult3D>,
         show_base: bool,
         aspect: f64,
@@ -474,7 +474,7 @@ impl GlGeometry {
                 let is_sel = scene
                     .member_ids
                     .get(mi)
-                    .is_some_and(|&id| selection == SelectionState::Member(id));
+                    .is_some_and(|&id| selected.contains_member(id));
                 // Contour mode colours the prism along its length by the nodal
                 // displacement magnitude; otherwise selection/member colour.
                 let (ci, cj) = match &contour {
@@ -513,7 +513,7 @@ impl GlGeometry {
                 let is_sel = scene
                     .node_ids
                     .get(i)
-                    .is_some_and(|&id| selection == SelectionState::Node(id));
+                    .is_some_and(|&id| selected.contains_node(id));
                 let (colour, r) = if is_sel {
                     (rgba(SELECTED_C), node_r * SELECTED_NODE_SCALE)
                 } else {
@@ -796,8 +796,10 @@ impl GlGeometry {
         }
 
         // ── Member end-force arrows (item 3) ──
+        // Result overlays follow the *primary* (last-clicked) member so a
+        // multi-selection still has well-defined end-force arrows.
         if display.mode == ResultViewMode::MemberEndForces {
-            if let (SelectionState::Member(mid), Some(res)) = (selection, result) {
+            if let (Some(mid), Some(res)) = (selected.primary().member_id(), result) {
                 if let Some(mi) = scene.member_index(mid) {
                     if !display.is_member_hidden(mid) {
                         if let Ok(f_global) = res.member_end_forces_global(mi) {
@@ -831,7 +833,7 @@ impl GlGeometry {
 
         // ── Local member axes (item 6) ──
         if display.show_local_axes && result.is_some() {
-            if let SelectionState::Member(mid) = selection {
+            if let Some(mid) = selected.primary().member_id() {
                 if let Some(mi) = scene.member_index(mid) {
                     if !display.is_member_hidden(mid) {
                         if let (Some(mpos), Some((xh, yh, zh))) =
@@ -851,7 +853,7 @@ impl GlGeometry {
         // painter (see `diagrams::show_diagram_labels`).
         if display.show_diagrams {
             if let Some(res) = result {
-                if let Some(d) = super::diagrams::compute(scene, display, res, selection) {
+                if let Some(d) = super::diagrams::compute(scene, display, res, selected.primary()) {
                     for l in &d.lines {
                         push_line(&mut overlay.verts, l.a, l.b, rgb(l.color));
                     }
@@ -2077,6 +2079,7 @@ fn as_bytes(data: &[f32]) -> &[u8] {
 mod tests {
     use viewport_poc::display::ResultViewMode;
     use viewport_poc::edit_model::{EditModel, NodalLoadSpec};
+    use viewport_poc::selection::SelectionState;
 
     use super::*;
 
@@ -2119,7 +2122,7 @@ mod tests {
         let cam = Camera3D::fit([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 4.0 / 3.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 4.0 / 3.0, 1.0);
         // Axes + grid lines.
         assert_eq!(geom.line_batches.len(), 2);
         // One prism + two node spheres worth of triangles.
@@ -2142,7 +2145,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.mode = ResultViewMode::Deformed;
         d.show_undeformed = false;
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0);
         // No members/nodes; grid and axes remain (both enabled by default).
         assert!(geom.solids.is_empty());
         assert_eq!(geom.line_batches.len(), 2);
@@ -2153,8 +2156,8 @@ mod tests {
         let cam = Camera3D::default();
         let s = scene();
         let d = ResultDisplayState::default();
-        let sel = SelectionState::Member(s.member_ids[0]);
-        let geom = GlGeometry::build(&cam, &s, &d, sel, None, true, 1.0, 1.0);
+        let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, None, true, 1.0, 1.0);
         assert!(contains_colour(&geom.solids, rgba(SELECTED_C)));
         // The plain member colour is gone; nodes keep their own colour.
         assert!(!contains_colour(&geom.solids, rgba(MEMBER_C)));
@@ -2168,7 +2171,7 @@ mod tests {
         let _ = m.add_node(0.0, 0.0, 0.0).unwrap();
         let s = ViewportScene::from_edit_model(&m);
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
         assert_eq!(geom.line_batches.len(), 2);
         assert_eq!(geom.solids.len(), SPHERE_VERTS * FLOATS_PER_VERTEX);
     }
@@ -2226,7 +2229,7 @@ mod tests {
         let cam = Camera3D::default();
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0);
         let grid = geom
             .line_batches
             .iter()
@@ -2403,7 +2406,7 @@ mod tests {
             &cam,
             &s,
             &d,
-            SelectionState::None,
+            &SelectionSet::default(),
             None,
             true,
             4.0 / 3.0,
@@ -2444,7 +2447,7 @@ mod tests {
             &cam,
             &s,
             &d,
-            SelectionState::None,
+            &SelectionSet::default(),
             Some(&res),
             false,
             1.0,
@@ -2467,7 +2470,7 @@ mod tests {
             &cam,
             &s,
             &d,
-            SelectionState::None,
+            &SelectionSet::default(),
             Some(&res),
             true,
             1.0,
@@ -2486,8 +2489,8 @@ mod tests {
         let (s, res) = solved_scene();
         let mut d = ResultDisplayState::default();
         d.show_diagrams = true;
-        let sel = SelectionState::Member(s.member_ids[0]);
-        let geom = GlGeometry::build(&cam, &s, &d, sel, Some(&res), true, 1.0, 1.0);
+        let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0);
         // axes + overlay (local triad + diagram strips) + grid.
         assert_eq!(geom.line_batches.len(), 3);
         let overlay = &geom.line_batches[1];
@@ -2505,7 +2508,7 @@ mod tests {
         let s = scene();
         let d = ResultDisplayState::default();
         assert!(!d.section_cut.enabled);
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
         assert!(geom.clip_plane.is_none());
         // axes (no clip) then grid (no clip).
         assert_eq!(geom.line_batches.len(), 2);
@@ -2522,8 +2525,8 @@ mod tests {
         d.section_cut.enabled = true;
         d.section_cut.axis = viewport_poc::display::CutAxis::X;
         d.section_cut.offset = 1.5;
-        let sel = SelectionState::Member(s.member_ids[0]);
-        let geom = GlGeometry::build(&cam, &s, &d, sel, Some(&res), true, 1.0, 1.0);
+        let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0);
 
         let plane = geom.clip_plane.expect("plane present when enabled");
         assert_eq!(&plane[..3], &[1.0, 0.0, 0.0]);
@@ -2547,7 +2550,7 @@ mod tests {
         d.section_cut.axis = viewport_poc::display::CutAxis::Y;
         d.section_cut.offset = 2.0;
         d.section_cut.flip = true;
-        let geom = GlGeometry::build(&cam, &s, &d, SelectionState::None, None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
         let plane = geom.clip_plane.unwrap();
         assert_eq!(&plane[..3], &[0.0, -1.0, 0.0]);
         assert_eq!(plane[3], -2.0);
