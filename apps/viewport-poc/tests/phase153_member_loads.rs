@@ -453,8 +453,8 @@ fn v2_format_version_in_json() {
     let m = EditModel::new();
     let json = persistence::serialize_project(&m).unwrap();
     assert!(
-        json.contains("\"format_version\": 2"),
-        "serialized JSON should contain format_version 2, got: {json}"
+        json.contains("\"format_version\": 3"),
+        "serialized JSON should contain format_version 3, got: {json}"
     );
 }
 

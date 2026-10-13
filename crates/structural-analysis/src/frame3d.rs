@@ -811,6 +811,24 @@ pub enum FrameMemberLoad {
         /// Intensity at node j (N/m).
         q_j: f64,
     },
+    /// Concentrated force at an arbitrary position along a member.
+    ///
+    /// `xi` is the nondimensional position ∈ [0, 1]: `xi = 0` at node i,
+    /// `xi = 1` at node j.  `f_x`, `f_y`, `f_z` are force components in
+    /// **local** coordinates (N).  Positive values act in the positive
+    /// local axis direction.
+    PointLoad {
+        /// Member index.
+        member_idx: usize,
+        /// Nondimensional position along the member (0 = node i, 1 = node j).
+        xi: f64,
+        /// Local axial force component (N), positive in local +x.
+        f_x: f64,
+        /// Local transverse force component (N), positive in local +y.
+        f_y: f64,
+        /// Local transverse force component (N), positive in local +z.
+        f_z: f64,
+    },
 }
 
 impl FrameMemberLoad {
@@ -821,7 +839,8 @@ impl FrameMemberLoad {
             | FrameMemberLoad::UniformY { member_idx, .. }
             | FrameMemberLoad::UniformZ { member_idx, .. }
             | FrameMemberLoad::LinearY { member_idx, .. }
-            | FrameMemberLoad::LinearZ { member_idx, .. } => member_idx,
+            | FrameMemberLoad::LinearZ { member_idx, .. }
+            | FrameMemberLoad::PointLoad { member_idx, .. } => member_idx,
         }
     }
 
@@ -869,6 +888,35 @@ impl FrameMemberLoad {
                 f[4] = -L * L * (3.0 * q_i + 2.0 * q_j) / 60.0;
                 f[8] = L * (3.0 * q_i + 7.0 * q_j) / 20.0;
                 f[10] = L * L * (2.0 * q_i + 3.0 * q_j) / 60.0;
+            }
+            FrameMemberLoad::PointLoad {
+                xi, f_x, f_y, f_z, ..
+            } => {
+                let xi2 = xi * xi;
+                let xi3 = xi2 * xi;
+                let one_minus_xi = 1.0 - xi;
+
+                let n1 = 1.0 - 3.0 * xi2 + 2.0 * xi3;
+                let n2 = L * xi * one_minus_xi * one_minus_xi;
+                let n3 = xi2 * (3.0 - 2.0 * xi);
+                let n4 = -L * xi2 * one_minus_xi;
+
+                if f_x != 0.0 {
+                    f[0] = f_x * one_minus_xi;
+                    f[6] = f_x * xi;
+                }
+                if f_y != 0.0 {
+                    f[1] = f_y * n1;
+                    f[5] = f_y * n2;
+                    f[7] = f_y * n3;
+                    f[11] = f_y * n4;
+                }
+                if f_z != 0.0 {
+                    f[2] = f_z * n1;
+                    f[4] = -f_z * n2;
+                    f[8] = f_z * n3;
+                    f[10] = -f_z * n4;
+                }
             }
         }
         f
@@ -1235,6 +1283,41 @@ impl FrameModel3D {
             member_idx,
             q_i,
             q_j,
+        });
+        Ok(())
+    }
+
+    /// Add a concentrated force at an arbitrary position along a member.
+    ///
+    /// `xi` is the nondimensional position ∈ [0, 1] (0 = node i, 1 = node j).
+    /// `f_x`, `f_y`, `f_z` are force components in **local** coordinates (N).
+    /// Multiple calls accumulate.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    /// [`FemError::InvalidInput`] if `xi` is outside [0, 1] or any force
+    /// component is non-finite.
+    pub fn add_point_load(
+        &mut self,
+        member_idx: usize,
+        xi: f64,
+        f_x: f64,
+        f_y: f64,
+        f_z: f64,
+    ) -> Result<(), FemError> {
+        self.validate_member_load(member_idx, &[xi, f_x, f_y, f_z])?;
+        if !(0.0..=1.0).contains(&xi) {
+            return Err(FemError::InvalidInput(format!(
+                "point load position xi must be in [0, 1], got {xi}"
+            )));
+        }
+        self.member_loads.push(FrameMemberLoad::PointLoad {
+            member_idx,
+            xi,
+            f_x,
+            f_y,
+            f_z,
         });
         Ok(())
     }

@@ -13,7 +13,10 @@ use viewport_poc::{
         max_abs, normalize,
     },
     edit_history::EditHistory,
-    edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodalLoadSpec, NodeId, SupportSpec},
+    edit_model::{
+        EditModel, MemberId, MemberPointLoad3D, MemberUniformLoad3D, NodalLoadSpec, NodeId,
+        SupportSpec,
+    },
     model, persistence, project,
     scene::ViewportScene,
     selection::SelectionState,
@@ -91,6 +94,7 @@ struct MemberEditBuffer {
     load_qx: f64,
     load_qy: f64,
     load_qz: f64,
+    point_loads: Vec<MemberPointLoad3D>,
 }
 
 impl Default for MemberEditBuffer {
@@ -109,6 +113,7 @@ impl Default for MemberEditBuffer {
             load_qx: 0.0,
             load_qy: 0.0,
             load_qz: 0.0,
+            point_loads: Vec::new(),
         }
     }
 }
@@ -233,6 +238,7 @@ impl ViewportApp {
             if let Some(member) = model.members().iter().find(|m| m.id == id) {
                 let sec = &member.section;
                 let load = model.member_uniform_load(id).copied().unwrap_or_default();
+                let point_loads = model.member_point_loads_for(id);
                 self.member_edit = MemberEditBuffer {
                     member_id: Some(id),
                     e: sec.E(),
@@ -247,6 +253,7 @@ impl ViewportApp {
                     load_qx: load.qx,
                     load_qy: load.qy,
                     load_qz: load.qz,
+                    point_loads,
                 };
             }
         }
@@ -255,7 +262,7 @@ impl ViewportApp {
     /// Apply the edit buffer to the model for a member.
     fn apply_member_edit(&mut self, id: MemberId) {
         let buf = &self.member_edit;
-        let (e, g, area, iy, iz, j, rv, load) = (
+        let (e, g, area, iy, iz, j, rv, load, point_loads) = (
             buf.e,
             buf.g,
             buf.area,
@@ -264,6 +271,7 @@ impl ViewportApp {
             buf.j,
             [buf.ref_x, buf.ref_y, buf.ref_z],
             MemberUniformLoad3D::new(buf.load_qx, buf.load_qy, buf.load_qz),
+            buf.point_loads.clone(),
         );
         let Some(model) = self.project.model.as_ref() else {
             return;
@@ -290,19 +298,32 @@ impl ViewportApp {
             candidate.set_member_uniform_load(id, load)
         };
         match load_result {
-            Ok(()) => {
-                if candidate.revision() != model.revision() {
-                    self.commit_edit(candidate);
-                    self.messages
-                        .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
-                } else {
-                    self.messages.push(AppMessage::info("No changes to apply."));
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 self.messages.push(AppMessage::error(e.message()));
                 self.reset_member_edit(id);
+                return;
             }
+        }
+
+        let existing_point_loads = candidate.member_point_loads_for(id);
+        if existing_point_loads != point_loads {
+            candidate.clear_member_point_loads(id).ok();
+            for pl in &point_loads {
+                if let Err(e) = candidate.add_member_point_load(id, *pl) {
+                    self.messages.push(AppMessage::error(e.message()));
+                    self.reset_member_edit(id);
+                    return;
+                }
+            }
+        }
+
+        if candidate.revision() != model.revision() {
+            self.commit_edit(candidate);
+            self.messages
+                .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
+        } else {
+            self.messages.push(AppMessage::info("No changes to apply."));
         }
     }
 
@@ -1096,6 +1117,87 @@ impl eframe::App for ViewportApp {
                             egui::Stroke::new(2.0_f32, MEMBER_LOAD_C),
                         );
                         painter.circle_filled(s_tip, 3.0, MEMBER_LOAD_C);
+                    }
+                }
+            }
+
+            // ── Draw member point load indicators ──
+            if show_base {
+                for (mi, &_) in scene.member_nodes.iter().enumerate() {
+                    let Some(loads) = scene.member_point_loads.get(mi) else {
+                        continue;
+                    };
+                    if loads.is_empty() {
+                        continue;
+                    }
+                    let (ni, nj) = scene.member_nodes[mi];
+                    let pi = scene.node_positions[ni];
+                    let pj = scene.node_positions[nj];
+                    let ref_vec = scene.member_ref_vecs[mi];
+
+                    let dx = pj[0] - pi[0];
+                    let dy = pj[1] - pi[1];
+                    let dz = pj[2] - pi[2];
+                    let len = dx.hypot(dy).hypot(dz);
+                    if len < 1e-12 {
+                        continue;
+                    }
+                    let x_hat = [dx / len, dy / len, dz / len];
+                    let cross = [
+                        x_hat[1] * ref_vec[2] - x_hat[2] * ref_vec[1],
+                        x_hat[2] * ref_vec[0] - x_hat[0] * ref_vec[2],
+                        x_hat[0] * ref_vec[1] - x_hat[1] * ref_vec[0],
+                    ];
+                    let cross_norm = cross[0].hypot(cross[1]).hypot(cross[2]);
+                    if cross_norm < 1e-12 {
+                        continue;
+                    }
+                    let z_hat = [cross[0] / cross_norm, cross[1] / cross_norm, cross[2] / cross_norm];
+                    let y_hat = [
+                        z_hat[1] * x_hat[2] - z_hat[2] * x_hat[1],
+                        z_hat[2] * x_hat[0] - z_hat[0] * x_hat[2],
+                        z_hat[0] * x_hat[1] - z_hat[1] * x_hat[0],
+                    ];
+
+                    for pl in loads {
+                        if pl.is_zero() || !pl.is_finite() {
+                            continue;
+                        }
+                        let f_global = [
+                            pl.fx * x_hat[0] + pl.fy * y_hat[0] + pl.fz * z_hat[0],
+                            pl.fx * x_hat[1] + pl.fy * y_hat[1] + pl.fz * z_hat[1],
+                            pl.fx * x_hat[2] + pl.fy * y_hat[2] + pl.fz * z_hat[2],
+                        ];
+                        let fmag = f_global[0].hypot(f_global[1]).hypot(f_global[2]);
+                        if fmag < 1e-12 {
+                            continue;
+                        }
+                        let dir = [f_global[0] / fmag, f_global[1] / fmag, f_global[2] / fmag];
+
+                        let base = [
+                            pi[0] + pl.xi * dx,
+                            pi[1] + pl.xi * dy,
+                            pi[2] + pl.xi * dz,
+                        ];
+                        let arrow_len = 0.25 * len.min(1.0);
+                        let tip = [
+                            base[0] + dir[0] * arrow_len,
+                            base[1] + dir[1] * arrow_len,
+                            base[2] + dir[2] * arrow_len,
+                        ];
+                        let Some(p_base) = self.camera.project(base, w, h) else {
+                            continue;
+                        };
+                        let Some(p_tip) = self.camera.project(tip, w, h) else {
+                            continue;
+                        };
+                        let s_base = scr(&p_base, rect);
+                        let s_tip = scr(&p_tip, rect);
+                        painter.line_segment(
+                            [s_base, s_tip],
+                            egui::Stroke::new(2.5_f32, MEMBER_LOAD_C),
+                        );
+                        painter.circle_filled(s_tip, 4.0, MEMBER_LOAD_C);
                     }
                 }
             }
@@ -1932,6 +2034,68 @@ impl ViewportApp {
                         }
                     });
 
+                    // ── Point load editing ──
+                    ui.collapsing("Point Loads (local)", |ui| {
+                        ui.label("Concentrated forces in local coordinates (N):");
+                        let mut remove_idx = None;
+                        let mut add_new = false;
+                        for (i, pl) in self.member_edit.point_loads.iter_mut().enumerate() {
+                            ui.group(|ui| {
+                                egui::Grid::new(format!("point_load_grid_{i}"))
+                                    .num_columns(2)
+                                    .spacing([10.0, 4.0])
+                                    .show(ui, |ui| {
+                                        ui.label("xi (position):");
+                                        ui.add(
+                                            egui::DragValue::new(&mut pl.xi)
+                                                .speed(0.05)
+                                                .range(0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                        ui.label("fx (axial):");
+                                        ui.add(
+                                            egui::DragValue::new(&mut pl.fx)
+                                                .speed(100.0)
+                                                .range(-1e8..=1e8),
+                                        );
+                                        ui.end_row();
+                                        ui.label("fy (transverse):");
+                                        ui.add(
+                                            egui::DragValue::new(&mut pl.fy)
+                                                .speed(100.0)
+                                                .range(-1e8..=1e8),
+                                        );
+                                        ui.end_row();
+                                        ui.label("fz (transverse):");
+                                        ui.add(
+                                            egui::DragValue::new(&mut pl.fz)
+                                                .speed(100.0)
+                                                .range(-1e8..=1e8),
+                                        );
+                                        ui.end_row();
+                                    });
+                                if ui.button("Delete").clicked() {
+                                    remove_idx = Some(i);
+                                }
+                            });
+                        }
+                        if ui.button("Add Point Load").clicked() {
+                            add_new = true;
+                        }
+                        if ui.button("Clear All").clicked() {
+                            self.member_edit.point_loads.clear();
+                        }
+                        if add_new {
+                            self.member_edit
+                                .point_loads
+                                .push(MemberPointLoad3D::new(0.5, 0.0, 0.0, -1000.0));
+                        }
+                        if let Some(i) = remove_idx {
+                            self.member_edit.point_loads.remove(i);
+                        }
+                    });
+
                     ui.horizontal(|ui| {
                         if ui.button("Apply Changes").clicked() {
                             self.apply_member_edit(id);
@@ -2063,12 +2227,21 @@ impl ViewportApp {
                             Some(spec) if !spec.is_zero() => " [L]".to_string(),
                             _ => String::new(),
                         };
+                        let point_label = if model.has_member_point_loads(member.id) {
+                            " [P]".to_string()
+                        } else {
+                            String::new()
+                        };
                         if ui
                             .selectable_label(
                                 is_sel,
                                 format!(
-                                    "M{}: N{} \u{2192} N{}{}",
-                                    member.id.0, member.node_i.0, member.node_j.0, load_label
+                                    "M{}: N{} \u{2192} N{}{}{}",
+                                    member.id.0,
+                                    member.node_i.0,
+                                    member.node_j.0,
+                                    load_label,
+                                    point_label
                                 ),
                             )
                             .clicked()

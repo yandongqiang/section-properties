@@ -6,7 +6,7 @@
 //! cannot mutate the analysis data.
 
 use crate::edit_model::{
-    EditModel, MemberId, MemberUniformLoad3D, NodalLoadSpec, NodeId, SupportSpec,
+    EditModel, MemberId, MemberPointLoad3D, MemberUniformLoad3D, NodalLoadSpec, NodeId, SupportSpec,
 };
 use crate::project::Vec3;
 
@@ -32,6 +32,9 @@ pub struct ViewportScene {
     /// Member uniform load spec for each member (parallel to `member_ids`).
     /// `None` means no load.
     pub member_loads: Vec<Option<MemberUniformLoad3D>>,
+    /// Member point loads for each member (parallel to `member_ids`).
+    /// Empty Vec means no point loads.
+    pub member_point_loads: Vec<Vec<MemberPointLoad3D>>,
 }
 
 impl ViewportScene {
@@ -71,6 +74,12 @@ impl ViewportScene {
             .map(|m| model.member_uniform_load(m.id).copied())
             .collect();
 
+        let member_point_loads: Vec<Vec<MemberPointLoad3D>> = model
+            .members()
+            .iter()
+            .map(|m| model.member_point_loads_for(m.id))
+            .collect();
+
         Self {
             node_positions,
             node_ids,
@@ -80,6 +89,7 @@ impl ViewportScene {
             node_supports,
             node_loads,
             member_loads,
+            member_point_loads,
         }
     }
 
@@ -189,6 +199,7 @@ mod tests {
             node_supports: vec![None, None, None],
             node_loads: vec![None, None, None],
             member_loads: vec![None, None],
+            member_point_loads: vec![vec![], vec![]],
         }
     }
 
@@ -211,6 +222,7 @@ mod tests {
             node_supports: vec![],
             node_loads: vec![],
             member_loads: vec![],
+            member_point_loads: vec![],
         };
         let (min, max) = s.bounding_box();
         assert_eq!(min, [0.0; 3]);

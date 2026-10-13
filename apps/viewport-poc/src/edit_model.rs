@@ -176,6 +176,8 @@ pub enum EditError {
     InvalidRefVec(String),
     /// Load component is NaN or infinity.
     NonFiniteLoad,
+    /// Load position `xi` is outside the valid range [0, 1].
+    InvalidLoadPosition,
 }
 
 impl EditError {
@@ -196,6 +198,7 @@ impl EditError {
             EditError::InvalidSection(s) => format!("Invalid section: {s}"),
             EditError::InvalidRefVec(s) => format!("Invalid reference vector: {s}"),
             EditError::NonFiniteLoad => "Load components must be finite numbers".into(),
+            EditError::InvalidLoadPosition => "Load position xi must be in [0, 1]".into(),
         }
     }
 }
@@ -331,6 +334,51 @@ impl MemberUniformLoad3D {
     }
 }
 
+// ── Member point load specification ──────────────────────────────────
+
+/// Concentrated force at a position along a member in local coordinates.
+///
+/// `xi` is the nondimensional position ∈ [0, 1]: 0 at node i, 1 at node j.
+/// `fx` is the axial force (along local x, in N).
+/// `fy` is the transverse force (along local y, in N).
+/// `fz` is the transverse force (along local z, in N).
+///
+/// Positive values act in the positive local axis direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemberPointLoad3D {
+    pub xi: f64,
+    pub fx: f64,
+    pub fy: f64,
+    pub fz: f64,
+}
+
+impl MemberPointLoad3D {
+    pub fn new(xi: f64, fx: f64, fy: f64, fz: f64) -> Self {
+        Self { xi, fx, fy, fz }
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            xi: 0.5,
+            fx: 0.0,
+            fy: 0.0,
+            fz: 0.0,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.fx == 0.0 && self.fy == 0.0 && self.fz == 0.0
+    }
+
+    pub fn is_finite(&self) -> bool {
+        self.xi.is_finite() && self.fx.is_finite() && self.fy.is_finite() && self.fz.is_finite()
+    }
+
+    pub fn magnitude(&self) -> f64 {
+        (self.fx * self.fx + self.fy * self.fy + self.fz * self.fz).sqrt()
+    }
+}
+
 // ── Edit model ─────────────────────────────────────────────────────────
 
 /// Editable structural model with stable IDs.
@@ -344,6 +392,7 @@ pub struct EditModel {
     supports: Vec<(NodeId, SupportSpec)>,
     nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
     member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D)>,
+    member_point_loads: Vec<(MemberId, MemberPointLoad3D)>,
     next_node_id: u32,
     next_member_id: u32,
     revision: u64,
@@ -364,6 +413,7 @@ impl EditModel {
             supports: Vec::new(),
             nodal_loads: Vec::new(),
             member_uniform_loads: Vec::new(),
+            member_point_loads: Vec::new(),
             next_node_id: 0,
             next_member_id: 0,
             revision: 0,
@@ -381,6 +431,7 @@ impl EditModel {
         supports: Vec<(NodeId, SupportSpec)>,
         nodal_loads: Vec<(NodeId, NodalLoadSpec)>,
         member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D)>,
+        member_point_loads: Vec<(MemberId, MemberPointLoad3D)>,
         next_node_id: u32,
         next_member_id: u32,
     ) -> Self {
@@ -390,6 +441,7 @@ impl EditModel {
             supports,
             nodal_loads,
             member_uniform_loads,
+            member_point_loads,
             next_node_id,
             next_member_id,
             revision: 0,
@@ -487,6 +539,15 @@ impl EditModel {
             load.qx.to_bits().hash(&mut hasher);
             load.qy.to_bits().hash(&mut hasher);
             load.qz.to_bits().hash(&mut hasher);
+        }
+        // Member point loads
+        self.member_point_loads.len().hash(&mut hasher);
+        for (mid, load) in &self.member_point_loads {
+            mid.0.hash(&mut hasher);
+            load.xi.to_bits().hash(&mut hasher);
+            load.fx.to_bits().hash(&mut hasher);
+            load.fy.to_bits().hash(&mut hasher);
+            load.fz.to_bits().hash(&mut hasher);
         }
         // ID allocation state
         self.next_node_id.hash(&mut hasher);
@@ -608,6 +669,7 @@ impl EditModel {
         }
         self.members.retain(|m| m.id != id);
         self.member_uniform_loads.retain(|(mid, _)| *mid != id);
+        self.member_point_loads.retain(|(mid, _)| *mid != id);
         self.bump_revision();
         Ok(())
     }
@@ -929,6 +991,135 @@ impl EditModel {
         &self.member_uniform_loads
     }
 
+    // ── Member point load operations ──────────────────────────────────
+
+    /// Add a concentrated force at a position along a member.
+    ///
+    /// Multiple point loads per member are allowed — each call appends
+    /// a new entry.  `xi` must be in [0, 1] and all force components
+    /// must be finite.
+    pub fn add_member_point_load(
+        &mut self,
+        id: MemberId,
+        load: MemberPointLoad3D,
+    ) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        if !load.is_finite() {
+            return Err(EditError::NonFiniteLoad);
+        }
+        if !(0.0..=1.0).contains(&load.xi) {
+            return Err(EditError::InvalidLoadPosition);
+        }
+        self.member_point_loads.push((id, load));
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Update the point load at the given index within a member's loads.
+    ///
+    /// `index` is the 0-based position among the member's point loads
+    /// (not the global Vec index).
+    pub fn update_member_point_load(
+        &mut self,
+        id: MemberId,
+        index: usize,
+        load: MemberPointLoad3D,
+    ) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        if !load.is_finite() {
+            return Err(EditError::NonFiniteLoad);
+        }
+        if !(0.0..=1.0).contains(&load.xi) {
+            return Err(EditError::InvalidLoadPosition);
+        }
+        let mut count = 0;
+        let mut found = false;
+        for (mid, existing) in &mut self.member_point_loads {
+            if *mid == id {
+                if count == index {
+                    if *existing == load {
+                        return Ok(());
+                    }
+                    *existing = load;
+                    found = true;
+                    break;
+                }
+                count += 1;
+            }
+        }
+        if !found {
+            return Err(EditError::MemberNotFound(id));
+        }
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Remove the point load at the given index within a member's loads.
+    ///
+    /// `index` is the 0-based position among the member's point loads.
+    pub fn remove_member_point_load(
+        &mut self,
+        id: MemberId,
+        index: usize,
+    ) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        let mut count = 0;
+        let mut global_idx = None;
+        for (i, (mid, _)) in self.member_point_loads.iter().enumerate() {
+            if *mid == id {
+                if count == index {
+                    global_idx = Some(i);
+                    break;
+                }
+                count += 1;
+            }
+        }
+        let Some(gi) = global_idx else {
+            return Err(EditError::MemberNotFound(id));
+        };
+        self.member_point_loads.remove(gi);
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Remove all point loads on a member.
+    pub fn clear_member_point_loads(&mut self, id: MemberId) -> Result<(), EditError> {
+        if self.members.iter().all(|m| m.id != id) {
+            return Err(EditError::MemberNotFound(id));
+        }
+        let before = self.member_point_loads.len();
+        self.member_point_loads.retain(|(mid, _)| *mid != id);
+        if self.member_point_loads.len() != before {
+            self.bump_revision();
+        }
+        Ok(())
+    }
+
+    /// Get all point loads for a member, in insertion order.
+    pub fn member_point_loads_for(&self, id: MemberId) -> Vec<MemberPointLoad3D> {
+        self.member_point_loads
+            .iter()
+            .filter(|(mid, _)| *mid == id)
+            .map(|(_, load)| *load)
+            .collect()
+    }
+
+    /// Does the member have any point loads?
+    pub fn has_member_point_loads(&self, id: MemberId) -> bool {
+        self.member_point_loads.iter().any(|(mid, _)| *mid == id)
+    }
+
+    /// All member point loads (member ID + spec), in insertion order.
+    pub fn member_point_loads(&self) -> &[(MemberId, MemberPointLoad3D)] {
+        &self.member_point_loads
+    }
+
     // ── Queries ───────────────────────────────────────────────────────
 
     /// Number of nodes.
@@ -1088,6 +1279,15 @@ impl EditModel {
                     .add_uniform_z(idx, load.qz)
                     .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
             }
+        }
+
+        for (mid, load) in &self.member_point_loads {
+            let idx = *member_id_to_idx
+                .get(mid)
+                .ok_or(EditError::MemberNotFound(*mid))?;
+            model
+                .add_point_load(idx, load.xi, load.fx, load.fy, load.fz)
+                .map_err(|e| EditError::FrameModelBuild(format!("{e}")))?;
         }
 
         Ok(model)

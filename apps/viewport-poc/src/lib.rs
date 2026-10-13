@@ -20,8 +20,8 @@ pub use camera::Camera3D;
 pub use display::ResultDisplayState;
 pub use edit_history::EditHistory;
 pub use edit_model::{
-    EditError, EditMember, EditModel, EditNode, MemberId, MemberUniformLoad3D, NodalLoadSpec,
-    NodeId, SupportSpec,
+    EditError, EditMember, EditModel, EditNode, MemberId, MemberPointLoad3D, MemberUniformLoad3D,
+    NodalLoadSpec, NodeId, SupportSpec,
 };
 pub use scene::ViewportScene;
 pub use selection::SelectionState;
