@@ -31,6 +31,17 @@ const INSPECTOR_DEFAULT_FRACTION: f32 = 0.25;
 /// never swallow the viewport.
 const INSPECTOR_MAX_FRACTION: f32 = 0.45;
 
+/// Desired width for a compact single-line entry field.
+///
+/// A `TextEdit` defaults to a fixed `ui.spacing().text_edit_width` of 280 px;
+/// several of those side-by-side in a non-wrapping row would impose a minimum
+/// width far larger than [`INSPECTOR_MIN_WIDTH`], pinning the resizable panel
+/// open.  Sizing the fields from the current row width instead keeps the row
+/// narrower than the panel's own minimum.
+fn entry_width(ui: &egui::Ui) -> f32 {
+    (ui.available_width() * 0.30).clamp(48.0, 110.0)
+}
+
 /// Draw the right inspector panel for the active module.
 ///
 /// The panel is resizable within a bounded width range (a small fraction of the
@@ -66,6 +77,12 @@ pub fn show_inspector(app: &mut ViewportApp, ctx: &egui::Context) {
             });
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                // Make the content fill the panel's width.  A resizable
+                // side panel is only a stable fixed point at the width the
+                // user drags it to when its content is at least that wide;
+                // content narrower than the panel lets egui shrink the panel
+                // back down to its minimum every frame.
+                ui.set_min_width(ui.available_width());
                 match app.module {
                     WorkModule::Model => {
                         show_add_section(app, ui);
@@ -431,13 +448,20 @@ fn show_add_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
         .default_open(true)
         .show(ui, |ui| {
             ui.label("Add node:");
-            ui.horizontal(|ui| {
+            let node_field = entry_width(ui);
+            ui.horizontal_wrapped(|ui| {
                 ui.label("x:");
-                ui.text_edit_singleline(&mut app.new_node_x);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_node_x).desired_width(node_field),
+                );
                 ui.label("y:");
-                ui.text_edit_singleline(&mut app.new_node_y);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_node_y).desired_width(node_field),
+                );
                 ui.label("z:");
-                ui.text_edit_singleline(&mut app.new_node_z);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_node_z).desired_width(node_field),
+                );
                 if ui.button("Add node").clicked() {
                     app.add_node_from_input();
                 }
@@ -446,11 +470,16 @@ fn show_add_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
             ui.separator();
 
             ui.label("Add member:");
-            ui.horizontal(|ui| {
+            let member_field = entry_width(ui);
+            ui.horizontal_wrapped(|ui| {
                 ui.label("N i:");
-                ui.text_edit_singleline(&mut app.new_member_i);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_member_i).desired_width(member_field),
+                );
                 ui.label("N j:");
-                ui.text_edit_singleline(&mut app.new_member_j);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.new_member_j).desired_width(member_field),
+                );
                 if ui.button("Add member").clicked() {
                     app.add_member_from_input();
                 }
@@ -487,7 +516,7 @@ fn show_node_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc
             let mut x = node.x;
             let mut y = node.y;
             let mut z = node.z;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("x:");
                 ui.add(egui::DragValue::new(&mut x).speed(0.1).range(-1e6..=1e6));
                 ui.label("y:");
@@ -577,7 +606,7 @@ fn show_node_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc
             "Free (no support)"
         }
     ));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Fixed").clicked() {
             new_spec = SupportSpec::fixed();
             support_changed = true;
@@ -761,7 +790,7 @@ fn show_member_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_p
             });
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Apply Changes").clicked() {
             app.apply_member_edit(id);
         }
@@ -1070,11 +1099,17 @@ fn show_selection_results(app: &mut ViewportApp, ui: &mut egui::Ui) {
             };
             if let Ok(f) = r.member_end_forces(idx) {
                 ui.label("Local end forces:");
-                forces_grid(ui, "local", f);
+                // The 4-column force table is intentionally wider than a
+                // narrow panel; scroll it rather than let it pin the panel open.
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    forces_grid(ui, "local", f);
+                });
             }
             if let Ok(f) = r.member_end_forces_global(idx) {
                 ui.label("Global end forces:");
-                forces_grid(ui, "global", &f);
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    forces_grid(ui, "global", &f);
+                });
             }
             if let Ok((x, y, z)) = r.member_local_axes(idx) {
                 ui.label("Local axes (in global coords):");
