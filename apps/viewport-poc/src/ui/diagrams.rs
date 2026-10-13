@@ -182,6 +182,13 @@ pub(crate) struct Diagrams {
 ///
 /// Returns `None` when diagrams are disabled, no result is available, nothing
 /// is selected (in selected-member mode), or every sample was degenerate.
+///
+/// View-only hidden members are skipped, matching the per-entity visibility of
+/// the geometry ([`ResultDisplayState::hidden_members`]).  In selected-member
+/// mode a hidden current member therefore draws nothing (returns `None`); in
+/// *all members* mode only the visible members contribute lines, labels and
+/// peaks.  The caller threads in the same [`ResultDisplayState`] the other
+/// renderers already receive, so there is no second source of truth.
 pub(crate) fn compute(
     scene: &ViewportScene,
     display: &ResultDisplayState,
@@ -192,12 +199,27 @@ pub(crate) fn compute(
         return None;
     }
 
-    // Which members to draw.
+    // Which members to draw.  Hidden members are filtered out here so both the
+    // painter path and the GPU strip path honour the same visibility.
     let members: Vec<usize> = if display.diagram_all_members {
-        (0..scene.n_members()).collect()
+        (0..scene.n_members())
+            .filter(|&mi| {
+                scene
+                    .member_ids
+                    .get(mi)
+                    .map_or(true, |&id| !display.is_member_hidden(id))
+            })
+            .collect()
     } else {
         match selection {
-            SelectionState::Member(mid) => scene.member_index(mid).into_iter().collect(),
+            SelectionState::Member(mid) => {
+                // A hidden member draws nothing — even when it is the current
+                // (selected) one.
+                if display.is_member_hidden(mid) {
+                    return None;
+                }
+                scene.member_index(mid).into_iter().collect()
+            }
             _ => return None,
         }
     };
@@ -504,4 +526,75 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
         a[1] + t * (b[1] - a[1]),
         a[2] + t * (b[2] - a[2]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use viewport_poc::edit_model::{EditModel, MemberId, NodalLoadSpec};
+
+    /// Two collinear members (N0–N1–N2): fixed at N0, loaded at N2.
+    fn solved_two_member() -> (ViewportScene, FrameAnalysisResult3D, [MemberId; 2]) {
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(3.0, 0.0, 0.0).unwrap();
+        let c = m.add_node(6.0, 0.0, 0.0).unwrap();
+        let m0 = m.add_member(a, b).unwrap();
+        let m1 = m.add_member(b, c).unwrap();
+        m.fix_node(a).unwrap();
+        m.set_nodal_load(c, NodalLoadSpec::new(0.0, -1000.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        let scene = ViewportScene::from_edit_model(&m);
+        let res = m.to_frame_model().unwrap().solve().unwrap();
+        (scene, res, [m0, m1])
+    }
+
+    fn baseline_count(d: &Diagrams) -> usize {
+        let c = [C_BASELINE.r(), C_BASELINE.g(), C_BASELINE.b()];
+        d.lines.iter().filter(|l| l.color == c).count()
+    }
+
+    #[test]
+    fn all_members_mode_skips_hidden_members() {
+        let (scene, res, [m0, _m1]) = solved_two_member();
+        let mut display = ResultDisplayState::default();
+        display.show_diagrams = true;
+        display.diagram_all_members = true;
+
+        // Nothing hidden → one baseline per member.
+        let all = compute(&scene, &display, &res, SelectionState::None).unwrap();
+        assert_eq!(baseline_count(&all), 2);
+
+        // Hide one member → it contributes no lines (or labels).
+        display.hide_member(m0);
+        let filtered = compute(&scene, &display, &res, SelectionState::None).unwrap();
+        assert_eq!(baseline_count(&filtered), 1);
+        assert!(!filtered.legend.is_empty());
+    }
+
+    #[test]
+    fn hidden_selected_member_draws_nothing() {
+        let (scene, res, [m0, _m1]) = solved_two_member();
+        let mut display = ResultDisplayState::default();
+        display.show_diagrams = true;
+        display.diagram_all_members = false;
+
+        // Visible selected member → Some.
+        assert!(compute(&scene, &display, &res, SelectionState::Member(m0)).is_some());
+
+        // Hidden selected member → None (draw nothing).
+        display.hide_member(m0);
+        assert!(compute(&scene, &display, &res, SelectionState::Member(m0)).is_none());
+    }
+
+    #[test]
+    fn hiding_every_member_draws_nothing() {
+        let (scene, res, [m0, m1]) = solved_two_member();
+        let mut display = ResultDisplayState::default();
+        display.show_diagrams = true;
+        display.diagram_all_members = true;
+        display.hide_member(m0);
+        display.hide_member(m1);
+        assert!(compute(&scene, &display, &res, SelectionState::None).is_none());
+    }
 }

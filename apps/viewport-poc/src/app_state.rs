@@ -360,6 +360,27 @@ impl Project {
         self.last_solve_error = None;
     }
 
+    /// Replace the current model as the result of an **in-place edit** (the
+    /// new model is a modified copy of the previous one — every `commit_edit`
+    /// candidate is).
+    ///
+    /// Unlike [`replace_model`], a previously-solved result is **retained**
+    /// rather than discarded, so the bumped model revision is reported as
+    /// [`AnalysisStatus::Stale`] instead of [`AnalysisStatus::NeverSolved`].
+    /// The result stays hidden while stale: [`analysis_result`](Self::analysis_result)
+    /// still applies Policy A and returns `None` unless the status is
+    /// [`AnalysisStatus::Current`].  A model that was never solved has no
+    /// result to retain and remains [`AnalysisStatus::NeverSolved`].
+    ///
+    /// The caller must ensure `model` really is an edit of the current model
+    /// (its revision differs), so a retained result is never mistaken for
+    /// current.
+    pub fn replace_model_after_edit(&mut self, model: EditModel) {
+        self.model = Some(model);
+        self.last_solve_failed = false;
+        self.last_solve_error = None;
+    }
+
     /// Clear the project to the empty state.
     pub fn clear(&mut self) {
         self.name = "Untitled".to_string();
@@ -632,6 +653,66 @@ mod tests {
             .update_node(id, 1.0, 0.0, 0.0)
             .unwrap();
         assert!(p.analysis_result().is_none());
+    }
+
+    // ── Edit-invalidation transitions ──
+
+    /// Solve → edit → `Stale` (not `NeverSolved`), and the stale result is
+    /// still hidden (Policy A).
+    #[test]
+    fn edit_after_solve_reports_stale() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        p.solve().unwrap();
+        assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+
+        // An engineering edit: mutate a clone (bumps the revision) and commit.
+        let mut edited = p.model.as_ref().unwrap().clone();
+        let id = edited.nodes()[0].id;
+        edited.update_node(id, 1.0, 0.0, 0.0).unwrap();
+        assert_ne!(edited.revision(), p.model.as_ref().unwrap().revision());
+        p.replace_model_after_edit(edited);
+
+        assert_eq!(p.analysis_status(), AnalysisStatus::Stale);
+        assert!(p.results_are_stale());
+        assert!(!p.has_results());
+        // Policy A: a stale result is never displayed.
+        assert!(p.analysis_result().is_none());
+    }
+
+    /// Fresh model → edit → `NeverSolved` (nothing to retain).
+    #[test]
+    fn edit_before_any_solve_stays_never_solved() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        assert_eq!(p.analysis_status(), AnalysisStatus::NeverSolved);
+
+        let mut edited = p.model.as_ref().unwrap().clone();
+        let id = edited.nodes()[0].id;
+        edited.update_node(id, 1.0, 0.0, 0.0).unwrap();
+        p.replace_model_after_edit(edited);
+
+        assert_eq!(p.analysis_status(), AnalysisStatus::NeverSolved);
+        assert!(!p.results_are_stale());
+        assert!(p.analysis_result().is_none());
+    }
+
+    /// Solve → edit → solve → `Current`.
+    #[test]
+    fn solving_after_an_edit_returns_to_current() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), model::build_portal_edit());
+        p.solve().unwrap();
+
+        let mut edited = p.model.as_ref().unwrap().clone();
+        let id = edited.nodes()[0].id;
+        edited.update_node(id, 1.0, 0.0, 0.0).unwrap();
+        p.replace_model_after_edit(edited);
+        assert_eq!(p.analysis_status(), AnalysisStatus::Stale);
+
+        p.solve().unwrap();
+        assert_eq!(p.analysis_status(), AnalysisStatus::Current);
+        assert!(p.analysis_result().is_some());
     }
 
     #[test]

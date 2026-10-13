@@ -116,11 +116,17 @@ impl ViewportApp {
     /// current model, clears the redo stack, invalidates analysis, and
     /// rebuilds the viewport scene.  The caller must ensure the new model
     /// differs from the old one (no-op edits should not call this).
+    ///
+    /// Uses [`Project::replace_model_after_edit`] so a model that *was*
+    /// solved is reported as `Stale` after the edit (its result is kept but
+    /// hidden by Policy A), rather than falling back to `NeverSolved`.
+    /// Undo/redo use the wholesale [`Project::replace_model`], which discards
+    /// the result.
     pub(crate) fn commit_edit(&mut self, new_model: EditModel) {
         if let Some(old_model) = self.project.model.take() {
             self.history.record(old_model);
         }
-        self.project.replace_model(new_model);
+        self.project.replace_model_after_edit(new_model);
         self.rebuild_scene();
     }
 
