@@ -8,9 +8,12 @@
 pub mod actions;
 pub mod diagrams;
 pub mod dialogs;
+pub mod gl_renderer;
+pub mod icons;
 pub mod inspector;
 pub mod menu;
 pub mod module;
+pub mod ribbon;
 pub mod section;
 pub mod status;
 pub mod theme;

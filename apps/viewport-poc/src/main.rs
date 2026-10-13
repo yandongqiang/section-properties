@@ -181,11 +181,20 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             ui::theme::apply_theme(&cc.egui_ctx, settings.dark_mode);
-            Ok(Box::new(ViewportApp::new(
-                settings,
-                settings_path,
-                settings_warning,
-            )))
+            // Phase P1: try to bring up the GPU (glow) viewport renderer.  Any
+            // failure leaves the software renderer active and is reported in
+            // the Messages dock.
+            let gl_status = ui::gl_renderer::init(cc.gl.clone());
+            let mut app = ViewportApp::new(settings, settings_path, settings_warning);
+            match gl_status {
+                Ok(()) => app.messages.push(AppMessage::info(
+                    "GPU viewport renderer ready (depth-tested 3-D view).",
+                )),
+                Err(e) => app.messages.push(AppMessage::warning(format!(
+                    "GPU renderer unavailable ({e}); using the Software renderer."
+                ))),
+            }
+            Ok(Box::new(app))
         }),
     )
 }

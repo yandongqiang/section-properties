@@ -48,6 +48,114 @@ impl SectionForces3D {
     }
 }
 
+/// Stiffness properties of a member's cross-section, used to derive an
+/// equivalent display rectangle (the model stores `A / Iy / Iz / J`, not shape
+/// dimensions).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemberSection {
+    /// Cross-sectional area `A` (m²).
+    pub area: f64,
+    /// Second moment of area about the **local y** axis (m⁴).
+    pub iy: f64,
+    /// Second moment of area about the **local z** axis (m⁴).
+    pub iz: f64,
+    /// Torsion constant `J` (m⁴).  Not used by the rectangle derivation today
+    /// but carried through for later phases.
+    pub j: f64,
+}
+
+impl Default for MemberSection {
+    /// A deliberately conservative default; only used when a member carries no
+    /// usable section (see [`equivalent_rectangle`]).
+    fn default() -> Self {
+        Self {
+            area: 0.0,
+            iy: 0.0,
+            iz: 0.0,
+            j: 0.0,
+        }
+    }
+}
+
+/// Smallest full dimension of the equivalent display rectangle (metres) — a
+/// thin but non-degenerate floor so a member never collapses to a line.
+const MIN_MEMBER_DIM: f64 = 1e-4;
+/// Largest full dimension as a fraction of the member length: a member is never
+/// drawn thicker than a quarter of its own length, so a wild `I` can't produce
+/// an absurd solid.
+const MAX_DIM_LENGTH_FRACTION: f64 = 0.25;
+
+/// Derive an equivalent rectangular cross-section, as full dimensions
+/// `(dim_y, dim_z)` along the member's **local `y`** and **local `z`** axes.
+///
+/// # Formula
+///
+/// The model only stores stiffness (`A`, `Iy`, `Iz`), so we fit a rectangle
+/// `b × h` using the *strong* axis.  For a rectangle:
+///
+/// ```text
+/// A = b·h            I = b·h³ / 12
+/// ```
+///
+/// With `Imax = max(Iy, Iz)` we solve for the depth `h` and width `b`:
+///
+/// ```text
+/// h = sqrt(12·Imax / A)      b = A / h
+/// ```
+///
+/// # Axis mapping
+///
+/// The solver's local axes are `x` along `i → j`, with `Iz = ∫y²dA` governing
+/// bending in the local `x–y` plane (deflection along local **y**) and
+/// `Iy = ∫z²dA` governing bending in the local `x–z` plane (deflection along
+/// local **z**) — see [`ViewportScene::member_local_axes`].  The depth `h`
+/// therefore runs along the bending direction of the *strong* axis:
+///
+/// * `Iz ≥ Iy` → the rectangle is deep along local `y`: `(dim_y, dim_z) = (h, b)`
+/// * `Iy >  Iz` → the rectangle is deep along local `z`: `(dim_y, dim_z) = (b, h)`
+///
+/// # Clamping / invalid input
+///
+/// Both dimensions are clamped to `[MIN_MEMBER_DIM, max(MIN_MEMBER_DIM,
+/// MAX_DIM_LENGTH_FRACTION·L)]` where `L` is the member length (invalid `L`
+/// falls back to `1.0`).  If `A`, `Iy` or `Iz` is missing, non-positive or
+/// non-finite the function returns a thin square bar (1 % of the length,
+/// clamped) — never `NaN`/`∞`.
+pub fn equivalent_rectangle(area: f64, iy: f64, iz: f64, length: f64) -> (f64, f64) {
+    let len = if length.is_finite() && length > 0.0 {
+        length
+    } else {
+        1.0
+    };
+    let max_dim = (len * MAX_DIM_LENGTH_FRACTION).max(MIN_MEMBER_DIM);
+    let thin = (0.01 * len).clamp(MIN_MEMBER_DIM, max_dim);
+
+    let valid = area.is_finite()
+        && area > 0.0
+        && iy.is_finite()
+        && iy > 0.0
+        && iz.is_finite()
+        && iz > 0.0;
+    if !valid {
+        return (thin, thin);
+    }
+
+    let (i_max, iz_is_strong) = if iz >= iy { (iz, true) } else { (iy, false) };
+    let h = (12.0 * i_max / area).sqrt();
+    let b = area / h;
+    if !h.is_finite() || !b.is_finite() || h <= 0.0 || b <= 0.0 {
+        return (thin, thin);
+    }
+
+    let h = h.clamp(MIN_MEMBER_DIM, max_dim);
+    let b = b.clamp(MIN_MEMBER_DIM, max_dim);
+    if iz_is_strong {
+        (h, b)
+    } else {
+        (b, h)
+    }
+}
+
 /// Stable display geometry.
 #[derive(Debug, Clone)]
 pub struct ViewportScene {
@@ -73,6 +181,9 @@ pub struct ViewportScene {
     /// Member point loads for each member (parallel to `member_ids`).
     /// Empty Vec means no point loads.
     pub member_point_loads: Vec<Vec<MemberPointLoad3D>>,
+    /// Section stiffness properties for each member (parallel to
+    /// `member_ids`).  Used by the GPU renderer to size equivalent prisms.
+    pub member_sections: Vec<MemberSection>,
 }
 
 impl ViewportScene {
@@ -118,6 +229,17 @@ impl ViewportScene {
             .map(|m| model.member_point_loads_for(m.id))
             .collect();
 
+        let member_sections: Vec<MemberSection> = model
+            .members()
+            .iter()
+            .map(|m| MemberSection {
+                area: m.section.area(),
+                iy: m.section.iy(),
+                iz: m.section.iz(),
+                j: m.section.j(),
+            })
+            .collect();
+
         Self {
             node_positions,
             node_ids,
@@ -128,6 +250,7 @@ impl ViewportScene {
             node_loads,
             member_loads,
             member_point_loads,
+            member_sections,
         }
     }
 
@@ -149,6 +272,14 @@ impl ViewportScene {
     /// Look up the Vec index for a stable member ID.
     pub fn member_index(&self, id: MemberId) -> Option<usize> {
         self.member_ids.iter().position(|&mid| mid == id)
+    }
+
+    /// Section stiffness properties for the member at `member_idx`.
+    ///
+    /// Returns `None` for an out-of-range index or a scene that predates the
+    /// section data (empty `member_sections`).
+    pub fn member_section(&self, member_idx: usize) -> Option<MemberSection> {
+        self.member_sections.get(member_idx).copied()
     }
 
     /// Axis-aligned bounding box of the node positions.
@@ -475,6 +606,7 @@ mod tests {
             node_loads: vec![None, None, None],
             member_loads: vec![None, None],
             member_point_loads: vec![vec![], vec![]],
+            member_sections: vec![MemberSection::default(), MemberSection::default()],
         }
     }
 
@@ -498,6 +630,7 @@ mod tests {
             node_loads: vec![],
             member_loads: vec![],
             member_point_loads: vec![],
+            member_sections: vec![],
         };
         let (min, max) = s.bounding_box();
         assert_eq!(min, [0.0; 3]);
@@ -756,5 +889,98 @@ mod tests {
         assert!(scene.member_deformed_point(99, 0.5, &res.displacements, 1.0).is_none());
         // Too-short displacement vector.
         assert!(scene.member_deformed_point(0, 0.5, &[0.0; 3], 1.0).is_none());
+    }
+
+    // ── Equivalent-rectangle derivation ───────────────────────────────
+
+    /// `A = b·h`, `I = b·h³/12`: a square section (`Iy = Iz`) must reproduce
+    /// itself exactly.  `A = 0.01`, `I = A²/12 = 8.333…e-6` ⇒ `(0.1, 0.1)`.
+    #[test]
+    fn equivalent_rectangle_square_is_exact() {
+        let i = 0.01_f64 * 0.01 / 12.0;
+        let (dy, dz) = equivalent_rectangle(0.01, i, i, 10.0);
+        assert!((dy - 0.1).abs() < 1e-12, "dim_y = {dy}");
+        assert!((dz - 0.1).abs() < 1e-12, "dim_z = {dz}");
+    }
+
+    /// The strong axis sets the depth `h = sqrt(12·Imax/A)` and the width is
+    /// `A/h`; the deep dimension is mapped to the strong axis' bending
+    /// direction (Iz → local y, Iy → local z), and the rectangle reproduces
+    /// that strong second moment exactly.
+    #[test]
+    fn equivalent_rectangle_maps_strong_axis() {
+        let a = 0.02_f64;
+        let h = (12.0 * 1e-3 / a).sqrt();
+        let b = a / h;
+
+        // Case A: Iz > Iy ⇒ the depth `h` runs along local y (Iz = ∫y²dA).
+        let (dy, dz) = equivalent_rectangle(a, 1e-5, 1e-3, 10.0);
+        assert!((dy - h).abs() < 1e-12, "dim_y {dy} vs h {h}");
+        assert!((dz - b).abs() < 1e-12, "dim_z {dz} vs b {b}");
+        let iz_back = dz * dy.powi(3) / 12.0;
+        assert!((iz_back - 1e-3).abs() < 1e-15, "Iz reproduced = {iz_back}");
+        assert!(dy > dz, "strong-axis depth should dominate here");
+
+        // Case B: Iy > Iz ⇒ the depth runs along local z (Iy = ∫z²dA).
+        let (dy2, dz2) = equivalent_rectangle(a, 1e-3, 1e-5, 10.0);
+        assert!((dz2 - h).abs() < 1e-12, "dim_z {dz2} vs h {h}");
+        assert!((dy2 - b).abs() < 1e-12, "dim_y {dy2} vs b {b}");
+        let iy_back = dy2 * dz2.powi(3) / 12.0;
+        assert!((iy_back - 1e-3).abs() < 1e-15, "Iy reproduced = {iy_back}");
+    }
+
+    /// Derivation matches the shipped default section (A=1e-3, Iy=2e-6,
+    /// Iz=1e-6): the rectangle's second moment about its strong axis is `Iy`.
+    #[test]
+    fn equivalent_rectangle_matches_default_section() {
+        let (dy, dz) = equivalent_rectangle(1e-3, 2e-6, 1e-6, 3.0);
+        // Iy = dim_y·dim_z³/12 (strong axis is local z here).
+        let iy = dy * dz.powi(3) / 12.0;
+        assert!((iy - 2e-6).abs() < 1e-15, "Iy reproduced = {iy}");
+        assert!(dy.is_finite() && dz.is_finite() && dy > 0.0 && dz > 0.0);
+    }
+
+    /// Invalid / non-finite / non-positive inputs must yield a thin finite bar,
+    /// never NaN or ∞.
+    #[test]
+    fn equivalent_rectangle_is_nan_safe() {
+        for (a, iy, iz) in [
+            (f64::NAN, 1e-6, 1e-6),
+            (1e-3, f64::NAN, 1e-6),
+            (1e-3, 1e-6, f64::INFINITY),
+            (0.0, 1e-6, 1e-6),
+            (-1.0, 1e-6, 1e-6),
+            (1e-3, 0.0, 0.0),
+            (1e-3, -2e-6, 1e-6),
+        ] {
+            let (dy, dz) = equivalent_rectangle(a, iy, iz, 2.0);
+            assert!(dy.is_finite() && dz.is_finite(), "inputs {a}/{iy}/{iz}");
+            assert!(dy > 0.0 && dz > 0.0);
+        }
+        // Non-finite length also handled.
+        let (dy, dz) = equivalent_rectangle(1e-3, 1e-6, 1e-6, f64::NAN);
+        assert!(dy.is_finite() && dz.is_finite() && dy > 0.0);
+    }
+
+    /// A wildly large `I` is clamped so the member can't be fatter than a
+    /// quarter of its own length.
+    #[test]
+    fn equivalent_rectangle_clamps_huge_i() {
+        let l = 2.0;
+        let (dy, dz) = equivalent_rectangle(1e-3, 1e300, 1e300, l);
+        assert!(dy <= 0.25 * l + 1e-12, "dim_y {dy}");
+        assert!(dz <= 0.25 * l + 1e-12, "dim_z {dz}");
+    }
+
+    /// `member_section` reads back the section stored by `from_edit_model`.
+    #[test]
+    fn member_section_readback() {
+        let (m, _mem) = cantilever(2.0);
+        let scene = ViewportScene::from_edit_model(&m);
+        let s = scene.member_section(0).unwrap();
+        assert!((s.area - 1e-3).abs() < 1e-15);
+        assert!((s.iy - 2e-6).abs() < 1e-15);
+        assert!((s.iz - 1e-6).abs() < 1e-15);
+        assert!(scene.member_section(99).is_none());
     }
 }

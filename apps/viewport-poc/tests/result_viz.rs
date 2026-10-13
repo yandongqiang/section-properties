@@ -61,6 +61,7 @@ fn deformation_amplification_scales_linearly() {
         node_loads: vec![None, None],
         member_loads: vec![None],
         member_point_loads: vec![vec![]],
+        member_sections: vec![viewport_poc::scene::MemberSection::default()],
     };
     let disp = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 

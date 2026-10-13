@@ -176,6 +176,84 @@ impl Camera3D {
         self.distance = (self.distance * factor).clamp(0.1, 1e5);
     }
 
+    /// Eye position, look-at target and camera up vector, as a single triple.
+    ///
+    /// This is the world-space look-at frame used to build
+    /// [`view_projection`](Self::view_projection); it mirrors the internal
+    /// [`basis`](Self::basis) computation so both agree exactly.
+    pub fn eye_target_up(&self) -> (Vec3, Vec3, Vec3) {
+        let (_, _, up) = self.basis();
+        (self.eye(), self.target, up)
+    }
+
+    /// Column-major `4×4` view-projection matrix for OpenGL (`mat4` in GLSL).
+    ///
+    /// Produces the same perspective mapping as [`project`](Self::project):
+    /// applying `mvp * vec4(p, 1)` and dividing by `w` yields clip space whose
+    /// `x`/`y` map to NDC identically (the `y` axis points up, as in
+    /// OpenGL).  The camera looks down its own `−Z` after the view transform,
+    /// and clip-space `z` lies in `[-1, 1]` for points between `near` and
+    /// `far`.
+    ///
+    /// `aspect` is `width / height` of the target viewport.
+    ///
+    /// The matrix is returned as a flat `[f32; 16]` in **column-major** order,
+    /// ready for `glUniformMatrix4fv` with `transpose = false`.
+    pub fn view_projection(&self, aspect: f64) -> [f32; 16] {
+        let (forward, right, up) = self.basis();
+        let eye = self.eye();
+
+        // World → camera.  Columns of the 3×3 part are the camera axes; the
+        // third row is `-forward` so the camera looks down OpenGL's `−Z`.
+        let view: [f64; 16] = [
+            right[0],
+            up[0],
+            -forward[0],
+            0.0,
+            right[1],
+            up[1],
+            -forward[1],
+            0.0,
+            right[2],
+            up[2],
+            -forward[2],
+            0.0,
+            -project::dot(right, eye),
+            -project::dot(up, eye),
+            project::dot(forward, eye),
+            1.0,
+        ];
+
+        let f = 1.0 / (self.fov * 0.5).tan();
+        let n = self.near;
+        let far = self.far;
+        let proj: [f64; 16] = [
+            f / aspect,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            (far + n) / (n - far),
+            -1.0,
+            0.0,
+            0.0,
+            (2.0 * far * n) / (n - far),
+            0.0,
+        ];
+
+        let mvp = mul4_col_major(&proj, &view);
+        let mut out = [0.0_f32; 16];
+        for (o, &v) in out.iter_mut().zip(mvp.iter()) {
+            *o = v as f32;
+        }
+        out
+    }
+
     /// Project a world-space point to screen coordinates.
     ///
     /// Returns `None` if the point is behind the camera or outside the
@@ -205,6 +283,33 @@ impl Camera3D {
             depth: z,
         })
     }
+}
+
+/// Multiply two column-major `4×4` matrices: `a * b` (`a` applied after `b`).
+fn mul4_col_major(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+    let mut out = [0.0_f64; 16];
+    for c in 0..4 {
+        for r in 0..4 {
+            let mut sum = 0.0;
+            for k in 0..4 {
+                sum += a[k * 4 + r] * b[c * 4 + k];
+            }
+            out[c * 4 + r] = sum;
+        }
+    }
+    out
+}
+
+/// Apply a column-major `4×4` matrix to a point, returning clip-space `(x,y,z,w)`.
+#[cfg(test)]
+fn apply4(m: &[f32; 16], p: Vec3) -> [f64; 4] {
+    let g = |i: usize| m[i] as f64;
+    [
+        g(0) * p[0] + g(4) * p[1] + g(8) * p[2] + g(12),
+        g(1) * p[0] + g(5) * p[1] + g(9) * p[2] + g(13),
+        g(2) * p[0] + g(6) * p[1] + g(10) * p[2] + g(14),
+        g(3) * p[0] + g(7) * p[1] + g(11) * p[2] + g(15),
+    ]
 }
 
 #[cfg(test)]
@@ -317,5 +422,77 @@ mod tests {
         let (forward, _, _) = cam.basis();
         // Looking downward: forward points towards −Y.
         assert!(forward[1] < -0.9);
+    }
+
+    // ── View-projection matrix ──────────────────────────────────────────
+
+    /// The GL matrix must reproduce the painter's `project()` exactly: apply
+    /// `mvp`, divide by `w`, map NDC → screen, and compare.
+    #[test]
+    fn view_projection_matches_project() {
+        let w = 800.0;
+        let h = 600.0;
+        let aspect = w / h;
+        let mvp = Camera3D::default().view_projection(aspect);
+        let cam = Camera3D::default();
+
+        for p in [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [-2.5, 0.5, 4.0],
+            [0.3, -1.2, -0.7],
+        ] {
+            let clip = apply4(&mvp, p);
+            assert!(clip[3] > 0.0, "point {p:?} behind camera");
+            let ndc_x = clip[0] / clip[3];
+            let ndc_y = clip[1] / clip[3];
+            let sx = (ndc_x + 1.0) * 0.5 * w;
+            let sy = (1.0 - ndc_y) * 0.5 * h;
+            let expected = cam.project(p, w, h).unwrap();
+            assert!((sx - expected.x).abs() < 1e-3, "x {sx} vs {}", expected.x);
+            assert!((sy - expected.y).abs() < 1e-3, "y {sy} vs {}", expected.y);
+            // Camera-space depth is the clip-space w.
+            assert!((clip[3] - expected.depth).abs() < 1e-3);
+        }
+    }
+
+    /// Near/far planes must map to clip-space `z = ∓1`.
+    #[test]
+    fn view_projection_depth_range() {
+        let cam = Camera3D::default();
+        let mvp = cam.view_projection(1.0);
+        let (forward, _, _) = cam.basis();
+        let eye = cam.eye();
+        for (dist, want) in [(cam.near, -1.0), (cam.far, 1.0)] {
+            let p = project::add(eye, project::scale(forward, dist));
+            let clip = apply4(&mvp, p);
+            let ndc_z = clip[2] / clip[3];
+            assert!(
+                (ndc_z - want).abs() < 1e-2,
+                "dist {dist}: ndc_z {ndc_z} vs {want}"
+            );
+        }
+    }
+
+    /// `eye_target_up` must agree with the internal basis accessors.
+    #[test]
+    fn eye_target_up_agrees_with_basis() {
+        let cam = Camera3D::default();
+        let (eye, target, up) = cam.eye_target_up();
+        assert_eq!(eye, cam.eye());
+        assert_eq!(target, cam.target);
+        let (_, _, up2) = cam.basis();
+        assert_eq!(up, up2);
+    }
+
+    /// The perspective divide must be finite for every preset view.
+    #[test]
+    fn view_projection_finite_for_all_presets() {
+        for view in StandardView::ALL {
+            let mut cam = Camera3D::default();
+            cam.set_view(view);
+            let m = cam.view_projection(4.0 / 3.0);
+            assert!(m.iter().all(|v| v.is_finite()), "{view:?} produced non-finite");
+        }
     }
 }

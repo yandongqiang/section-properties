@@ -5,13 +5,16 @@
 //! the drawing order and colors are unchanged.
 
 use egui;
+use eframe::egui_glow;
 
+use viewport_poc::app_state::AppMessage;
 use viewport_poc::camera::{Camera3D, ScreenPos};
 use viewport_poc::display::{
     displacement_magnitudes, fmt_eng, magnitude_color, max_abs, normalize, ResultViewMode,
 };
 use viewport_poc::selection::SelectionState;
 
+use super::gl_renderer::{self, RenderMode};
 use super::theme::{
     AXIS_X, AXIS_Y, AXIS_Z, BG, DEF_MEMBER, DEF_NODE, GRID_C, HELP_C, LABEL_C, LOAD_F_C, LOAD_M_C,
     MEMBER_C, MEMBER_LOAD_C, NODE_C, SELECTED_C, SUPPORT_C,
@@ -23,6 +26,11 @@ const DEFORM_SAMPLES: usize = 12;
 
 /// Draw the central viewport panel.
 pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
+    // Surface any one-shot GPU-renderer message (e.g. a runtime fallback).
+    if let Some(msg) = gl_renderer::take_message() {
+        app.messages.push(AppMessage::warning(msg));
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         app.validate_selection();
 
@@ -87,8 +95,33 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             return;
         };
 
-        // ── Draw grid ──
-        if app.display.show_grid {
+        // Determine whether to show base (undeformed) geometry.
+        let show_base = app.display.mode != ResultViewMode::Deformed || app.display.show_undeformed;
+
+        // Renderer selection (Phase P1): the GPU path draws grid / axes /
+        // members / nodes into a depth-tested offscreen buffer and blits it
+        // here; the software path keeps drawing them with the painter.
+        let use_gpu = gl_renderer::mode() == RenderMode::Gpu;
+
+        if use_gpu {
+            let geom = gl_renderer::GlGeometry::build(
+                &app.camera,
+                scene,
+                &app.display,
+                app.selection,
+                show_base,
+                w / h,
+                ctx.pixels_per_point(),
+            );
+            let callback = egui_glow::CallbackFn::new(move |info, painter| {
+                gl_renderer::paint(painter, &info, &geom);
+            });
+            painter.add(egui::PaintCallback {
+                rect,
+                callback: std::sync::Arc::new(callback),
+            });
+        } else if app.display.show_grid {
+            // ── Draw grid (software) ──
             let gmin = -2.0;
             let gmax = 8.0;
             let step = 1.0;
@@ -117,18 +150,21 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         }
 
         // ── Draw global axes ──
+        // The axis letters stay on the painter in both modes; the coloured
+        // lines are drawn by GL only in GPU mode.
         if app.display.show_global_axes {
-            draw_axes(&app.camera, w, h, rect, &painter, 1.0);
+            if use_gpu {
+                draw_axis_labels(&app.camera, w, h, rect, &painter, 1.0);
+            } else {
+                draw_axes(&app.camera, w, h, rect, &painter, 1.0);
+            }
         }
 
         // ── Depth-sort members ──
         let order: Vec<usize> = (0..scene.n_members()).collect();
 
-        // Determine whether to show base (undeformed) geometry.
-        let show_base = app.display.mode != ResultViewMode::Deformed || app.display.show_undeformed;
-
-        // ── Draw undeformed members ──
-        if show_base {
+        // ── Draw undeformed members (software renderer only) ──
+        if show_base && !use_gpu {
             for &mi in &order {
                 let (ni, nj) = scene.member_nodes[mi];
                 let pi = scene.node_positions[ni];
@@ -152,8 +188,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             }
         }
 
-        // ── Draw undeformed nodes ──
-        if show_base {
+        // ── Draw undeformed nodes (software renderer only) ──
+        if show_base && !use_gpu {
             for (i, &pos) in scene.node_positions.iter().enumerate() {
                 let Some(p) = app.camera.project(pos, w, h) else {
                     continue;
@@ -673,6 +709,32 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
 
 fn scr(p: &ScreenPos, rect: egui::Rect) -> egui::Pos2 {
     egui::pos2(rect.min.x + p.x as f32, rect.min.y + p.y as f32)
+}
+
+/// Axis letter labels only (GPU mode draws the coloured lines itself).
+fn draw_axis_labels(
+    cam: &Camera3D,
+    w: f64,
+    h: f64,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+    len: f64,
+) {
+    for (end, col, lbl) in [
+        ([len, 0.0, 0.0], AXIS_X, "X"),
+        ([0.0, len, 0.0], AXIS_Y, "Y"),
+        ([0.0, 0.0, len], AXIS_Z, "Z"),
+    ] {
+        if let Some(p1) = cam.project(end, w, h) {
+            painter.text(
+                scr(&p1, rect),
+                egui::Align2::CENTER_CENTER,
+                lbl,
+                egui::FontId::proportional(12.0),
+                col,
+            );
+        }
+    }
 }
 
 fn draw_axes(cam: &Camera3D, w: f64, h: f64, rect: egui::Rect, painter: &egui::Painter, len: f64) {

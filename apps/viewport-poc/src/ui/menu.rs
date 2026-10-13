@@ -1,12 +1,12 @@
-//! Top menu bar and the compact quick-action row.
+//! Top menu bar and the MIDAS-style ribbon toolbar below it.
 
 use egui;
 
-use viewport_poc::app_state::AnalysisStatus;
 use viewport_poc::camera::StandardView;
 use viewport_poc::display::ResultViewMode;
 use viewport_poc::model::PresetModel;
 
+use super::gl_renderer::{self, RenderMode};
 use super::module::WorkModule;
 use super::theme;
 use crate::ViewportApp;
@@ -24,14 +24,11 @@ pub fn show_menu_bar(app: &mut ViewportApp, ctx: &egui::Context) {
             help_menu(app, ui);
 
             ui.separator();
-            quick_actions(app, ui);
-
-            ui.separator();
-            view_toolbar(app, ui);
-
-            ui.separator();
             inspector_toggle(app, ui);
         });
+        // Ribbon row, on the line directly below the menu bar.
+        ui.separator();
+        super::ribbon::show_ribbon(app, ui);
     });
 }
 
@@ -110,6 +107,47 @@ fn view_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
         ui.checkbox(&mut app.display.show_node_labels, "Node labels");
         ui.checkbox(&mut app.display.show_local_axes, "Local axes (selected)");
         ui.separator();
+        ui.label(egui::RichText::new("Renderer").strong());
+        let gpu_active = gl_renderer::mode() == RenderMode::Gpu;
+        if ui
+            .selectable_label(!gpu_active, RenderMode::Software.label())
+            .on_hover_text("Legacy software-projected view (always available)")
+            .clicked()
+        {
+            gl_renderer::set_mode(RenderMode::Software);
+            ui.close_menu();
+        }
+        let gpu_available = gl_renderer::available();
+        let mut gpu_label = ui.add_enabled(
+            gpu_available,
+            egui::SelectableLabel::new(gpu_active, RenderMode::Gpu.label()),
+        );
+        gpu_label = gpu_label.on_hover_text("GPU 3-D view with depth testing");
+        if !gpu_available {
+            gpu_label = gpu_label.on_disabled_hover_text("GPU renderer unavailable — see Messages");
+        }
+        if gpu_label.clicked() && gl_renderer::set_mode(RenderMode::Gpu) {
+            ui.close_menu();
+        }
+        // GPU options (Phase P2).  Harmless in software mode; disabled when the
+        // GPU renderer never came up.
+        let mut shading = gl_renderer::shading_enabled();
+        if ui
+            .add_enabled(gpu_available, egui::Checkbox::new(&mut shading, "Shading / lighting"))
+            .on_hover_text("Lambert shading on the extruded members and nodes")
+            .changed()
+        {
+            gl_renderer::set_shading(shading);
+        }
+        let mut msaa = gl_renderer::msaa_enabled();
+        if ui
+            .add_enabled(gpu_available, egui::Checkbox::new(&mut msaa, "MSAA (4×)"))
+            .on_hover_text("Multisampled anti-aliasing on the offscreen target")
+            .changed()
+        {
+            gl_renderer::set_msaa(msaa);
+        }
+        ui.separator();
         ui.label(egui::RichText::new("Standard views").strong());
         for view in StandardView::ALL {
             if ui.button(view.label()).clicked() {
@@ -147,20 +185,6 @@ fn view_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
             ui.close_menu();
         }
     });
-}
-
-/// Compact view-control group in the menu bar row.
-///
-/// Fit / zoom-extents plus the standard preset viewpoints.
-fn view_toolbar(app: &mut ViewportApp, ui: &mut egui::Ui) {
-    if ui.button("Fit").on_hover_text("Fit / zoom extents (F)").clicked() {
-        app.fit_view();
-    }
-    for view in StandardView::ALL {
-        if ui.button(view.label()).clicked() {
-            app.set_standard_view(view);
-        }
-    }
 }
 
 /// Always-visible toggle for the right-hand inspector panel.
@@ -254,43 +278,4 @@ fn help_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
             ui.close_menu();
         }
     });
-}
-
-/// Compact quick-action row folded from the old flat toolbar.
-fn quick_actions(app: &mut ViewportApp, ui: &mut egui::Ui) {
-    let solve_enabled = app.can_run_analysis();
-    if ui
-        .add_enabled(solve_enabled, egui::Button::new("Solve"))
-        .clicked()
-    {
-        app.run_solve();
-    }
-    if ui
-        .add_enabled(app.history.can_undo(), egui::Button::new("Undo"))
-        .clicked()
-    {
-        app.do_undo();
-    }
-    if ui
-        .add_enabled(app.history.can_redo(), egui::Button::new("Redo"))
-        .clicked()
-    {
-        app.do_redo();
-    }
-    ui.separator();
-    match app.project.analysis_status() {
-        AnalysisStatus::Stale => {
-            ui.label(
-                egui::RichText::new("\u{26a0} Results are stale \u{2014} re-solve to update")
-                    .color(theme::STALE_C),
-            );
-        }
-        AnalysisStatus::Failed => {
-            ui.label(
-                egui::RichText::new("\u{26a0} Last solve failed \u{2014} fix and re-solve")
-                    .color(theme::ERROR_C),
-            );
-        }
-        _ => {}
-    }
 }
