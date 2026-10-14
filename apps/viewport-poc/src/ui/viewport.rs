@@ -18,10 +18,7 @@ use viewport_poc::selection::{ScreenRect, SelectionState};
 
 use super::gl_renderer::{self, RenderMode};
 use super::module::WorkModule;
-use super::theme::{
-    AXIS_X, AXIS_Y, AXIS_Z, BG, DEF_MEMBER, DEF_NODE, GRID_C, HELP_C, LABEL_C, LOAD_F_C, LOAD_M_C,
-    MEMBER_C, MEMBER_LOAD_C, NODE_C, SELECTED_C, SUPPORT_C,
-};
+use super::theme::ViewportPalette;
 use crate::ViewportApp;
 
 /// Samples per member for the deformed-shape curve.
@@ -31,6 +28,11 @@ const DEFORM_SAMPLES: usize = 12;
 const VIEW_CUBE_SIZE: f32 = 90.0;
 /// Margin between the view cube and the viewport corner (points).
 const VIEW_CUBE_MARGIN: f32 = 12.0;
+/// Click radius (points) around a projected cube corner that snaps to `Iso`.
+const CUBE_CORNER_SNAP_PX: f32 = 7.0;
+/// Click band (points) around a visible cube edge that snaps to the edge's
+/// 45° two-axis view (Phase P7-2).
+const CUBE_EDGE_SNAP_PX: f32 = 8.0;
 
 /// Draw the central viewport panel.
 pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
@@ -38,6 +40,11 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
     if let Some(msg) = gl_renderer::take_message() {
         app.messages.push(AppMessage::warning(msg));
     }
+
+    // Theme-dependent viewport palette (Phase P7-2): the 3-D canvas follows
+    // the light/dark toggle, re-read every frame so a theme switch is
+    // immediate in both renderers.
+    let pal = ViewportPalette::for_theme(app.dark_mode);
 
     egui::CentralPanel::default().show(ctx, |ui| {
         app.validate_selection();
@@ -51,7 +58,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             return;
         }
 
-        painter.rect_filled(rect, 0.0, BG);
+        painter.rect_filled(rect, 0.0, pal.bg);
 
         // The view cube lives in the bottom-right corner; its rect is fixed for
         // the whole frame, so viewport clicks inside it are not treated as
@@ -178,16 +185,16 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 egui::Align2::CENTER_CENTER,
                 "No model loaded",
                 egui::FontId::proportional(16.0),
-                LABEL_C,
+                pal.label,
             );
             painter.text(
                 rect.min + egui::vec2(10.0, rect.height() - 10.0),
                 egui::Align2::LEFT_BOTTOM,
                 "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear",
                 egui::FontId::proportional(11.0),
-                HELP_C,
+                pal.help,
             );
-            show_view_cube(app, ui, rect, &painter);
+            show_view_cube(app, ui, rect, &painter, pal);
             return;
         };
 
@@ -224,6 +231,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 show_base,
                 w / h,
                 ctx.pixels_per_point(),
+                pal,
             );
             let callback = egui_glow::CallbackFn::new(move |info, painter| {
                 gl_renderer::paint(painter, &info, &geom);
@@ -245,7 +253,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 ) {
                     painter.line_segment(
                         [scr(&a, rect), scr(&b, rect)],
-                        egui::Stroke::new(1.0_f32, GRID_C),
+                        egui::Stroke::new(1.0_f32, pal.grid),
                     );
                 }
                 if let (Some(a), Some(b)) = (
@@ -254,7 +262,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 ) {
                     painter.line_segment(
                         [scr(&a, rect), scr(&b, rect)],
-                        egui::Stroke::new(1.0_f32, GRID_C),
+                        egui::Stroke::new(1.0_f32, pal.grid),
                     );
                 }
                 i += step;
@@ -266,9 +274,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // lines are drawn by GL only in GPU mode.
         if app.display.show_global_axes {
             if use_gpu {
-                draw_axis_labels(&app.camera, w, h, rect, &painter, 1.0);
+                draw_axis_labels(&app.camera, w, h, rect, &painter, 1.0, pal);
             } else {
-                draw_axes(&app.camera, w, h, rect, &painter, 1.0);
+                draw_axes(&app.camera, w, h, rect, &painter, 1.0, pal);
             }
         }
 
@@ -296,9 +304,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 };
                 let is_sel = app.selected.contains_member(scene.member_ids[mi]);
                 let (wd, col) = if is_sel {
-                    (4.0, SELECTED_C)
+                    (4.0, pal.selected)
                 } else {
-                    (2.5, MEMBER_C)
+                    (2.5, pal.member)
                 };
                 painter.line_segment(
                     [scr(&pa, rect), scr(&pb, rect)],
@@ -321,7 +329,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 };
                 let is_sel = app.selected.contains_node(scene.node_ids[i]);
                 let r = if is_sel { 7.0 } else { 5.0 };
-                let col = if is_sel { SELECTED_C } else { NODE_C };
+                let col = if is_sel { pal.selected } else { pal.node };
                 painter.circle_filled(scr(&p, rect), r, col);
             }
         }
@@ -343,7 +351,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     continue;
                 };
                 let center = scr(&p, rect);
-                let stroke = egui::Stroke::new(2.0_f32, SUPPORT_C);
+                let stroke = egui::Stroke::new(2.0_f32, pal.support);
                 let label = if spec.is_fixed() {
                     "F".to_string()
                 } else if spec.is_pinned() {
@@ -371,7 +379,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     egui::Align2::CENTER_CENTER,
                     label,
                     egui::FontId::proportional(10.0),
-                    SUPPORT_C,
+                    pal.support,
                 );
             }
         }
@@ -408,8 +416,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     ];
                     if let Some(p_tip) = app.camera.project(tip_world, w, h) {
                         let tip = scr(&p_tip, rect);
-                        painter.line_segment([center, tip], egui::Stroke::new(2.5_f32, LOAD_F_C));
-                        painter.circle_filled(tip, 4.0, LOAD_F_C);
+                        painter.line_segment([center, tip], egui::Stroke::new(2.5_f32, pal.load_f));
+                        painter.circle_filled(tip, 4.0, pal.load_f);
                     }
                 }
 
@@ -418,14 +426,14 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     painter.circle_stroke(
                         center + egui::vec2(14.0, -14.0),
                         6.0,
-                        egui::Stroke::new(2.0_f32, LOAD_M_C),
+                        egui::Stroke::new(2.0_f32, pal.load_m),
                     );
                     painter.text(
                         center + egui::vec2(14.0, -14.0),
                         egui::Align2::CENTER_CENTER,
                         "M",
                         egui::FontId::proportional(8.0),
-                        LOAD_M_C,
+                        pal.load_m,
                     );
                 }
             }
@@ -510,9 +518,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     let s_tip = scr(&p_tip, rect);
                     painter.line_segment(
                         [s_base, s_tip],
-                        egui::Stroke::new(2.0_f32, MEMBER_LOAD_C),
+                        egui::Stroke::new(2.0_f32, pal.member_load),
                     );
-                    painter.circle_filled(s_tip, 3.0, MEMBER_LOAD_C);
+                    painter.circle_filled(s_tip, 3.0, pal.member_load);
                 }
             }
         }
@@ -597,9 +605,9 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     let s_tip = scr(&p_tip, rect);
                     painter.line_segment(
                         [s_base, s_tip],
-                        egui::Stroke::new(2.5_f32, MEMBER_LOAD_C),
+                        egui::Stroke::new(2.5_f32, pal.member_load),
                     );
-                    painter.circle_filled(s_tip, 4.0, MEMBER_LOAD_C);
+                    painter.circle_filled(s_tip, 4.0, pal.member_load);
                 }
             }
         }
@@ -611,7 +619,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             if let Some(result) = app.analysis_result() {
                 let scale = app.display.deformation_scale;
                 let deformed = scene.deformed_positions(&result.displacements, scale);
-                let stroke = egui::Stroke::new(1.5_f32, DEF_MEMBER);
+                let stroke = egui::Stroke::new(1.5_f32, pal.def_member);
                 for &mi in &order {
                     if app.display.is_member_hidden(scene.member_ids[mi]) {
                         continue;
@@ -666,7 +674,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     let Some(p) = app.camera.project(pos, w, h) else {
                         continue;
                     };
-                    painter.circle_filled(scr(&p, rect), 3.5, DEF_NODE);
+                    painter.circle_filled(scr(&p, rect), 3.5, pal.def_node);
                 }
             }
         }
@@ -706,7 +714,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         egui::Align2::LEFT_TOP,
                         format!("|u| max = {}", fmt_eng(max_mag)),
                         egui::FontId::proportional(11.0),
-                        LABEL_C,
+                        pal.label,
                     );
                     for j in 0..40 {
                         let t = j as f64 / 39.0;
@@ -724,14 +732,14 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         egui::Align2::LEFT_TOP,
                         "0",
                         egui::FontId::proportional(9.0),
-                        LABEL_C,
+                        pal.label,
                     );
                     painter.text(
                         egui::pos2(lx + 120.0, ly + 32.0),
                         egui::Align2::LEFT_TOP,
                         format!("{}", fmt_eng(max_mag)),
                         egui::FontId::proportional(9.0),
-                        LABEL_C,
+                        pal.label,
                     );
                 }
             }
@@ -774,8 +782,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         ];
                         if let Some(p_tip) = app.camera.project(tip_world, w, h) {
                             let tip = scr(&p_tip, rect);
-                            painter.line_segment([center, tip], egui::Stroke::new(3.0_f32, SUPPORT_C));
-                            painter.circle_filled(tip, 5.0, SUPPORT_C);
+                            painter.line_segment([center, tip], egui::Stroke::new(3.0_f32, pal.support));
+                            painter.circle_filled(tip, 5.0, pal.support);
                         }
                     }
 
@@ -784,14 +792,14 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         painter.circle_stroke(
                             center + egui::vec2(14.0, -14.0),
                             7.0,
-                            egui::Stroke::new(2.5_f32, LOAD_M_C),
+                            egui::Stroke::new(2.5_f32, pal.load_m),
                         );
                         painter.text(
                             center + egui::vec2(14.0, -14.0),
                             egui::Align2::CENTER_CENTER,
                             "R",
                             egui::FontId::proportional(8.0),
-                            LOAD_M_C,
+                            pal.load_m,
                         );
                     }
                 }
@@ -838,8 +846,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                                 let c0 = scr(&p0, rect);
                                 let c1 = scr(&p1, rect);
                                 painter
-                                    .line_segment([c0, c1], egui::Stroke::new(3.0_f32, SELECTED_C));
-                                painter.circle_filled(c1, 5.0, SELECTED_C);
+                                    .line_segment([c0, c1], egui::Stroke::new(3.0_f32, pal.selected));
+                                painter.circle_filled(c1, 5.0, pal.selected);
                             }
                         }
                     }
@@ -876,6 +884,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                                         mpos,
                                         [xh, yh, zh],
                                         0.5,
+                                        pal,
                                     );
                                 }
                             }
@@ -902,7 +911,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     egui::Align2::LEFT_CENTER,
                     format!("N{}", scene.node_ids[i].0),
                     egui::FontId::proportional(10.0),
-                    LABEL_C,
+                    pal.label,
                 );
             }
         }
@@ -913,7 +922,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             egui::Align2::LEFT_BOTTOM,
             "Drag: orbit | Shift-drag: box select | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Shift/Ctrl-click: add | Ctrl+A: all | Del: delete | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
             egui::FontId::proportional(11.0),
-            HELP_C,
+            pal.help,
         );
 
         // ── Box-select rubber band (drawn over the scene) ──
@@ -921,21 +930,17 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some(cur) = response.interact_pointer_pos() {
                     let band = egui::Rect::from_two_pos(start, cur);
-                    painter.rect_filled(
-                        band,
-                        0.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 190, 255, 40),
-                    );
-                    painter.rect_stroke(band, 0.0, egui::Stroke::new(1.0_f32, SELECTED_C));
+                    painter.rect_filled(band, 0.0, pal.band_fill);
+                    painter.rect_stroke(band, 0.0, egui::Stroke::new(1.0_f32, pal.band_stroke));
                 }
             }
         }
 
         // ── Section-cut plane indicator (both renderers) ──
-        draw_section_cut_plane(app, scene, rect, &painter, w, h);
+        draw_section_cut_plane(app, scene, rect, &painter, w, h, pal);
 
         // ── View cube (bottom-right) ──
-        show_view_cube(app, ui, rect, &painter);
+        show_view_cube(app, ui, rect, &painter, pal);
     });
 }
 
@@ -987,6 +992,7 @@ fn draw_section_cut_plane(
     painter: &egui::Painter,
     w: f64,
     h: f64,
+    pal: ViewportPalette,
 ) {
     let cut = &app.display.section_cut;
     if !cut.enabled {
@@ -1045,8 +1051,8 @@ fn draw_section_cut_plane(
     }
     painter.add(egui::Shape::convex_polygon(
         pts,
-        egui::Color32::from_rgba_unmultiplied(120, 190, 255, 28),
-        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(120, 190, 255, 130)),
+        pal.plane_fill,
+        egui::Stroke::new(1.0_f32, pal.plane_stroke),
     ));
 }
 
@@ -1229,11 +1235,12 @@ fn draw_axis_labels(
     rect: egui::Rect,
     painter: &egui::Painter,
     len: f64,
+    pal: ViewportPalette,
 ) {
     for (end, col, lbl) in [
-        ([len, 0.0, 0.0], AXIS_X, "X"),
-        ([0.0, len, 0.0], AXIS_Y, "Y"),
-        ([0.0, 0.0, len], AXIS_Z, "Z"),
+        ([len, 0.0, 0.0], pal.axis_x, "X"),
+        ([0.0, len, 0.0], pal.axis_y, "Y"),
+        ([0.0, 0.0, len], pal.axis_z, "Z"),
     ] {
         if let Some(p1) = cam.project(end, w, h) {
             painter.text(
@@ -1247,15 +1254,23 @@ fn draw_axis_labels(
     }
 }
 
-fn draw_axes(cam: &Camera3D, w: f64, h: f64, rect: egui::Rect, painter: &egui::Painter, len: f64) {
+fn draw_axes(
+    cam: &Camera3D,
+    w: f64,
+    h: f64,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+    len: f64,
+    pal: ViewportPalette,
+) {
     let origin = [0.0, 0.0, 0.0];
     let Some(p0) = cam.project(origin, w, h) else {
         return;
     };
     for (end, col, lbl) in [
-        ([len, 0.0, 0.0], AXIS_X, "X"),
-        ([0.0, len, 0.0], AXIS_Y, "Y"),
-        ([0.0, 0.0, len], AXIS_Z, "Z"),
+        ([len, 0.0, 0.0], pal.axis_x, "X"),
+        ([0.0, len, 0.0], pal.axis_y, "Y"),
+        ([0.0, 0.0, len], pal.axis_z, "Z"),
     ] {
         if let Some(p1) = cam.project(end, w, h) {
             painter.line_segment(
@@ -1282,14 +1297,15 @@ fn draw_local_axes(
     origin: [f64; 3],
     axes: [[f64; 3]; 3],
     len: f64,
+    pal: ViewportPalette,
 ) {
     let Some(p0) = cam.project(origin, w, h) else {
         return;
     };
     for (axis, col, lbl) in [
-        (axes[0], AXIS_X, "x"),
-        (axes[1], AXIS_Y, "y"),
-        (axes[2], AXIS_Z, "z"),
+        (axes[0], pal.axis_x, "x"),
+        (axes[1], pal.axis_y, "y"),
+        (axes[2], pal.axis_z, "z"),
     ] {
         let end = [
             origin[0] + axis[0] * len,
@@ -1393,26 +1409,66 @@ const CUBE_FACES: [CubeFace; 6] = [
     },
 ];
 
+/// One mid-edge snap of the view cube (Phase P7-2).
+///
+/// `a` / `b` are corner indices into [`cube_corner`] (bit 0 = x, bit 1 = y,
+/// bit 2 = z, set = +1), so an edge always joins two corners that differ in
+/// exactly one bit.  Clicking the edge snaps to the 45° two-axis `view`.
+struct CubeEdge {
+    a: usize,
+    b: usize,
+    view: StandardView,
+}
+
+/// The twelve cube edges and the mid-edge view each one snaps to.
+const CUBE_EDGES: [CubeEdge; 12] = [
+    CubeEdge { a: 6, b: 7, view: StandardView::FrontTop },
+    CubeEdge { a: 4, b: 5, view: StandardView::FrontBottom },
+    CubeEdge { a: 5, b: 7, view: StandardView::FrontRight },
+    CubeEdge { a: 4, b: 6, view: StandardView::FrontLeft },
+    CubeEdge { a: 2, b: 3, view: StandardView::BackTop },
+    CubeEdge { a: 0, b: 1, view: StandardView::BackBottom },
+    CubeEdge { a: 1, b: 3, view: StandardView::BackRight },
+    CubeEdge { a: 0, b: 2, view: StandardView::BackLeft },
+    CubeEdge { a: 3, b: 7, view: StandardView::TopRight },
+    CubeEdge { a: 2, b: 6, view: StandardView::TopLeft },
+    CubeEdge { a: 1, b: 5, view: StandardView::BottomRight },
+    CubeEdge { a: 0, b: 4, view: StandardView::BottomLeft },
+];
+
+/// Corner `i` of the unit cube (`[-1, 1]³`); bit layout documented on
+/// [`CubeEdge`].
+fn cube_corner(i: usize) -> [f64; 3] {
+    [
+        if i & 1 == 0 { -1.0 } else { 1.0 },
+        if i & 2 == 0 { -1.0 } else { 1.0 },
+        if i & 4 == 0 { -1.0 } else { 1.0 },
+    ]
+}
+
 /// Draw the view cube and handle its interactions.
 ///
 /// The cube is drawn with the camera's own basis (a small orthographic
 /// projection of the world axes), so it rotates with the view.  Clicking a
-/// visible face snaps to that standard view; clicking a corner snaps to `Iso`;
-/// dragging the gizmo orbits the camera.  Reuses [`Camera3D::set_view`] /
-/// [`ViewportApp::set_standard_view`], so it never bypasses the existing
-/// view machinery.
-fn show_view_cube(app: &mut ViewportApp, ui: &mut egui::Ui, rect: egui::Rect, painter: &egui::Painter) {
+/// visible face snaps to that standard view; clicking a **mid-edge**
+/// (Phase P7-2) snaps to the edge's 45° two-axis view; clicking a corner
+/// snaps to `Iso`; dragging the gizmo orbits the camera.  Reuses
+/// [`Camera3D::set_view`] / [`ViewportApp::set_standard_view`], so it never
+/// bypasses the existing view machinery.
+fn show_view_cube(
+    app: &mut ViewportApp,
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    painter: &egui::Painter,
+    pal: ViewportPalette,
+) {
     let region = view_cube_rect(rect);
     if !rect.contains_rect(region) {
         return;
     }
 
-    painter.rect_filled(
-        region,
-        4.0,
-        egui::Color32::from_rgba_premultiplied(18, 18, 24, 175),
-    );
-    painter.rect_stroke(region, 4.0, egui::Stroke::new(1.0_f32, GRID_C));
+    painter.rect_filled(region, 4.0, pal.cube_panel);
+    painter.rect_stroke(region, 4.0, egui::Stroke::new(1.0_f32, pal.cube_border));
 
     let (forward, right, up) = app.camera.basis();
     let eye_dir = [-forward[0], -forward[1], -forward[2]];
@@ -1438,11 +1494,15 @@ fn show_view_cube(app: &mut ViewportApp, ui: &mut egui::Ui, rect: egui::Rect, pa
         ];
         let lit = 0.45 + 0.55 * project::dot(face.normal, light).max(0.0);
         let shade = |c: u8| (c as f64 * lit).clamp(0.0, 255.0) as u8;
-        let fill = egui::Color32::from_rgb(shade(NODE_C.r()), shade(NODE_C.g()), shade(NODE_C.b()));
+        let fill = egui::Color32::from_rgb(
+            shade(pal.cube_face.r()),
+            shade(pal.cube_face.g()),
+            shade(pal.cube_face.b()),
+        );
         painter.add(egui::Shape::convex_polygon(
             pts.to_vec(),
             fill,
-            egui::Stroke::new(1.0_f32, GRID_C),
+            egui::Stroke::new(1.0_f32, pal.cube_border),
         ));
         let centroid = egui::pos2(
             (pts[0].x + pts[1].x + pts[2].x + pts[3].x) * 0.25,
@@ -1453,18 +1513,33 @@ fn show_view_cube(app: &mut ViewportApp, ui: &mut egui::Ui, rect: egui::Rect, pa
             egui::Align2::CENTER_CENTER,
             face.label,
             egui::FontId::proportional(13.0),
-            egui::Color32::from_rgb(30, 30, 36),
+            pal.cube_text,
         );
         face_polys.push((face.view, pts));
     }
 
     // The eight cube corners map to the isometric view.
-    let mut corners: Vec<egui::Pos2> = Vec::with_capacity(8);
-    for i in 0..8 {
-        let sx = if i & 1 == 0 { -1.0 } else { 1.0 };
-        let sy = if i & 2 == 0 { -1.0 } else { 1.0 };
-        let sz = if i & 4 == 0 { -1.0 } else { 1.0 };
-        corners.push(project_dir([sx, sy, sz]));
+    let corners: Vec<egui::Pos2> = (0..8).map(|i| project_dir(cube_corner(i))).collect();
+
+    // Mid-edge snap zones (Phase P7-2): a visible edge is drawn with a faint
+    // highlight so the 45° two-axis zones read as clickable, and is hit-tested
+    // with a screen-space band around its projected segment.
+    let mut edge_segments: Vec<(StandardView, egui::Pos2, egui::Pos2)> = Vec::with_capacity(12);
+    for edge in &CUBE_EDGES {
+        let a = cube_corner(edge.a);
+        let b = cube_corner(edge.b);
+        // Visible when the edge midpoint faces the camera (both adjacent
+        // faces contribute; at the exact silhouette either answer is fine).
+        let mid = [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+        if project::dot(mid, eye_dir) <= 0.0 {
+            continue;
+        }
+        let (pa, pb) = (project_dir(a), project_dir(b));
+        painter.line_segment(
+            [pa, pb],
+            egui::Stroke::new(2.5_f32, pal.cube_edge),
+        );
+        edge_segments.push((edge.view, pa, pb));
     }
 
     let response = ui.interact(region, ui.id().with("view_cube"), egui::Sense::click_and_drag());
@@ -1473,22 +1548,59 @@ fn show_view_cube(app: &mut ViewportApp, ui: &mut egui::Ui, rect: egui::Rect, pa
         app.camera.orbit(-d.x as f64 * 0.02, d.y as f64 * 0.02);
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let mut chosen = None;
-            if corners.iter().any(|c| c.distance(pos) < 7.0) {
-                chosen = Some(StandardView::Iso);
-            } else {
-                for (view, poly) in &face_polys {
-                    if point_in_poly(pos, poly) {
-                        chosen = Some(*view);
-                        break;
-                    }
-                }
-            }
-            if let Some(view) = chosen {
+            if let Some(view) = cube_pick(pos, &corners, &edge_segments, &face_polys) {
                 app.set_standard_view(view);
             }
         }
     }
+    // Hover names the snap target under the cursor.
+    if response.hovered() {
+        if let Some(view) = response
+            .interact_pointer_pos()
+            .and_then(|pos| cube_pick(pos, &corners, &edge_segments, &face_polys))
+        {
+            response.on_hover_text(format!("{} view — click to snap", view.label()));
+        }
+    }
+}
+
+/// Resolve a position on the view cube to the view it snaps to.
+///
+/// Priority: a corner zone snaps to `Iso`, then a mid-edge band snaps to the
+/// edge's 45° two-axis view, then a face interior snaps to the face view.
+/// Returns `None` when `pos` misses every zone.
+fn cube_pick(
+    pos: egui::Pos2,
+    corners: &[egui::Pos2],
+    edge_segments: &[(StandardView, egui::Pos2, egui::Pos2)],
+    face_polys: &[(StandardView, [egui::Pos2; 4])],
+) -> Option<StandardView> {
+    if corners.iter().any(|c| c.distance(pos) < CUBE_CORNER_SNAP_PX) {
+        return Some(StandardView::Iso);
+    }
+    for (view, a, b) in edge_segments {
+        if dist_to_segment(pos, *a, *b) <= CUBE_EDGE_SNAP_PX {
+            return Some(*view);
+        }
+    }
+    for (view, poly) in face_polys {
+        if point_in_poly(pos, poly) {
+            return Some(*view);
+        }
+    }
+    None
+}
+
+/// Screen-space distance (points) from `p` to the segment `a`–`b`.
+fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    let t = if len2 <= 1e-12 {
+        0.0
+    } else {
+        ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+    };
+    (a + ab * t - p).length()
 }
 
 /// Even-odd (winding-independent) point-in-polygon test.
@@ -1637,5 +1749,108 @@ pub fn show_quick_edit(app: &mut ViewportApp, ctx: &egui::Context) {
         app.apply_quick_edit();
     } else if !close {
         app.quick_edit = Some(qe);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The edge table is well formed: twelve distinct mid-edge views, each
+    /// joining two cube corners that differ in exactly one coordinate.
+    #[test]
+    fn cube_edge_table_is_well_formed() {
+        assert_eq!(CUBE_EDGES.len(), 12);
+        let mut views: Vec<StandardView> = Vec::new();
+        for e in &CUBE_EDGES {
+            assert!(e.a < 8 && e.b < 8, "corner index out of range");
+            let a = cube_corner(e.a);
+            let b = cube_corner(e.b);
+            let diffs = (0..3).filter(|&k| (a[k] - b[k]).abs() > 1e-12).count();
+            assert_eq!(diffs, 1, "corners {}–{} are not a cube edge", e.a, e.b);
+            assert!(
+                StandardView::EDGES.contains(&e.view),
+                "{:?} is not a mid-edge view",
+                e.view
+            );
+            assert!(!views.contains(&e.view), "duplicate edge view {:?}", e.view);
+            views.push(e.view);
+        }
+        assert_eq!(views.len(), StandardView::EDGES.len());
+    }
+
+    /// Each edge's view direction matches the axes its corners share: the two
+    /// fixed coordinates carry the view's signs, the varying one is zero.
+    #[test]
+    fn cube_edge_views_match_their_fixed_corner_axes() {
+        for e in &CUBE_EDGES {
+            let a = cube_corner(e.a);
+            let b = cube_corner(e.b);
+            let d = e.view.eye_dir();
+            for k in 0..3 {
+                if (a[k] - b[k]).abs() > 1e-12 {
+                    assert!(
+                        d[k].abs() < 1e-9,
+                        "{:?}: varying axis {k} should be the zero axis",
+                        e.view
+                    );
+                } else {
+                    assert!(
+                        d[k].abs() > 0.5,
+                        "{:?}: fixed axis {k} should dominate",
+                        e.view
+                    );
+                    assert_eq!(
+                        d[k] > 0.0,
+                        a[k] > 0.0,
+                        "{:?}: sign mismatch on axis {k}",
+                        e.view
+                    );
+                }
+            }
+        }
+    }
+
+    /// `cube_pick` resolves corner → edge → face in that priority order.
+    #[test]
+    fn cube_pick_prefers_corner_then_edge_then_face() {
+        let corners: Vec<egui::Pos2> = (0..8)
+            .map(|i| {
+                let c = cube_corner(i);
+                egui::pos2(50.0 + c[0] as f32 * 50.0, 50.0 + c[1] as f32 * 50.0)
+            })
+            .collect();
+        let edge = StandardView::FrontTop;
+        let edges = vec![(edge, egui::pos2(0.0, 50.0), egui::pos2(100.0, 50.0))];
+        let face = StandardView::Front;
+        let faces = vec![(
+            face,
+            [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(100.0, 0.0),
+                egui::pos2(100.0, 100.0),
+                egui::pos2(0.0, 100.0),
+            ],
+        )];
+        // Near a corner → Iso, even though the point is also inside the edge band.
+        assert_eq!(
+            cube_pick(egui::pos2(2.0, 2.0), &corners, &edges, &faces),
+            Some(StandardView::Iso)
+        );
+        // On the mid-edge band → the edge view.
+        assert_eq!(
+            cube_pick(egui::pos2(50.0, 50.0), &corners, &edges, &faces),
+            Some(edge)
+        );
+        // Face interior, away from corners and edges → the face view.
+        assert_eq!(
+            cube_pick(egui::pos2(50.0, 90.0), &corners, &edges, &faces),
+            Some(face)
+        );
+        // Outside every zone → nothing.
+        assert_eq!(
+            cube_pick(egui::pos2(500.0, 500.0), &corners, &edges, &faces),
+            None
+        );
     }
 }

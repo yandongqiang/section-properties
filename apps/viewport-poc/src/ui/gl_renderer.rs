@@ -73,10 +73,7 @@ use viewport_poc::edit_model::SupportSpec;
 use viewport_poc::scene::{equivalent_rectangle, ViewportScene};
 use viewport_poc::selection::SelectionSet;
 
-use super::theme::{
-    AXIS_X, AXIS_Y, AXIS_Z, BG, DEF_MEMBER, DEF_NODE, GRID_C, LOAD_F_C, LOAD_M_C, MEMBER_C,
-    MEMBER_LOAD_C, NODE_C, SELECTED_C, SUPPORT_C,
-};
+use super::theme::ViewportPalette;
 
 /// Floats per interleaved scene vertex: position(3) + normal(3) + colour(4).
 const FLOATS_PER_VERTEX: usize = 10;
@@ -357,6 +354,10 @@ impl GlGeometry {
     /// displacement contour and the local-axis triads — is emitted as
     /// depth-tested GPU geometry.  Only text annotations (labels, legend,
     /// help, axis letters) stay on the painter.
+    ///
+    /// `pal` (Phase P7-2) is the theme-dependent viewport palette; the frame
+    /// is rebuilt every tick, so the clear colour and vertex colours follow
+    /// the light/dark toggle with no stale state.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         camera: &Camera3D,
@@ -367,6 +368,7 @@ impl GlGeometry {
         show_base: bool,
         aspect: f64,
         pixels_per_point: f32,
+        pal: ViewportPalette,
     ) -> Self {
         let ppp = pixels_per_point.max(0.1);
         let mut grid = LineBatch {
@@ -421,7 +423,7 @@ impl GlGeometry {
             let eye = camera.eye();
             let near = camera.distance.max(1e-6);
             let span = (near * 1.5).max(1e-6);
-            let col = rgba(GRID_C);
+            let col = rgba(pal.grid);
             let fade_alpha = |p: [f64; 3]| -> f32 {
                 let d = ((p[0] - eye[0]).powi(2)
                     + (p[1] - eye[1]).powi(2)
@@ -449,9 +451,9 @@ impl GlGeometry {
         // line instead of being z-fought away.
         if display.show_global_axes {
             let o = [0.0, 0.0, 0.0];
-            push_line(&mut axes.verts, o, [1.0, 0.0, 0.0], rgba(AXIS_X));
-            push_line(&mut axes.verts, o, [0.0, 1.0, 0.0], rgba(AXIS_Y));
-            push_line(&mut axes.verts, o, [0.0, 0.0, 1.0], rgba(AXIS_Z));
+            push_line(&mut axes.verts, o, [1.0, 0.0, 0.0], rgba(pal.axis_x));
+            push_line(&mut axes.verts, o, [0.0, 1.0, 0.0], rgba(pal.axis_y));
+            push_line(&mut axes.verts, o, [0.0, 0.0, 1.0], rgba(pal.axis_z));
         }
 
         // ── Scene-derived scale for the 3-D result symbols ──
@@ -517,7 +519,7 @@ impl GlGeometry {
                         (contour_colour(ti), contour_colour(tj))
                     }
                     _ => {
-                        let c = if is_sel { rgba(SELECTED_C) } else { rgba(MEMBER_C) };
+                        let c = if is_sel { rgba(pal.selected) } else { rgba(pal.member) };
                         (c, c)
                     }
                 };
@@ -548,9 +550,9 @@ impl GlGeometry {
                     .get(i)
                     .is_some_and(|&id| selected.contains_node(id));
                 let (colour, r) = if is_sel {
-                    (rgba(SELECTED_C), node_r * SELECTED_NODE_SCALE)
+                    (rgba(pal.selected), node_r * SELECTED_NODE_SCALE)
                 } else {
-                    (rgba(NODE_C), node_r)
+                    (rgba(pal.node), node_r)
                 };
                 push_sphere(&mut solids, pos, r, colour);
             }
@@ -567,7 +569,7 @@ impl GlGeometry {
                     continue;
                 }
                 if let Some(spec) = scene.node_supports.get(i).copied().flatten() {
-                    push_support(&mut solids, &mut overlay.verts, pos, spec, glyph);
+                    push_support(&mut solids, &mut overlay.verts, pos, spec, glyph, pal);
                 }
             }
         }
@@ -599,13 +601,13 @@ impl GlGeometry {
                         glyph * 0.22,
                         NODAL_ARROW_LEN * 0.35,
                         glyph * 0.55,
-                        rgba(LOAD_F_C),
+                        rgba(pal.load_f),
                     );
                 }
                 let mmag = load.moment_magnitude();
                 if mmag > 1e-12 {
                     let axis = [load.mx / mmag, load.my / mmag, load.mz / mmag];
-                    push_moment_arc(&mut solids, pos, axis, glyph * 3.0, glyph * 0.18, rgba(LOAD_M_C));
+                    push_moment_arc(&mut solids, pos, axis, glyph * 3.0, glyph * 0.18, rgba(pal.load_m));
                 }
             }
         }
@@ -665,7 +667,7 @@ impl GlGeometry {
                         glyph * 0.16,
                         arrow_len * 0.35,
                         glyph * 0.42,
-                        rgba(MEMBER_LOAD_C),
+                        rgba(pal.member_load),
                     );
                 }
             }
@@ -727,7 +729,7 @@ impl GlGeometry {
                         glyph * 0.18,
                         arrow_len * 0.4,
                         glyph * 0.5,
-                        rgba(MEMBER_LOAD_C),
+                        rgba(pal.member_load),
                     );
                 }
             }
@@ -762,7 +764,7 @@ impl GlGeometry {
                         }
                     }
                     if pts.len() >= 2 {
-                        push_sweep(&mut solids, &pts, &section, rgba(DEF_MEMBER), true);
+                        push_sweep(&mut solids, &pts, &section, rgba(pal.def_member), true);
                     }
                 }
                 for (i, &pos) in deformed.iter().enumerate() {
@@ -773,7 +775,7 @@ impl GlGeometry {
                     {
                         continue;
                     }
-                    push_sphere(&mut solids, pos, node_r * 0.9, rgba(DEF_NODE));
+                    push_sphere(&mut solids, pos, node_r * 0.9, rgba(pal.def_node));
                 }
             }
         }
@@ -808,7 +810,7 @@ impl GlGeometry {
                             glyph * 0.22,
                             scale * 0.35,
                             glyph * 0.55,
-                            rgba(SUPPORT_C),
+                            rgba(pal.support),
                         );
                     }
 
@@ -821,7 +823,7 @@ impl GlGeometry {
                             axis,
                             glyph * 3.0,
                             glyph * 0.18,
-                            rgba(LOAD_M_C),
+                            rgba(pal.load_m),
                         );
                     }
                 }
@@ -855,7 +857,7 @@ impl GlGeometry {
                                     glyph * 0.22,
                                     scale * 0.35,
                                     glyph * 0.55,
-                                    rgba(SELECTED_C),
+                                    rgba(pal.selected),
                                 );
                             }
                         }
@@ -872,7 +874,7 @@ impl GlGeometry {
                         if let (Some(mpos), Some((xh, yh, zh))) =
                             (scene.member_midpoint(mi), scene.member_local_axes(mi))
                         {
-                            push_triad(&mut overlay.verts, mpos, xh, yh, zh, TRIAD_LEN);
+                            push_triad(&mut overlay.verts, mpos, xh, yh, zh, TRIAD_LEN, pal);
                         }
                     }
                 }
@@ -907,7 +909,7 @@ impl GlGeometry {
             mvp: camera.view_projection(aspect),
             line_batches,
             solids,
-            clear: rgba(BG),
+            clear: rgba(pal.bg),
             clip_plane,
             cap_plane,
         }
@@ -1401,8 +1403,9 @@ fn push_support(
     pos: [f64; 3],
     spec: SupportSpec,
     s: f64,
+    pal: ViewportPalette,
 ) {
-    let colour = rgba(SUPPORT_C);
+    let colour = rgba(pal.support);
     let s = s.max(1e-9);
     if spec.is_fixed() {
         let half_y = (s * 0.35).max(1e-9);
@@ -1441,8 +1444,20 @@ fn push_support(
 }
 
 /// A 3-D line triad `origin → origin + len·axis` for each local axis.
-fn push_triad(lines: &mut Vec<f32>, origin: [f64; 3], xh: [f64; 3], yh: [f64; 3], zh: [f64; 3], len: f64) {
-    for (axis, col) in [(xh, AXIS_X), (yh, AXIS_Y), (zh, AXIS_Z)] {
+fn push_triad(
+    lines: &mut Vec<f32>,
+    origin: [f64; 3],
+    xh: [f64; 3],
+    yh: [f64; 3],
+    zh: [f64; 3],
+    len: f64,
+    pal: ViewportPalette,
+) {
+    for (axis, col) in [
+        (xh, pal.axis_x),
+        (yh, pal.axis_y),
+        (zh, pal.axis_z),
+    ] {
         let end = add3(origin, scale3(axis, len));
         push_line(lines, origin, end, rgba(col));
     }
@@ -2214,7 +2229,8 @@ mod tests {
         let cam = Camera3D::fit([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 4.0 / 3.0, 1.0);
+        let pal = ViewportPalette::dark();
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 4.0 / 3.0, 1.0, ViewportPalette::dark());
         // Axes + grid lines.
         assert_eq!(geom.line_batches.len(), 2);
         // One prism + two node spheres worth of triangles.
@@ -2226,8 +2242,8 @@ mod tests {
         assert!(geom.solids.iter().all(|v| v.is_finite()));
         assert!(geom.mvp.iter().all(|v| v.is_finite()));
         // Member colour present, selected colour not.
-        assert!(contains_colour(&geom.solids, rgba(MEMBER_C)));
-        assert!(!contains_colour(&geom.solids, rgba(SELECTED_C)));
+        assert!(contains_colour(&geom.solids, rgba(pal.member)));
+        assert!(!contains_colour(&geom.solids, rgba(pal.selected)));
     }
 
     #[test]
@@ -2237,7 +2253,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.mode = ResultViewMode::Deformed;
         d.show_undeformed = false;
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0, ViewportPalette::dark());
         // No members/nodes; grid and axes remain (both enabled by default).
         assert!(geom.solids.is_empty());
         assert_eq!(geom.line_batches.len(), 2);
@@ -2249,11 +2265,12 @@ mod tests {
         let s = scene();
         let d = ResultDisplayState::default();
         let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
-        let geom = GlGeometry::build(&cam, &s, &d, &sel, None, true, 1.0, 1.0);
-        assert!(contains_colour(&geom.solids, rgba(SELECTED_C)));
+        let pal = ViewportPalette::dark();
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, None, true, 1.0, 1.0, ViewportPalette::dark());
+        assert!(contains_colour(&geom.solids, rgba(pal.selected)));
         // The plain member colour is gone; nodes keep their own colour.
-        assert!(!contains_colour(&geom.solids, rgba(MEMBER_C)));
-        assert!(contains_colour(&geom.solids, rgba(NODE_C)));
+        assert!(!contains_colour(&geom.solids, rgba(pal.member)));
+        assert!(contains_colour(&geom.solids, rgba(pal.node)));
     }
 
     #[test]
@@ -2263,7 +2280,7 @@ mod tests {
         let _ = m.add_node(0.0, 0.0, 0.0).unwrap();
         let s = ViewportScene::from_edit_model(&m);
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         assert_eq!(geom.line_batches.len(), 2);
         assert_eq!(geom.solids.len(), SPHERE_VERTS * FLOATS_PER_VERTEX);
     }
@@ -2321,7 +2338,7 @@ mod tests {
         let cam = Camera3D::default();
         let s = scene();
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, false, 1.0, 1.0, ViewportPalette::dark());
         let grid = geom
             .line_batches
             .iter()
@@ -2494,6 +2511,7 @@ mod tests {
         let cam = Camera3D::fit([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
         let s = scene_with_loads();
         let d = ResultDisplayState::default();
+        let pal = ViewportPalette::dark();
         let geom = GlGeometry::build(
             &cam,
             &s,
@@ -2503,14 +2521,15 @@ mod tests {
             true,
             4.0 / 3.0,
             1.0,
+            ViewportPalette::dark(),
         );
         // Axes + support hatching + grid.
         assert_eq!(geom.line_batches.len(), 3);
         assert!(geom.solids.iter().all(|v| v.is_finite()));
-        assert!(contains_colour(&geom.solids, rgba(SUPPORT_C)));
-        assert!(contains_colour(&geom.solids, rgba(LOAD_F_C)));
-        assert!(contains_colour(&geom.solids, rgba(LOAD_M_C)));
-        assert!(contains_colour(&geom.solids, rgba(MEMBER_LOAD_C)));
+        assert!(contains_colour(&geom.solids, rgba(pal.support)));
+        assert!(contains_colour(&geom.solids, rgba(pal.load_f)));
+        assert!(contains_colour(&geom.solids, rgba(pal.load_m)));
+        assert!(contains_colour(&geom.solids, rgba(pal.member_load)));
     }
 
     /// A solved single-member cantilever, used to exercise the result-shape
@@ -2535,6 +2554,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.mode = ResultViewMode::Deformed;
         d.show_undeformed = false;
+        let pal = ViewportPalette::dark();
         let geom = GlGeometry::build(
             &cam,
             &s,
@@ -2544,11 +2564,12 @@ mod tests {
             false,
             1.0,
             1.0,
+            ViewportPalette::dark(),
         );
         assert!(!geom.solids.is_empty());
         assert!(geom.solids.iter().all(|v| v.is_finite()));
-        assert!(contains_colour(&geom.solids, rgba(DEF_MEMBER)));
-        assert!(contains_colour(&geom.solids, rgba(DEF_NODE)));
+        assert!(contains_colour(&geom.solids, rgba(pal.def_member)));
+        assert!(contains_colour(&geom.solids, rgba(pal.def_node)));
         assert_eq!(geom.line_batches.len(), 2); // axes + grid only
     }
 
@@ -2558,6 +2579,7 @@ mod tests {
         let (s, res) = solved_scene();
         let mut d = ResultDisplayState::default();
         d.mode = ResultViewMode::Displacement;
+        let pal = ViewportPalette::dark();
         let geom = GlGeometry::build(
             &cam,
             &s,
@@ -2567,10 +2589,11 @@ mod tests {
             true,
             1.0,
             1.0,
+            ViewportPalette::dark(),
         );
         // The plain member colour is replaced by the contour ramp; the fixed
         // end has zero displacement, so its end matches the ramp's blue stop.
-        assert!(!contains_colour(&geom.solids, rgba(MEMBER_C)));
+        assert!(!contains_colour(&geom.solids, rgba(pal.member)));
         assert!(contains_colour(&geom.solids, contour_colour(0.0)));
         assert!(geom.solids.iter().all(|v| v.is_finite()));
     }
@@ -2582,7 +2605,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.show_diagrams = true;
         let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
-        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0, ViewportPalette::dark());
         // axes + overlay (local triad + diagram strips) + grid.
         assert_eq!(geom.line_batches.len(), 3);
         let overlay = &geom.line_batches[1];
@@ -2600,7 +2623,7 @@ mod tests {
         let s = scene();
         let d = ResultDisplayState::default();
         assert!(!d.section_cut.enabled);
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         assert!(geom.clip_plane.is_none());
         // axes (no clip) then grid (no clip).
         assert_eq!(geom.line_batches.len(), 2);
@@ -2618,7 +2641,7 @@ mod tests {
         d.section_cut.axis = viewport_poc::display::CutAxis::X;
         d.section_cut.offset = 1.5;
         let sel = SelectionSet::from_single(SelectionState::Member(s.member_ids[0]));
-        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &sel, Some(&res), true, 1.0, 1.0, ViewportPalette::dark());
 
         let plane = geom.clip_plane.expect("plane present when enabled");
         assert_eq!(&plane[..3], &[1.0, 0.0, 0.0]);
@@ -2642,7 +2665,7 @@ mod tests {
         d.section_cut.axis = viewport_poc::display::CutAxis::Y;
         d.section_cut.offset = 2.0;
         d.section_cut.flip = true;
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         let plane = geom.clip_plane.unwrap();
         assert_eq!(&plane[..3], &[0.0, -1.0, 0.0]);
         assert_eq!(plane[3], -2.0);
@@ -2668,7 +2691,7 @@ mod tests {
                 d.section_cut.offset = 1.25;
                 d.section_cut.flip = flip;
                 let geom =
-                    GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+                    GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
                 let clip = geom.clip_plane.expect("clip plane present");
                 let cap = geom.cap_plane.expect("cap plane present when cut is on");
                 assert_eq!(cap, clip, "axis {axis:?} flip {flip}");
@@ -2684,7 +2707,7 @@ mod tests {
 
         // Cut off.
         let d = ResultDisplayState::default();
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         assert!(geom.clip_plane.is_none());
         assert!(geom.cap_plane.is_none());
 
@@ -2692,7 +2715,7 @@ mod tests {
         let mut d = ResultDisplayState::default();
         d.section_cut.enabled = true;
         d.section_cut.cap = false;
-        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         assert!(geom.clip_plane.is_some());
         assert!(geom.cap_plane.is_none());
     }
@@ -2707,10 +2730,10 @@ mod tests {
         d.section_cut.enabled = true;
         d.section_cut.cap = true;
         let with_cap =
-            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         d.section_cut.cap = false;
         let without_cap =
-            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0, ViewportPalette::dark());
         assert_eq!(with_cap.solids.len(), without_cap.solids.len());
         assert_eq!(with_cap.solids, without_cap.solids);
     }

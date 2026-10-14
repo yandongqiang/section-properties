@@ -33,6 +33,30 @@ pub enum StandardView {
     Left,
     /// Bottom: eye (almost) directly below, looking up `+Y`.
     Bottom,
+    /// Front–top edge: azimuth 90°, elevation 45° (between `Front` and `Top`).
+    FrontTop,
+    /// Front–right edge: azimuth 45°, elevation 0° (between `Front` and `Right`).
+    FrontRight,
+    /// Front–left edge: azimuth 135°, elevation 0° (between `Front` and `Left`).
+    FrontLeft,
+    /// Front–bottom edge: azimuth 90°, elevation −45° (between `Front` and `Bottom`).
+    FrontBottom,
+    /// Back–top edge: azimuth −90°, elevation 45° (between `Back` and `Top`).
+    BackTop,
+    /// Back–right edge: azimuth −45°, elevation 0° (between `Back` and `Right`).
+    BackRight,
+    /// Back–left edge: azimuth −135°, elevation 0° (between `Back` and `Left`).
+    BackLeft,
+    /// Back–bottom edge: azimuth −90°, elevation −45° (between `Back` and `Bottom`).
+    BackBottom,
+    /// Top–right edge: azimuth 0°, elevation 45° (between `Top` and `Right`).
+    TopRight,
+    /// Top–left edge: azimuth 180°, elevation 45° (between `Top` and `Left`).
+    TopLeft,
+    /// Bottom–right edge: azimuth 0°, elevation −45° (between `Bottom` and `Right`).
+    BottomRight,
+    /// Bottom–left edge: azimuth 180°, elevation −45° (between `Bottom` and `Left`).
+    BottomLeft,
 }
 
 impl StandardView {
@@ -44,10 +68,11 @@ impl StandardView {
         StandardView::Right,
     ];
 
-    /// The six axis-aligned cube faces plus `Iso` — the full set exposed by the
-    /// view-cube gizmo.  Deliberately a superset of [`ALL`](Self::ALL): the View
-    /// menu keeps showing the four primary presets.
-    pub const CUBE: [StandardView; 7] = [
+    /// The six axis-aligned cube faces, the twelve mid-edge views and `Iso` —
+    /// the full set exposed by the view-cube gizmo (faces + edges + corner).
+    /// Deliberately a superset of [`ALL`](Self::ALL): the View menu keeps
+    /// showing the four primary presets.
+    pub const CUBE: [StandardView; 19] = [
         StandardView::Iso,
         StandardView::Front,
         StandardView::Back,
@@ -55,6 +80,35 @@ impl StandardView {
         StandardView::Right,
         StandardView::Top,
         StandardView::Bottom,
+        StandardView::FrontTop,
+        StandardView::FrontRight,
+        StandardView::FrontLeft,
+        StandardView::FrontBottom,
+        StandardView::BackTop,
+        StandardView::BackRight,
+        StandardView::BackLeft,
+        StandardView::BackBottom,
+        StandardView::TopRight,
+        StandardView::TopLeft,
+        StandardView::BottomRight,
+        StandardView::BottomLeft,
+    ];
+
+    /// The twelve mid-edge views (Phase P7-2): 45° two-axis views, one per
+    /// cube edge, reachable by clicking an edge of the view-cube gizmo.
+    pub const EDGES: [StandardView; 12] = [
+        StandardView::FrontTop,
+        StandardView::FrontRight,
+        StandardView::FrontLeft,
+        StandardView::FrontBottom,
+        StandardView::BackTop,
+        StandardView::BackRight,
+        StandardView::BackLeft,
+        StandardView::BackBottom,
+        StandardView::TopRight,
+        StandardView::TopLeft,
+        StandardView::BottomRight,
+        StandardView::BottomLeft,
     ];
 
     /// Short label for GUI buttons.
@@ -67,6 +121,18 @@ impl StandardView {
             StandardView::Back => "Back",
             StandardView::Left => "Left",
             StandardView::Bottom => "Bottom",
+            StandardView::FrontTop => "Front-Top",
+            StandardView::FrontRight => "Front-Right",
+            StandardView::FrontLeft => "Front-Left",
+            StandardView::FrontBottom => "Front-Bottom",
+            StandardView::BackTop => "Back-Top",
+            StandardView::BackRight => "Back-Right",
+            StandardView::BackLeft => "Back-Left",
+            StandardView::BackBottom => "Back-Bottom",
+            StandardView::TopRight => "Top-Right",
+            StandardView::TopLeft => "Top-Left",
+            StandardView::BottomRight => "Bottom-Right",
+            StandardView::BottomLeft => "Bottom-Left",
         }
     }
 
@@ -76,6 +142,10 @@ impl StandardView {
     /// `forward × world_up` cross product in [`Camera3D::basis`] stays
     /// well-conditioned (it degenerates when the view direction is exactly
     /// parallel to the world up axis).
+    ///
+    /// The twelve mid-edge views use exact `±45°` steps: their eye direction
+    /// has two non-zero components of equal magnitude (see
+    /// [`StandardView::eye_dir`]).
     pub const fn angles(self) -> (f64, f64) {
         match self {
             StandardView::Iso => (std::f64::consts::FRAC_PI_4, std::f64::consts::FRAC_PI_6),
@@ -85,7 +155,30 @@ impl StandardView {
             StandardView::Left => (std::f64::consts::PI, 0.0),
             StandardView::Top => (std::f64::consts::FRAC_PI_2, 1.55),
             StandardView::Bottom => (std::f64::consts::FRAC_PI_2, -1.55),
+            StandardView::FrontTop => (std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_4),
+            StandardView::FrontRight => (std::f64::consts::FRAC_PI_4, 0.0),
+            StandardView::FrontLeft => (3.0 * std::f64::consts::FRAC_PI_4, 0.0),
+            StandardView::FrontBottom => (std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4),
+            StandardView::BackTop => (-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_4),
+            StandardView::BackRight => (-std::f64::consts::FRAC_PI_4, 0.0),
+            StandardView::BackLeft => (-3.0 * std::f64::consts::FRAC_PI_4, 0.0),
+            StandardView::BackBottom => (-std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4),
+            StandardView::TopRight => (0.0, std::f64::consts::FRAC_PI_4),
+            StandardView::TopLeft => (std::f64::consts::PI, std::f64::consts::FRAC_PI_4),
+            StandardView::BottomRight => (0.0, -std::f64::consts::FRAC_PI_4),
+            StandardView::BottomLeft => (std::f64::consts::PI, -std::f64::consts::FRAC_PI_4),
         }
+    }
+
+    /// Unit eye direction (target → eye) for this preset.
+    ///
+    /// Mirrors the spherical-to-Cartesian mapping in [`Camera3D::eye`], so a
+    /// face preset has exactly one non-zero component and a mid-edge preset
+    /// (see [`EDGES`](Self::EDGES)) has exactly two, each `±1/√2`.
+    pub fn eye_dir(self) -> Vec3 {
+        let (az, el) = self.angles();
+        let ce = el.cos();
+        [ce * az.cos(), el.sin(), ce * az.sin()]
     }
 }
 
@@ -443,7 +536,7 @@ mod tests {
 
     #[test]
     fn view_cube_presets_are_finite_and_distinct() {
-        assert_eq!(StandardView::CUBE.len(), 7);
+        assert_eq!(StandardView::CUBE.len(), 19);
         let mut seen: Vec<[i64; 2]> = Vec::new();
         for view in StandardView::CUBE {
             let mut cam = Camera3D::default();
@@ -479,6 +572,111 @@ mod tests {
         let (forward, _, _) = cam.basis();
         // Looking downward: forward points towards −Y.
         assert!(forward[1] < -0.9);
+    }
+
+    // ── Mid-edge view snaps (Phase P7-2) ─────────────────────────────────
+
+    /// The six face presets look along exactly one world axis.
+    ///
+    /// `Top` / `Bottom` are deliberately kept just inside `±π/2` (elevation
+    /// 1.55) so the camera basis stays well-conditioned; their off-axis
+    /// component is therefore small (~2.6°) but not exactly zero.
+    #[test]
+    fn face_views_look_along_one_axis() {
+        for view in [
+            StandardView::Front,
+            StandardView::Back,
+            StandardView::Left,
+            StandardView::Right,
+            StandardView::Top,
+            StandardView::Bottom,
+        ] {
+            let d = view.eye_dir();
+            let big = d.iter().filter(|c| c.abs() > 0.9).count();
+            assert_eq!(big, 1, "{view:?} should have one dominant axis: {d:?}");
+            for c in d {
+                assert!(
+                    c.abs() > 0.9 || c.abs() < 0.05,
+                    "{view:?} stray component {c} in {d:?}"
+                );
+            }
+        }
+    }
+
+    /// Every mid-edge preset is a 45° two-axis view: the unit eye direction
+    /// has exactly two non-zero components, each of magnitude `1/√2`, and the
+    /// third is (up to floating-point) zero.
+    #[test]
+    fn edge_views_are_45_degree_two_axis_views() {
+        assert_eq!(StandardView::EDGES.len(), 12);
+        let half = std::f64::consts::FRAC_PI_4.cos(); // 1/√2
+        for view in StandardView::EDGES {
+            let d = view.eye_dir();
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-12, "{view:?} not a unit vector: {d:?}");
+            let big = d.iter().filter(|c| c.abs() > 0.5).count();
+            assert_eq!(big, 2, "{view:?} should have two non-zero axes: {d:?}");
+            let zero = d.iter().filter(|c| c.abs() < 1e-9).count();
+            assert_eq!(zero, 1, "{view:?} should have one zero axis: {d:?}");
+            for c in d {
+                assert!(
+                    c.abs() < 1e-9 || (c.abs() - half).abs() < 1e-9,
+                    "{view:?} component {c} is not 0 or ±1/√2"
+                );
+            }
+        }
+    }
+
+    /// No edge preset coincides with a face preset or `Iso`, and all twelve
+    /// are mutually distinct — so every cube edge snaps somewhere new.
+    #[test]
+    fn edge_views_are_distinct_from_faces_and_each_other() {
+        let mut seen: Vec<[i64; 2]> = Vec::new();
+        for edge in StandardView::EDGES {
+            for other in StandardView::CUBE {
+                if matches!(
+                    other,
+                    StandardView::Iso
+                        | StandardView::Front
+                        | StandardView::Back
+                        | StandardView::Left
+                        | StandardView::Right
+                        | StandardView::Top
+                        | StandardView::Bottom
+                ) {
+                    assert_ne!(
+                        edge.angles(),
+                        other.angles(),
+                        "{edge:?} collides with face {other:?}"
+                    );
+                }
+            }
+            let (az, el) = edge.angles();
+            let key = [(az * 1000.0) as i64, (el * 1000.0) as i64];
+            assert!(!seen.contains(&key), "duplicate edge angles for {edge:?}");
+            seen.push(key);
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    /// `set_view` applies an edge preset's angles (target/distance untouched),
+    /// and the resulting basis is well-conditioned.
+    #[test]
+    fn set_view_applies_edge_presets() {
+        for view in StandardView::EDGES {
+            let mut cam = Camera3D::default();
+            cam.target = [1.0, 2.0, 3.0];
+            cam.distance = 42.0;
+            cam.set_view(view);
+            assert_eq!(cam.azimuth, view.angles().0);
+            assert_eq!(cam.elevation, view.angles().1);
+            assert_eq!(cam.target, [1.0, 2.0, 3.0]);
+            assert_eq!(cam.distance, 42.0);
+            let (f, r, u) = cam.basis();
+            for v in [f, r, u] {
+                assert!(v.iter().all(|c| c.is_finite()), "{view:?} non-finite basis");
+            }
+        }
     }
 
     // ── View-projection matrix ──────────────────────────────────────────
