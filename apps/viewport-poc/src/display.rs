@@ -121,6 +121,11 @@ pub struct SectionCut {
     pub flip: bool,
     /// Has `offset` been placed for the current axis/scene?  Reset to re-centre.
     pub positioned: bool,
+    /// **GPU only** (Phase P7-1): draw a solid-looking "cap" over the cut by
+    /// re-drawing the *interior back faces of the kept half* (classic
+    /// back-face fill).  Defaults to `true` whenever the cut is on; ignored by
+    /// the Software renderer, which keeps its open-cut behaviour.
+    pub cap: bool,
 }
 
 impl Default for SectionCut {
@@ -132,6 +137,7 @@ impl Default for SectionCut {
             offset: 0.0,
             flip: false,
             positioned: false,
+            cap: true,
         }
     }
 }
@@ -250,6 +256,10 @@ impl SectionCut {
     /// The plane as `[n.x, n.y, n.z, offset]`, already flip-applied so a
     /// positive `gl_ClipDistance` means "keep".  `None` when the normal is
     /// degenerate (the caller then leaves clipping off).
+    ///
+    /// This is the plane for **both** GPU solids passes: the main pass
+    /// (front faces, kept half) and the P7-1 cap pass (interior back faces,
+    /// same kept half — see `SectionCut::cap`).
     pub fn gpu_plane(&self) -> Option<[f32; 4]> {
         let n = self.unit_normal()?;
         let s = if self.flip { -1.0 } else { 1.0 };
@@ -822,6 +832,7 @@ mod tests {
         assert_eq!(c.offset, 0.0);
         assert!(!c.flip);
         assert!(!c.positioned);
+        assert!(c.cap, "cap defaults to on");
         // A disabled cut keeps everything and never clips a segment.
         assert!(c.keeps([-100.0, 0.0, 0.0]));
         assert_eq!(
@@ -863,6 +874,43 @@ mod tests {
         let p = c.gpu_plane().unwrap();
         assert_eq!(&p[..3], &[-1.0, 0.0, 0.0]);
         assert_eq!(p[3], -2.0);
+    }
+
+    /// Phase P7-1: the cap pass re-uses [`gpu_plane`](Self::gpu_plane) — the
+    /// *same* keep-plane as the main pass — because the opening the cut
+    /// leaves exposes the kept half's interior (the removed half's shell is
+    /// clipped away entirely).  The sense is verified by ray-casting both
+    /// passes against the real prism geometry in `ui/gl_renderer.rs`
+    /// (`cap_pass_sense_same_plane_fills_kept_interior`), for every axis and
+    /// both `flip` states.  This test pins the degenerate-normal case: no
+    /// plane at all ⇒ no cap pass either.
+    #[test]
+    fn cut_cap_plane_needs_a_valid_normal() {
+        let bad = SectionCut {
+            enabled: true,
+            normal: Some([0.0, 0.0, 0.0]),
+            ..SectionCut::default()
+        };
+        assert!(bad.gpu_plane().is_none());
+        assert!(bad.cap, "cap defaults to on");
+    }
+
+    /// The keep-plane sense (axis, custom normal, `flip`) is shared by the
+    /// main and cap passes by construction — the cap pass re-uses
+    /// [`gpu_plane`](Self::gpu_plane) verbatim.
+    #[test]
+    fn cut_gpu_plane_tracks_custom_normal_and_flip() {
+        let c = SectionCut {
+            enabled: true,
+            axis: CutAxis::X,
+            normal: Some([0.0, 2.0, 0.0]),
+            offset: 1.0,
+            flip: true,
+            positioned: true,
+            cap: true,
+        };
+        // Keep plane (flipped): n=(0,-1,0), offset=-1.
+        assert_eq!(c.gpu_plane().unwrap(), [0.0, -1.0, 0.0, -1.0]);
     }
 
     #[test]
@@ -950,8 +998,10 @@ mod tests {
         assert!(!d.section_cut.enabled);
         d.section_cut.enabled = true;
         d.section_cut.offset = 42.0;
+        d.section_cut.cap = false;
         d.reset();
         assert!(!d.section_cut.enabled);
         assert_eq!(d.section_cut.offset, 0.0);
+        assert!(d.section_cut.cap, "reset restores the cap default (on)");
     }
 }

@@ -201,6 +201,12 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // The grid and global axes are exempt (drawn unclipped); the
         // internal-force diagram polylines (owned by `diagrams`) are not
         // clipped in software mode — see the module docs.
+        //
+        // Phase P7-1: the *capped* cut (a solid-looking fill over the opening)
+        // is a GPU-only effect — it needs a second depth-tested pass over the
+        // interior back faces, which the painter cannot do.  The Software
+        // renderer therefore keeps this open-cut behaviour; the `Cap cut faces`
+        // toggle is a no-op here.
         let cut = app.display.section_cut.clone();
 
         // Renderer selection (Phase P1): the GPU path draws grid / axes /

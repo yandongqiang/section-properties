@@ -34,6 +34,20 @@
 //! Back-face culling is enabled for the solids; all prisms/spheres are wound
 //! counter-clockwise as seen from outside.
 //!
+//! # Capped section cut (P7-1)
+//!
+//! When the section cut is active, the solids are drawn twice inside the same
+//! offscreen pass: the normal front-face pass (clipped to the kept half), then
+//! a **cap pass** that re-draws the same solids with front faces culled and
+//! the **same** clip plane in a flat "cut material" colour (`u_cap_mode`).
+//! The hole the cut leaves exposes the *kept* half's interior (the removed
+//! half's shell is clipped away entirely), so re-drawing the kept half's
+//! interior back faces fills the opening and the cut reads as solid.  The
+//! depth test stays `LESS`, so the cap only shows where the front pass
+//! removed geometry.  See [`GlGeometry::cap_plane`] and the draw code in
+//! [`GlRenderer::draw`]; the sense is verified for every axis and both `flip`
+//! states by `cap_pass_sense_same_plane_fills_kept_interior`.
+//!
 //! # Shared state
 //!
 //! GL objects must outlive the per-frame [`egui_glow::CallbackFn`] closures
@@ -149,6 +163,14 @@ pub struct GlGeometry {
     /// Section-cut plane as `[n.x, n.y, n.z, offset]`, pre-flipped so a
     /// positive `gl_ClipDistance[0]` means "keep".  `None` = no cut.
     clip_plane: Option<[f32; 4]>,
+    /// **Cap pass** (Phase P7-1) plane — deliberately the *same* keep-plane
+    /// as `clip_plane`: the opening the cut leaves exposes the **kept**
+    /// half's interior (the removed half's shell is clipped away entirely),
+    /// so the cap must re-draw the kept half's interior back faces.  Keeping
+    /// the removed half instead would paint grey geometry in front of the
+    /// model and leave the opening unfilled.  `None` = no cap (cut off, or
+    /// the user disabled `SectionCut::cap`).
+    cap_plane: Option<[f32; 4]>,
 }
 
 /// Persistent GL resources plus the current render mode and options.
@@ -376,6 +398,17 @@ impl GlGeometry {
         // lines are clipped so nothing floats in front of the cut.
         let clip_plane = if display.section_cut.enabled {
             display.section_cut.gpu_plane()
+        } else {
+            None
+        };
+        // Phase P7-1 cap pass: only when the cut is on AND the user left
+        // "Cap cut faces" enabled.  The plane is the **same** keep-plane as
+        // `clip_plane` — the opening exposes the kept half's interior, so
+        // the interior back faces that fill it live in the kept half (see
+        // `cap_pass_sense_same_plane_fills_kept_interior`).  `None` disables
+        // the cap pass entirely.
+        let cap_plane = if display.section_cut.enabled && display.section_cut.cap {
+            clip_plane
         } else {
             None
         };
@@ -876,6 +909,7 @@ impl GlGeometry {
             solids,
             clear: rgba(BG),
             clip_plane,
+            cap_plane,
         }
     }
 }
@@ -1517,6 +1551,7 @@ struct GlRenderer {
     u_light_dir: Option<glow::UniformLocation>,
     u_clip_enabled: Option<glow::UniformLocation>,
     u_clip_plane: Option<glow::UniformLocation>,
+    u_cap_mode: Option<glow::UniformLocation>,
     u_blit_tex: Option<glow::UniformLocation>,
 
     /// Single-sample resolve target: colour texture (blitted to the screen) +
@@ -1582,9 +1617,20 @@ void main() {{\n\
 in vec4 v_color;\n\
 in vec3 v_normal;\n\
 uniform float u_shade;\n\
+uniform float u_cap_mode;\n\
 uniform vec3 u_light_dir;\n\
 out vec4 frag_color;\n\
 void main() {{\n\
+    // Phase P7-1 cap pass: replace the vertex colour with a flat \"cut\n\
+    // material\" tone (steel grey + a faint screen-space diagonal hatch) so\n\
+    // the interior back faces drawn at the cut read as a solid cap rather\n\
+    // than as lit member surfaces.\n\
+    if (u_cap_mode > 0.5) {{\n\
+        vec3 steel = vec3(0.60, 0.63, 0.68);\n\
+        float stripe = mod(floor(gl_FragCoord.x + gl_FragCoord.y), 8.0);\n\
+        frag_color = vec4(mix(steel, steel * 0.78, step(4.0, stripe)), 1.0);\n\
+        return;\n\
+    }}\n\
     if (u_shade < 0.5) {{\n\
         frag_color = v_color;\n\
         return;\n\
@@ -1627,6 +1673,7 @@ void main() {{\n\
             let u_light_dir = gl.get_uniform_location(scene_program, "u_light_dir");
             let u_clip_enabled = gl.get_uniform_location(scene_program, "u_clip_enabled");
             let u_clip_plane = gl.get_uniform_location(scene_program, "u_clip_plane");
+            let u_cap_mode = gl.get_uniform_location(scene_program, "u_cap_mode");
             let u_blit_tex = gl.get_uniform_location(blit_program, "u_tex");
 
             // Scene geometry buffer + VAO (pos3 + normal3 + colour4).
@@ -1705,6 +1752,7 @@ void main() {{\n\
                 u_light_dir,
                 u_clip_enabled,
                 u_clip_plane,
+                u_cap_mode,
                 u_blit_tex,
                 fbo,
                 color_tex,
@@ -1917,6 +1965,9 @@ void main() {{\n\
             );
             let cut_on = geom.clip_plane.is_some();
             gl.enable(glow::CLIP_DISTANCE0);
+            // Cap mode is only turned on for the cap pass below; make sure the
+            // normal (front) passes start with it off.
+            gl.uniform_1_f32(self.u_cap_mode.as_ref(), 0.0);
             gl.bind_vertex_array(Some(self.scene_vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
 
@@ -1968,6 +2019,47 @@ void main() {{\n\
                     (geom.solids.len() / FLOATS_PER_VERTEX) as i32,
                 );
                 gl.disable(glow::CULL_FACE);
+            }
+
+            // ── Cap pass (Phase P7-1): make the cut look solid ──
+            // Re-draw the solids with **front faces culled** (keep the
+            // interior back faces) under the **same** clip plane (the kept
+            // half).  The opening the cut leaves exposes the kept half's
+            // interior — its front faces were culled or clipped away, so
+            // those back faces now fill the hole and the cut reads as solid.
+            // `LESS` (the frame default) keeps the cap strictly behind the
+            // front geometry that survived, so it only shows where the main
+            // pass removed geometry.  Flat "cut material" shading is selected
+            // by `u_cap_mode`.  Draw order: opaque front geometry first
+            // (above), then this fill — same offscreen FBO + depth buffer,
+            // so nothing is drawn in front of visible geometry.
+            if let Some(cap) = geom.cap_plane {
+                if !geom.solids.is_empty() {
+                    gl.enable(glow::CULL_FACE);
+                    gl.cull_face(glow::FRONT);
+                    gl.front_face(glow::CCW);
+                    gl.depth_func(glow::LESS);
+                    gl.uniform_1_f32(self.u_clip_enabled.as_ref(), 1.0);
+                    gl.uniform_4_f32(
+                        self.u_clip_plane.as_ref(),
+                        cap[0],
+                        cap[1],
+                        cap[2],
+                        cap[3],
+                    );
+                    gl.uniform_1_f32(self.u_cap_mode.as_ref(), 1.0);
+                    // The VBO still holds the solids buffer from the draw just
+                    // above (no line batch touched it since) — no re-upload.
+                    gl.draw_arrays(
+                        glow::TRIANGLES,
+                        0,
+                        (geom.solids.len() / FLOATS_PER_VERTEX) as i32,
+                    );
+                    gl.uniform_1_f32(self.u_cap_mode.as_ref(), 0.0);
+                    gl.uniform_1_f32(self.u_clip_enabled.as_ref(), 0.0);
+                    gl.depth_func(glow::LESS);
+                    gl.disable(glow::CULL_FACE);
+                }
             }
 
             // ── Resolve the multisample target into the colour texture ──
@@ -2554,5 +2646,360 @@ mod tests {
         let plane = geom.clip_plane.unwrap();
         assert_eq!(&plane[..3], &[0.0, -1.0, 0.0]);
         assert_eq!(plane[3], -2.0);
+    }
+
+    // ── Phase P7-1: capped section cut ──────────────────────────────────
+
+    /// Cut on (cap defaults on) ⇒ a cap plane is present and is exactly the
+    /// same keep-plane as the clip plane, for every axis and both flip
+    /// states.  (The cap pass must keep the *kept* half — the opening
+    /// exposes the kept half's interior; see
+    /// `cap_pass_sense_same_plane_fills_kept_interior`.)
+    #[test]
+    fn cap_plane_is_the_same_keep_plane() {
+        use viewport_poc::display::CutAxis;
+        let cam = Camera3D::default();
+        let s = scene();
+        for axis in CutAxis::ALL {
+            for flip in [false, true] {
+                let mut d = ResultDisplayState::default();
+                d.section_cut.enabled = true;
+                d.section_cut.axis = axis;
+                d.section_cut.offset = 1.25;
+                d.section_cut.flip = flip;
+                let geom =
+                    GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+                let clip = geom.clip_plane.expect("clip plane present");
+                let cap = geom.cap_plane.expect("cap plane present when cut is on");
+                assert_eq!(cap, clip, "axis {axis:?} flip {flip}");
+            }
+        }
+    }
+
+    /// No cut ⇒ no cap; cut on but cap disabled ⇒ no cap (geometry unchanged).
+    #[test]
+    fn cap_plane_absent_without_cut_or_when_disabled() {
+        let cam = Camera3D::default();
+        let s = scene();
+
+        // Cut off.
+        let d = ResultDisplayState::default();
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        assert!(geom.clip_plane.is_none());
+        assert!(geom.cap_plane.is_none());
+
+        // Cut on, cap off.
+        let mut d = ResultDisplayState::default();
+        d.section_cut.enabled = true;
+        d.section_cut.cap = false;
+        let geom = GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        assert!(geom.clip_plane.is_some());
+        assert!(geom.cap_plane.is_none());
+    }
+
+    /// The cap pass re-draws the *existing* solids buffer — it adds no
+    /// vertices, so the scene vertex counts are unaffected by the cap toggle.
+    #[test]
+    fn cap_toggle_does_not_change_geometry() {
+        let cam = Camera3D::default();
+        let s = scene();
+        let mut d = ResultDisplayState::default();
+        d.section_cut.enabled = true;
+        d.section_cut.cap = true;
+        let with_cap =
+            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        d.section_cut.cap = false;
+        let without_cap =
+            GlGeometry::build(&cam, &s, &d, &SelectionSet::default(), None, true, 1.0, 1.0);
+        assert_eq!(with_cap.solids.len(), without_cap.solids.len());
+        assert_eq!(with_cap.solids, without_cap.solids);
+    }
+
+    // ── Phase P7-1: cap-pass clip-sense verification (CPU replay) ──────
+    //
+    // Which half-space must the cap pass keep?  The hole the main pass
+    // leaves at the cut exposes the **kept** half's interior — the removed
+    // half's shell is clipped away in its entirety — so the fill has to
+    // re-draw the kept half's interior back faces under the **same** clip
+    // plane.  Keeping the *removed* half (the negated plane) instead paints
+    // grey geometry inside the removed region, between the camera and the
+    // kept half, and leaves the true opening unfilled.
+    //
+    // The replay below is faithful to the GL passes: for a triangle wound
+    // CCW as seen from outside, front-facing is exactly
+    // `dot(normal, eye − centroid) > 0`, and a fragment survives the clip
+    // iff `dot(p, plane.xyz) − plane.w >= 0` (the scene vertex shader's
+    // formula).  The prism is convex, so a ray meets its surface at most
+    // twice and "nearest hit" is exact.
+
+    /// A scene triangle parsed out of a solids buffer (flat per-face normal).
+    struct SimTri {
+        v: [[f64; 3]; 3],
+        n: [f64; 3],
+        c: [f64; 3],
+    }
+
+    fn sim_sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    fn sim_dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn sim_cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    fn sim_len(v: [f64; 3]) -> f64 {
+        sim_dot(v, v).sqrt()
+    }
+
+    /// In-plane orthonormal basis `(u, v)` for a unit normal `n`.
+    fn sim_plane_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+        let reference = if n[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let u = sim_cross(n, reference);
+        let ul = sim_len(u);
+        let u = [u[0] / ul, u[1] / ul, u[2] / ul];
+        (u, sim_cross(n, u))
+    }
+
+    fn sim_tris(buf: &[f32]) -> Vec<SimTri> {
+        buf.chunks_exact(3 * FLOATS_PER_VERTEX)
+            .map(|t| {
+                let p = |k: usize| {
+                    let v = &t[k * FLOATS_PER_VERTEX..k * FLOATS_PER_VERTEX + 3];
+                    [v[0] as f64, v[1] as f64, v[2] as f64]
+                };
+                let (a, b, c) = (p(0), p(1), p(2));
+                SimTri {
+                    v: [a, b, c],
+                    n: [t[3] as f64, t[4] as f64, t[5] as f64],
+                    c: [
+                        (a[0] + b[0] + c[0]) / 3.0,
+                        (a[1] + b[1] + c[1]) / 3.0,
+                        (a[2] + b[2] + c[2]) / 3.0,
+                    ],
+                }
+            })
+            .collect()
+    }
+
+    /// Ray/triangle distance (Möller–Trumbore); `None` when missed/behind.
+    fn sim_ray_tri(t: &SimTri, eye: [f64; 3], dir: [f64; 3]) -> Option<f64> {
+        const EPS: f64 = 1e-12;
+        let [a, b, c] = t.v;
+        let e1 = sim_sub(b, a);
+        let e2 = sim_sub(c, a);
+        let h = sim_cross(dir, e2);
+        let det = sim_dot(e1, h);
+        if det.abs() < EPS {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let s = sim_sub(eye, a);
+        let u = inv * sim_dot(s, h);
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let q = sim_cross(s, e1);
+        let v = inv * sim_dot(dir, q);
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let dist = inv * sim_dot(e2, q);
+        (dist > EPS).then_some(dist)
+    }
+
+    /// Replay one GL solids pass: nearest hit among the triangles the pass
+    /// would actually draw — those on the plane's kept side whose winding
+    /// is front-facing (`cull_front == false`, the main pass) or
+    /// back-facing (`cull_front == true`, the cap pass).
+    fn sim_pass(
+        tris: &[SimTri],
+        eye: [f64; 3],
+        dir: [f64; 3],
+        cull_front: bool,
+        plane: [f32; 4],
+    ) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for t in tris {
+            let front = sim_dot(t.n, sim_sub(eye, t.c)) > 1e-9;
+            if front == cull_front {
+                continue; // culled by this pass
+            }
+            let Some(dist) = sim_ray_tri(t, eye, dir) else {
+                continue;
+            };
+            let p = [
+                eye[0] + dir[0] * dist,
+                eye[1] + dir[1] * dist,
+                eye[2] + dir[2] * dist,
+            ];
+            // Fragment-level clip, exactly as the scene vertex shader.
+            let clip = p[0] * plane[0] as f64 + p[1] * plane[1] as f64 + p[2] * plane[2] as f64
+                - plane[3] as f64;
+            if clip < 0.0 {
+                continue;
+            }
+            if best.is_none_or(|d| dist < d) {
+                best = Some(dist);
+            }
+        }
+        best
+    }
+
+    /// Phase P7-1: the cap pass must keep the **same** half-space as the
+    /// main pass.  Replaying both passes on the CPU proves the sense for
+    /// every axis and both `flip` states:
+    ///
+    /// * every interior (back-facing) face of the **kept** half that the
+    ///   main pass leaves exposed is a hole, and the same-plane cap pass
+    ///   fills exactly it;
+    /// * neither the main pass nor the same-plane cap pass ever paints the
+    ///   **removed** half;
+    /// * the negated plane (the rejected sense) would paint the removed
+    ///   half's interior — grey geometry between the camera and the model.
+    #[test]
+    fn cap_pass_sense_same_plane_fills_kept_interior() {
+        use viewport_poc::display::{CutAxis, SectionCut};
+
+        // One chunky prism along +x (convex ⇒ exact nearest-hit replay).
+        let mut buf = Vec::new();
+        push_prism(
+            &mut buf,
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            0.3,
+            0.3,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        let tris = sim_tris(&buf);
+        let center = [1.0, 0.0, 0.0];
+
+        for axis in CutAxis::ALL {
+            for flip in [false, true] {
+                let cut = SectionCut {
+                    enabled: true,
+                    axis,
+                    normal: None,
+                    // Cut through the prism's middle for every axis.
+                    offset: sim_dot(center, axis.normal()),
+                    flip,
+                    positioned: true,
+                    cap: true,
+                };
+                let keep = cut.gpu_plane().unwrap();
+                let removed = [-keep[0], -keep[1], -keep[2], -keep[3]];
+                let n = cut.unit_normal().unwrap();
+                let s = if flip { -1.0 } else { 1.0 };
+                let keep_dir = [s * n[0], s * n[1], s * n[2]];
+
+                // Eye on the removed side, offset inside the plane so the
+                // opening is seen at an angle (a straight-on view sees only
+                // the far cap, never the side interiors).
+                let (u, v) = sim_plane_basis(n);
+                let eye = [
+                    center[0] - keep_dir[0] * 6.0 + 2.0 * u[0] + 2.0 * v[0],
+                    center[1] - keep_dir[1] * 6.0 + 2.0 * u[1] + 2.0 * v[1],
+                    center[2] - keep_dir[2] * 6.0 + 2.0 * u[2] + 2.0 * v[2],
+                ];
+
+                let mut filled_holes = 0usize;
+                let mut mispainted_removed = 0usize;
+
+                for t in &tris {
+                    let front = sim_dot(t.n, sim_sub(eye, t.c)) > 1e-9;
+                    if front {
+                        continue; // only interior (back) faces can be holes
+                    }
+                    let to_c = sim_sub(t.c, eye);
+                    let dt = sim_len(to_c);
+                    if dt < 1e-9 {
+                        continue;
+                    }
+                    let dir = [to_c[0] / dt, to_c[1] / dt, to_c[2] / dt];
+                    // Which half is this interior face in?  (The ray passes
+                    // through the centroid, so the hit point is the
+                    // centroid and the clip verdict is the same.)
+                    let clip_c = sim_dot(t.c, [keep[0] as f64, keep[1] as f64, keep[2] as f64])
+                        - keep[3] as f64;
+
+                    if clip_c >= 0.0 {
+                        // ── Kept-half interior face ──
+                        // A hole unless front-facing kept geometry blocks
+                        // the view of it; the same-plane cap must then fill
+                        // exactly this face.
+                        let main = sim_pass(&tris, eye, dir, false, keep);
+                        if main.is_some_and(|d| d < dt - 1e-9) {
+                            continue; // occluded by front geometry
+                        }
+                        assert!(
+                            main.is_none(),
+                            "axis {axis:?} flip {flip}: main pass drew something at a hole"
+                        );
+                        let cap = sim_pass(&tris, eye, dir, true, keep);
+                        assert!(
+                            cap.is_some_and(|d| (d - dt).abs() < 1e-6),
+                            "axis {axis:?} flip {flip}: same-plane cap must fill the hole"
+                        );
+                        // The negated plane can never fill it: its clip
+                        // excludes the kept half, so nothing at the hole's
+                        // depth survives (the halves are disjoint).
+                        let cap_inv = sim_pass(&tris, eye, dir, true, removed);
+                        assert!(
+                            !cap_inv.is_some_and(|d| (d - dt).abs() < 1e-6),
+                            "axis {axis:?} flip {flip}: negated plane must not fill kept-half holes"
+                        );
+                        filled_holes += 1;
+                    } else {
+                        // ── Removed-half interior face ──
+                        // The correct cap must not paint it (same plane
+                        // clips it away) and neither does the main pass —
+                        // but the negated plane would paint grey geometry
+                        // here, inside the removed half, in front of the
+                        // kept half.  That is the sense to reject.
+                        let main = sim_pass(&tris, eye, dir, false, keep);
+                        assert!(
+                            main.is_none_or(|d| d > dt + 1e-9),
+                            "axis {axis:?} flip {flip}: main pass must not draw the removed half"
+                        );
+                        let cap = sim_pass(&tris, eye, dir, true, keep);
+                        assert!(
+                            cap.is_none_or(|d| d > dt + 1e-9),
+                            "axis {axis:?} flip {flip}: same-plane cap must not paint the removed half"
+                        );
+                        let cap_inv = sim_pass(&tris, eye, dir, true, removed);
+                        assert!(
+                            cap_inv.is_some_and(|d| (d - dt).abs() < 1e-6),
+                            "axis {axis:?} flip {flip}: negated plane would paint the removed half"
+                        );
+                        mispainted_removed += 1;
+                    }
+                }
+
+                // Non-degenerate setup: the cut really is open, the cap
+                // really fills it, and the negated plane really mispaints.
+                assert!(
+                    filled_holes > 0,
+                    "axis {axis:?} flip {flip}: no holes were filled"
+                );
+                assert!(
+                    mispainted_removed > 0,
+                    "axis {axis:?} flip {flip}: negated plane painted nothing"
+                );
+            }
+        }
     }
 }

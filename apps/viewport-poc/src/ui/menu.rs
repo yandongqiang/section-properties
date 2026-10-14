@@ -145,6 +145,20 @@ fn view_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
                 if ui.checkbox(&mut flip, "Flip kept side").changed() {
                     app.display.section_cut.flip = flip;
                 }
+                // Phase P7-1: fill the open cut with a solid-looking cap
+                // (back-face fill).  GPU only — the Software renderer always
+                // shows the open cut.
+                let mut cap = app.display.section_cut.cap;
+                if ui
+                    .checkbox(&mut cap, "Cap cut faces")
+                    .on_hover_text(
+                        "Fill the hollow interior at the cut with a solid cap \
+                         (GPU renderer only; ignored in Software mode)",
+                    )
+                    .changed()
+                {
+                    app.display.section_cut.cap = cap;
+                }
                 // Slider span follows the current model bounds (any model size).
                 if let Some((lo, hi)) = app.cut_range() {
                     let range = if (hi - lo).abs() < 1e-9 {
