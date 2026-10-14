@@ -6,20 +6,22 @@
 
 use egui;
 use eframe::egui_glow;
+use structural_analysis::Dof3D;
 
 use viewport_poc::app_state::AppMessage;
-use viewport_poc::camera::{Camera3D, ScreenPos, StandardView};
+use viewport_poc::camera::{Camera3D, ScreenPos, StandardView, ViewMode};
 use viewport_poc::display::{
     displacement_magnitudes, fmt_eng, magnitude_color, max_abs, normalize, ResultViewMode,
 };
+use viewport_poc::edit_model::{MemberPointLoad3D, SupportSpec};
 use viewport_poc::project;
 use viewport_poc::scene::ViewportScene;
 use viewport_poc::selection::{ScreenRect, SelectionState};
 
 use super::gl_renderer::{self, RenderMode};
 use super::module::WorkModule;
-use super::theme::ViewportPalette;
-use crate::ViewportApp;
+use super::theme::{TextPalette, ViewportPalette};
+use crate::{BoundaryPopup, ViewportApp};
 
 /// Samples per member for the deformed-shape curve.
 const DEFORM_SAMPLES: usize = 12;
@@ -72,6 +74,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // Phase P6: a Shift (or Ctrl/Cmd) + primary drag is a **box select**
         // rubber band instead of an orbit.  The plain primary drag still orbits
         // and the Alt + primary drag still slides the section cut.
+        //
+        // Phase B2: with the ribbon's Pan / Zoom mode active the plain primary
+        // drag pans / dollies instead; box select, the Alt cut drag and the
+        // right-button pan keep their behaviour in every mode.
         let box_modifier = ctx.input(|i| i.modifiers.shift || i.modifiers.command);
         if response.drag_started_by(egui::PointerButton::Primary) {
             app.box_select_start = response
@@ -91,7 +97,16 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 drag_section_cut(app, response.drag_delta(), w, h);
             } else if !over_gizmo {
                 let d = response.drag_delta();
-                app.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01);
+                match app.view_mode {
+                    ViewMode::Orbit => app.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01),
+                    ViewMode::Pan => {
+                        let s = app.camera.distance * 0.0015;
+                        app.camera.pan(d.x as f64 * s, d.y as f64 * s);
+                    }
+                    // Vertical drag dollies: dragging up (negative dy) zooms in,
+                    // mirroring the scroll-wheel direction.
+                    ViewMode::Zoom => app.camera.zoom(2.0_f64.powf(d.y as f64 * 0.01)),
+                }
             }
         }
         if response.drag_stopped_by(egui::PointerButton::Primary) {
@@ -109,6 +124,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         let add = ctx.input(|i| i.modifiers.command);
                         app.box_select(sr, [w, h], add);
                         app.quick_edit = None;
+                        app.boundary_popup = None;
                     }
                 }
             }
@@ -127,10 +143,18 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
             app.camera.reset();
         }
-        // Escape closes the quick-edit popup first; only clear the selection
-        // when nothing else is open.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && app.quick_edit.is_none() {
-            app.clear_selection();
+        // Escape closes the quick-edit / boundary popups first; then returns a
+        // Pan / Zoom mode to Orbit; only clears the selection when nothing
+        // else is open.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && app.quick_edit.is_none()
+            && app.boundary_popup.is_none()
+        {
+            if app.view_mode != ViewMode::Orbit {
+                app.view_mode = ViewMode::Orbit;
+            } else {
+                app.clear_selection();
+            }
         }
 
         // Selection on click — does NOT trigger solve.  Clicks on the view cube
@@ -151,6 +175,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         app.select_only(hit);
                     }
                     app.quick_edit = None;
+                    app.boundary_popup = None;
                 }
             }
         }
@@ -190,7 +215,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             painter.text(
                 rect.min + egui::vec2(10.0, rect.height() - 10.0),
                 egui::Align2::LEFT_BOTTOM,
-                "Drag: orbit | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear",
+                format!(
+                    "Drag: {} | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear",
+                    drag_hint(app.view_mode)
+                ),
                 egui::FontId::proportional(11.0),
                 pal.help,
             );
@@ -920,7 +948,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         painter.text(
             rect.min + egui::vec2(10.0, rect.height() - 10.0),
             egui::Align2::LEFT_BOTTOM,
-            "Drag: orbit | Shift-drag: box select | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Shift/Ctrl-click: add | Ctrl+A: all | Del: delete | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
+            format!(
+                "Drag: {} | Shift-drag: box select | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Shift/Ctrl-click: add | Ctrl+A: all | Del: delete | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
+                drag_hint(app.view_mode)
+            ),
             egui::FontId::proportional(11.0),
             pal.help,
         );
@@ -1750,6 +1781,223 @@ pub fn show_quick_edit(app: &mut ViewportApp, ctx: &egui::Context) {
     } else if !close {
         app.quick_edit = Some(qe);
     }
+}
+
+/// One-word drag description for the viewport help line, per [`ViewMode`].
+fn drag_hint(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Orbit => "orbit",
+        ViewMode::Pan => "pan",
+        ViewMode::Zoom => "zoom",
+    }
+}
+
+// ── Boundary quick-add popups (ribbon group) ────────────────────────────
+
+/// Draw the Boundary quick-add popup, if one is open.
+///
+/// Mirrors the double-click quick-edit popup: a small non-collapsible window
+/// anchored near the cursor.  **Support** / **Node Load** target the primary
+/// selected node, **Mem Load** the primary selected member.  Apply delegates
+/// to the shared [`ViewportApp`] edit paths (`apply_support_quick`,
+/// `apply_nodal_load_quick`, `apply_member_load_quick`), so every popup write
+/// is a single undoable [`commit_edit`](ViewportApp::commit_edit) — no edit
+/// mechanics are duplicated here.
+///
+/// Closing: Escape, the title-bar ✕, the Close button, a successful Apply,
+/// or a viewport click.  A failed Apply (invalid input) keeps the popup open
+/// and shows the error both inside the popup and in the Messages dock.
+pub fn show_boundary_popup(app: &mut ViewportApp, ctx: &egui::Context) {
+    let Some(mut pop) = app.boundary_popup.take() else {
+        return;
+    };
+    let mut open = true;
+    let mut close = false;
+    let mut apply = false;
+
+    egui::Window::new(boundary_title(&pop))
+        .id(egui::Id::new("boundary_popup"))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .default_pos(pop.anchor() + egui::vec2(14.0, 14.0))
+        .show(ctx, |ui| {
+            boundary_body(app, ui, &mut pop, &mut apply, &mut close)
+        });
+
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        close = true;
+    }
+    if !open {
+        close = true;
+    }
+
+    if apply {
+        let result = match &pop {
+            BoundaryPopup::Support { node, spec, .. } => app.apply_support_quick(*node, *spec),
+            BoundaryPopup::NodeLoad { node, load, .. } => app.apply_nodal_load_quick(*node, *load),
+            BoundaryPopup::MemLoad {
+                member,
+                qx,
+                qy,
+                qz,
+                add_point,
+                xi,
+                fx,
+                fy,
+                fz,
+                ..
+            } => {
+                let point = if *add_point {
+                    Some(MemberPointLoad3D::new(*xi, *fx, *fy, *fz))
+                } else {
+                    None
+                };
+                app.apply_member_load_quick(*member, *qx, *qy, *qz, point)
+            }
+        };
+        match result {
+            Ok(()) => close = true,
+            Err(msg) => pop.set_error(msg),
+        }
+    }
+    if !close {
+        app.boundary_popup = Some(pop);
+    }
+}
+
+/// Popup window title naming the target entity.
+fn boundary_title(pop: &BoundaryPopup) -> String {
+    match pop {
+        BoundaryPopup::Support { node, .. } => format!("Add support \u{2014} Node N{}", node.0),
+        BoundaryPopup::NodeLoad { node, .. } => {
+            format!("Add nodal load \u{2014} Node N{}", node.0)
+        }
+        BoundaryPopup::MemLoad { member, .. } => {
+            format!("Add member load \u{2014} Member M{}", member.0)
+        }
+    }
+}
+
+/// Popup contents: the per-kind editors plus Apply / Close.
+fn boundary_body(
+    app: &mut ViewportApp,
+    ui: &mut egui::Ui,
+    pop: &mut BoundaryPopup,
+    apply: &mut bool,
+    close: &mut bool,
+) {
+    let text = TextPalette::for_theme(app.dark_mode);
+    if let Some(err) = pop.error() {
+        ui.label(egui::RichText::new(err).color(text.error));
+    }
+    match pop {
+        BoundaryPopup::Support { spec, .. } => {
+            ui.label("Support type:");
+            ui.horizontal(|ui| {
+                for (label, preset) in [
+                    ("Fixed", SupportSpec::fixed as fn() -> SupportSpec),
+                    ("Pinned", SupportSpec::pinned),
+                    ("Custom", SupportSpec::free),
+                ] {
+                    if ui.selectable_label(spec.label() == label, label).clicked() {
+                        *spec = preset();
+                    }
+                }
+            });
+            ui.label("DOFs (checked = constrained to 0):");
+            for dof in Dof3D::ALL {
+                let mut constrained = spec.dof(dof).is_some();
+                if ui.checkbox(&mut constrained, dof.name()).changed() {
+                    spec.set_dof(dof, if constrained { Some(0.0) } else { None });
+                }
+            }
+        }
+        BoundaryPopup::NodeLoad { load, .. } => {
+            ui.label("Nodal load (global coords, N and N\u{00b7}m):");
+            egui::Grid::new("boundary_nodal_load_grid")
+                .num_columns(2)
+                .spacing([8.0, 3.0])
+                .show(ui, |ui| {
+                    ui.strong("Force (N)");
+                    ui.strong("Moment (N\u{00b7}m)");
+                    ui.end_row();
+                    for (axis, f, m) in [
+                        ("x", &mut load.fx, &mut load.mx),
+                        ("y", &mut load.fy, &mut load.my),
+                        ("z", &mut load.fz, &mut load.mz),
+                    ] {
+                        ui.label(format!("{axis}:"));
+                        ui.add(egui::DragValue::new(f).speed(100.0).range(-1e12..=1e12));
+                        ui.label(format!("{axis}:"));
+                        ui.add(egui::DragValue::new(m).speed(100.0).range(-1e12..=1e12));
+                        ui.end_row();
+                    }
+                });
+        }
+        BoundaryPopup::MemLoad {
+            qx,
+            qy,
+            qz,
+            add_point,
+            xi,
+            fx,
+            fy,
+            fz,
+            ..
+        } => {
+            ui.label("Uniform load (local coords, N/m):");
+            egui::Grid::new("boundary_member_load_grid")
+                .num_columns(2)
+                .spacing([8.0, 3.0])
+                .show(ui, |ui| {
+                    for (label, value) in [
+                        ("qx (axial):", qx),
+                        ("qy (transverse):", qy),
+                        ("qz (transverse):", qz),
+                    ] {
+                        ui.label(label);
+                        ui.add(egui::DragValue::new(value).speed(100.0).range(-1e8..=1e8));
+                        ui.end_row();
+                    }
+                });
+            ui.checkbox(add_point, "Add a point load");
+            if *add_point {
+                ui.label("Point load (local coords, N):");
+                egui::Grid::new("boundary_point_load_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 3.0])
+                    .show(ui, |ui| {
+                        ui.label("xi (position):");
+                        ui.add(
+                            egui::DragValue::new(xi)
+                                .speed(0.05)
+                                .range(0.0..=1.0)
+                                .fixed_decimals(2),
+                        );
+                        ui.end_row();
+                        ui.label("fx (axial):");
+                        ui.add(egui::DragValue::new(fx).speed(100.0).range(-1e8..=1e8));
+                        ui.end_row();
+                        ui.label("fy (transverse):");
+                        ui.add(egui::DragValue::new(fy).speed(100.0).range(-1e8..=1e8));
+                        ui.end_row();
+                        ui.label("fz (transverse):");
+                        ui.add(egui::DragValue::new(fz).speed(100.0).range(-1e8..=1e8));
+                        ui.end_row();
+                    });
+            }
+        }
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button("Apply").clicked() {
+            *apply = true;
+        }
+        if ui.button("Close").clicked() {
+            *close = true;
+        }
+    });
 }
 
 #[cfg(test)]

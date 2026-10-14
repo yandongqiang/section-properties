@@ -250,6 +250,9 @@ fn status_line(app: &ViewportApp, ui: &mut egui::Ui) {
         ui.separator();
         ui.label(format!("Module: {}", WorkModule::label(app.module)));
         ui.separator();
+        // Primary-drag interaction mode (ribbon View group; Phase B2).
+        ui.label(format!("Mode: {}", app.view_mode.label()));
+        ui.separator();
         ui.label(selection_summary(&app.selected));
     });
 }

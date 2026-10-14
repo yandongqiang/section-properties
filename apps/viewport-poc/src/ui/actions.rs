@@ -13,14 +13,16 @@ use viewport_poc::app_state::{AppMessage, Project};
 use viewport_poc::camera::{Camera3D, StandardView};
 use viewport_poc::display::{CutAxis, ResultDisplayState, ResultViewMode};
 use viewport_poc::edit_history::EditHistory;
-use viewport_poc::edit_model::{EditModel, MemberId, MemberUniformLoad3D, NodeId};
+use viewport_poc::edit_model::{
+    EditModel, MemberId, MemberPointLoad3D, MemberUniformLoad3D, NodalLoadSpec, NodeId, SupportSpec,
+};
 use viewport_poc::scene::ViewportScene;
 use viewport_poc::selection::{ScreenRect, SelectionSet, SelectionState};
 use viewport_poc::{model, persistence, project};
 
 use super::module::WorkModule;
 use super::status::BottomTab;
-use crate::{MemberEditBuffer, PendingAction, QuickEdit, ViewportApp};
+use crate::{BoundaryPopup, MemberEditBuffer, PendingAction, QuickEdit, ViewportApp};
 
 impl ViewportApp {
     /// Build the application, threading in settings loaded from disk (and an
@@ -67,7 +69,9 @@ impl ViewportApp {
             window_size: settings.window.map(|w| [w.width, w.height]),
             ctx_menu_target: SelectionState::None,
             quick_edit: None,
+            boundary_popup: None,
             box_select_start: None,
+            view_mode: viewport_poc::camera::ViewMode::default(),
         }
     }
 
@@ -675,6 +679,223 @@ impl ViewportApp {
         }
     }
 
+    // ── Phase B1: Boundary quick-add popups ─────────────────────────────
+
+    /// Screen anchor for a ribbon-opened popup: the pointer position when
+    /// the cursor is available, else the centre of the screen.
+    fn popup_anchor(ctx: &egui::Context) -> egui::Pos2 {
+        ctx.input(|i| i.pointer.interact_pos())
+            .unwrap_or_else(|| ctx.screen_rect().center())
+    }
+
+    /// Open the Support popup for the primary selected node.
+    ///
+    /// No-op (and no popup) when the primary selection is not a node — the
+    /// ribbon button is disabled in that case, so this is a defensive guard.
+    pub(crate) fn open_support_popup(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.selected.primary().node_id() else {
+            return;
+        };
+        let spec = self
+            .project
+            .model
+            .as_ref()
+            .and_then(|m| m.support(id))
+            .copied()
+            .unwrap_or_else(SupportSpec::free);
+        self.boundary_popup = Some(BoundaryPopup::Support {
+            node: id,
+            anchor: Self::popup_anchor(ctx),
+            spec,
+            error: None,
+        });
+    }
+
+    /// Open the Node Load popup for the primary selected node, prefilled
+    /// with the node's existing load when it has one.
+    pub(crate) fn open_nodal_load_popup(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.selected.primary().node_id() else {
+            return;
+        };
+        let load = self
+            .project
+            .model
+            .as_ref()
+            .and_then(|m| m.nodal_load(id))
+            .copied()
+            .unwrap_or_default();
+        self.boundary_popup = Some(BoundaryPopup::NodeLoad {
+            node: id,
+            anchor: Self::popup_anchor(ctx),
+            load,
+            error: None,
+        });
+    }
+
+    /// Open the Mem Load popup for the primary selected member, prefilled
+    /// with the member's existing uniform load when it has one.
+    pub(crate) fn open_member_load_popup(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.selected.primary().member_id() else {
+            return;
+        };
+        let (qx, qy, qz) = self
+            .project
+            .model
+            .as_ref()
+            .and_then(|m| m.member_uniform_load(id))
+            .map(|l| (l.qx, l.qy, l.qz))
+            .unwrap_or((0.0, 0.0, 0.0));
+        self.boundary_popup = Some(BoundaryPopup::MemLoad {
+            member: id,
+            anchor: Self::popup_anchor(ctx),
+            qx,
+            qy,
+            qz,
+            add_point: false,
+            xi: 0.5,
+            fx: 0.0,
+            fy: 0.0,
+            fz: 0.0,
+            error: None,
+        });
+    }
+
+    /// Apply the Support popup: write `spec` through the model's support
+    /// setter and the shared edit/undo path ([`commit_edit`](Self::commit_edit)).
+    /// An all-free spec clears the support instead of storing a free one.
+    ///
+    /// Returns `Err(message)` when the edit is rejected (e.g. the node no
+    /// longer exists) so the popup can surface it; the same message is pushed
+    /// to the Messages dock.  A no-op apply (unchanged support) reports
+    /// "No changes to apply." and does not touch the undo history.
+    pub(crate) fn apply_support_quick(
+        &mut self,
+        id: NodeId,
+        spec: SupportSpec,
+    ) -> Result<(), String> {
+        let Some(model) = self.project.model.as_ref() else {
+            return Err("No model loaded".to_string());
+        };
+        let mut candidate = model.clone();
+        let result = if spec.is_free() {
+            candidate.clear_support(id)
+        } else {
+            candidate.set_support(id, spec)
+        };
+        match result {
+            Ok(()) => {
+                if candidate.revision() != model.revision() {
+                    self.commit_edit(candidate);
+                    let msg = if spec.is_free() {
+                        format!("Cleared support at node N{}", id.0)
+                    } else {
+                        format!("Applied {} support at node N{}", spec.label(), id.0)
+                    };
+                    self.messages.push(AppMessage::info(msg));
+                } else {
+                    self.messages.push(AppMessage::info("No changes to apply."));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.message();
+                self.messages.push(AppMessage::error(msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Apply the Node Load popup: set the six-component nodal load through
+    /// the model's setter and the shared edit/undo path.  An all-zero load
+    /// clears the node's load instead of storing a zero one.
+    ///
+    /// Error / no-op reporting matches [`apply_support_quick`](Self::apply_support_quick).
+    pub(crate) fn apply_nodal_load_quick(
+        &mut self,
+        id: NodeId,
+        load: NodalLoadSpec,
+    ) -> Result<(), String> {
+        let Some(model) = self.project.model.as_ref() else {
+            return Err("No model loaded".to_string());
+        };
+        let mut candidate = model.clone();
+        let result = if load.is_zero() {
+            candidate.clear_nodal_load(id)
+        } else {
+            candidate.set_nodal_load(id, load)
+        };
+        match result {
+            Ok(()) => {
+                if candidate.revision() != model.revision() {
+                    self.commit_edit(candidate);
+                    let msg = if load.is_zero() {
+                        format!("Cleared load at node N{}", id.0)
+                    } else {
+                        format!("Applied nodal load at node N{}", id.0)
+                    };
+                    self.messages.push(AppMessage::info(msg));
+                } else {
+                    self.messages.push(AppMessage::info("No changes to apply."));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.message();
+                self.messages.push(AppMessage::error(msg.clone()));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Apply the Mem Load popup: uniform local `qx/qy/qz` plus an optional
+    /// point load, **all on one cloned model** so the whole popup is a single
+    /// undo step.  An all-zero uniform load clears the member's uniform load;
+    /// the optional point load is appended (multiple point loads per member
+    /// are allowed by the model).
+    ///
+    /// Every mutation runs on the candidate clone, so a rejected point load
+    /// (e.g. `xi` outside `[0, 1]`) leaves the real model untouched and
+    /// nothing is committed — the failure is surfaced, never silent.
+    pub(crate) fn apply_member_load_quick(
+        &mut self,
+        id: MemberId,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+        point: Option<MemberPointLoad3D>,
+    ) -> Result<(), String> {
+        let Some(model) = self.project.model.as_ref() else {
+            return Err("No model loaded".to_string());
+        };
+        let uniform = MemberUniformLoad3D::new(qx, qy, qz);
+        let mut candidate = model.clone();
+        let uniform_result = if uniform.is_zero() {
+            candidate.clear_member_uniform_load(id)
+        } else {
+            candidate.set_member_uniform_load(id, uniform)
+        };
+        if let Err(e) = uniform_result {
+            let msg = e.message();
+            self.messages.push(AppMessage::error(msg.clone()));
+            return Err(msg);
+        }
+        if let Some(pl) = point {
+            if let Err(e) = candidate.add_member_point_load(id, pl) {
+                let msg = e.message();
+                self.messages.push(AppMessage::error(msg.clone()));
+                return Err(msg);
+            }
+        }
+        if candidate.revision() != model.revision() {
+            self.commit_edit(candidate);
+            self.messages
+                .push(AppMessage::info(format!("Applied member load to M{}", id.0)));
+        } else {
+            self.messages.push(AppMessage::info("No changes to apply."));
+        }
+        Ok(())
+    }
+
     /// Change a member's `i` / `j` nodes from text fields, if they parse and
     /// differ from the current values.
     fn apply_member_connectivity_from_strings(&mut self, id: MemberId, i: &str, j: &str) {
@@ -1221,6 +1442,230 @@ impl ViewportApp {
             if ctx.input(|i| i.key_pressed(egui::Key::Num4)) {
                 self.set_standard_view(StandardView::Right);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use viewport_poc::edit_model::EditModel;
+
+    /// An app with no model, for the guard paths.
+    fn empty_app() -> ViewportApp {
+        ViewportApp::new(
+            persistence::AppSettings::default(),
+            std::path::PathBuf::from("unused-settings.json"),
+            None,
+        )
+    }
+
+    /// An app holding one 4 m beam (nodes N0/N1, member M0).
+    fn beam_app() -> (ViewportApp, NodeId, MemberId) {
+        let mut app = empty_app();
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        app.project.load_model("test".to_string(), m);
+        (app, a, mid)
+    }
+
+    fn last_message(app: &ViewportApp) -> &str {
+        &app.messages.last().expect("no message").text
+    }
+
+    // ── Phase B1: Boundary quick-add popups ─────────────────────────────
+
+    #[test]
+    fn support_quick_fixed_commits_and_is_undoable() {
+        let (mut app, a, _mid) = beam_app();
+        app.select_only(SelectionState::Node(a));
+        app.apply_support_quick(a, SupportSpec::fixed()).unwrap();
+        let model = app.project.model.as_ref().unwrap();
+        assert!(model.support(a).unwrap().is_fixed());
+        assert!(app.history.can_undo(), "edit must be undoable");
+        assert!(last_message(&app).contains("Fixed support"));
+        // One undo restores the support-free model.
+        app.do_undo();
+        assert!(app.project.model.as_ref().unwrap().support(a).is_none());
+    }
+
+    #[test]
+    fn support_quick_custom_spec_is_stored() {
+        let (mut app, a, _mid) = beam_app();
+        let mut spec = SupportSpec::free();
+        spec.set_dof(structural_analysis::Dof3D::Ux, Some(0.0));
+        app.apply_support_quick(a, spec).unwrap();
+        let model = app.project.model.as_ref().unwrap();
+        let stored = model.support(a).unwrap();
+        assert_eq!(stored.n_constrained(), 1);
+        assert_eq!(stored.label(), "Custom");
+    }
+
+    #[test]
+    fn support_quick_free_spec_clears_existing_support() {
+        let (mut app, a, _mid) = beam_app();
+        app.apply_support_quick(a, SupportSpec::fixed()).unwrap();
+        app.apply_support_quick(a, SupportSpec::free()).unwrap();
+        assert!(app.project.model.as_ref().unwrap().support(a).is_none());
+        assert!(last_message(&app).contains("Cleared support"));
+    }
+
+    #[test]
+    fn support_quick_unchanged_reports_no_change_without_history() {
+        let (mut app, a, _mid) = beam_app();
+        app.apply_support_quick(a, SupportSpec::fixed()).unwrap();
+        let rev = app.project.model.as_ref().unwrap().revision();
+        app.apply_support_quick(a, SupportSpec::fixed()).unwrap();
+        assert_eq!(app.project.model.as_ref().unwrap().revision(), rev);
+        assert_eq!(last_message(&app), "No changes to apply.");
+    }
+
+    #[test]
+    fn support_quick_requires_a_model() {
+        let mut app = empty_app();
+        let err = app
+            .apply_support_quick(NodeId(0), SupportSpec::fixed())
+            .unwrap_err();
+        assert_eq!(err, "No model loaded");
+    }
+
+    #[test]
+    fn nodal_load_quick_sets_and_clears() {
+        let (mut app, a, _mid) = beam_app();
+        app.apply_nodal_load_quick(a, NodalLoadSpec::new(1e3, 0.0, -2e3, 0.0, 0.0, 0.0))
+            .unwrap();
+        {
+            let model = app.project.model.as_ref().unwrap();
+            let load = model.nodal_load(a).unwrap();
+            assert_eq!(load.fx, 1e3);
+            assert_eq!(load.fz, -2e3);
+        }
+        assert!(app.history.can_undo());
+        // An all-zero load clears instead of storing a zero record.
+        app.apply_nodal_load_quick(a, NodalLoadSpec::zero())
+            .unwrap();
+        assert!(app.project.model.as_ref().unwrap().nodal_load(a).is_none());
+        assert!(last_message(&app).contains("Cleared load"));
+    }
+
+    #[test]
+    fn member_load_quick_applies_uniform_and_point_in_one_undo_step() {
+        let (mut app, _a, mid) = beam_app();
+        let point = MemberPointLoad3D::new(0.25, 0.0, 0.0, -500.0);
+        app.apply_member_load_quick(mid, 0.0, -1e3, 0.0, Some(point))
+            .unwrap();
+        {
+            let model = app.project.model.as_ref().unwrap();
+            let q = model.member_uniform_load(mid).unwrap();
+            assert_eq!(q.qy, -1e3);
+            let pls = model.member_point_loads_for(mid);
+            assert_eq!(pls.len(), 1);
+            assert_eq!(pls[0].xi, 0.25);
+        }
+        // The whole popup is one undo entry.
+        app.do_undo();
+        let model = app.project.model.as_ref().unwrap();
+        assert!(model.member_uniform_load(mid).is_none());
+        assert!(model.member_point_loads_for(mid).is_empty());
+    }
+
+    #[test]
+    fn member_load_quick_zero_uniform_without_point_clears() {
+        let (mut app, _a, mid) = beam_app();
+        app.apply_member_load_quick(mid, 0.0, -1e3, 0.0, None)
+            .unwrap();
+        app.apply_member_load_quick(mid, 0.0, 0.0, 0.0, None)
+            .unwrap();
+        let model = app.project.model.as_ref().unwrap();
+        assert!(model.member_uniform_load(mid).is_none());
+    }
+
+    #[test]
+    fn member_load_quick_rejects_out_of_range_xi_atomically() {
+        let (mut app, _a, mid) = beam_app();
+        let bad = MemberPointLoad3D::new(1.5, 0.0, 0.0, -100.0);
+        let err = app.apply_member_load_quick(mid, 0.0, -1e3, 0.0, Some(bad));
+        assert!(err.is_err(), "xi = 1.5 must be rejected");
+        let err = err.unwrap_err();
+        assert!(err.contains("xi"), "error should name the position: {err}");
+        // Nothing was committed: not the point load, not even the uniform.
+        let model = app.project.model.as_ref().unwrap();
+        assert!(model.member_uniform_load(mid).is_none());
+        assert!(model.member_point_loads_for(mid).is_empty());
+        assert!(!app.history.can_undo());
+    }
+
+    #[test]
+    fn member_load_quick_requires_a_model() {
+        let mut app = empty_app();
+        let err = app.apply_member_load_quick(MemberId(0), 0.0, 0.0, 0.0, None);
+        assert_eq!(err.unwrap_err(), "No model loaded");
+    }
+
+    #[test]
+    fn open_support_popup_requires_a_node_selection() {
+        let (mut app, a, _mid) = beam_app();
+        let ctx = egui::Context::default();
+        // No selection → no popup.
+        app.open_support_popup(&ctx);
+        assert!(app.boundary_popup.is_none());
+        // A member primary → still no support popup.
+        app.select_only(SelectionState::Member(_mid));
+        app.open_support_popup(&ctx);
+        assert!(app.boundary_popup.is_none());
+        // A node primary → popup targeting that node.
+        app.select_only(SelectionState::Node(a));
+        app.open_support_popup(&ctx);
+        match &app.boundary_popup {
+            Some(BoundaryPopup::Support { node, spec, .. }) => {
+                assert_eq!(*node, a);
+                assert!(spec.is_free(), "no existing support ⇒ free spec");
+            }
+            _ => panic!("expected a Support popup"),
+        }
+    }
+
+    #[test]
+    fn open_nodal_load_popup_prefills_existing_load() {
+        let (mut app, a, _mid) = beam_app();
+        app.apply_nodal_load_quick(a, NodalLoadSpec::new(7.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        app.select_only(SelectionState::Node(a));
+        let ctx = egui::Context::default();
+        app.open_nodal_load_popup(&ctx);
+        match &app.boundary_popup {
+            Some(BoundaryPopup::NodeLoad { node, load, .. }) => {
+                assert_eq!(*node, a);
+                assert_eq!(load.fx, 7.0);
+            }
+            _ => panic!("expected a NodeLoad popup"),
+        }
+    }
+
+    #[test]
+    fn open_member_load_popup_prefills_existing_uniform_load() {
+        let (mut app, _a, mid) = beam_app();
+        app.apply_member_load_quick(mid, 1.0, 2.0, 3.0, None)
+            .unwrap();
+        app.select_only(SelectionState::Member(mid));
+        let ctx = egui::Context::default();
+        app.open_member_load_popup(&ctx);
+        match &app.boundary_popup {
+            Some(BoundaryPopup::MemLoad {
+                member,
+                qx,
+                qy,
+                qz,
+                add_point,
+                ..
+            }) => {
+                assert_eq!(*member, mid);
+                assert_eq!((*qx, *qy, *qz), (1.0, 2.0, 3.0));
+                assert!(!add_point);
+            }
+            _ => panic!("expected a MemLoad popup"),
         }
     }
 }

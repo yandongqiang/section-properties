@@ -182,6 +182,38 @@ impl StandardView {
     }
 }
 
+/// Primary-drag interaction mode for the viewport.
+///
+/// The ribbon's View group exposes **Pan** and **Zoom** as radio buttons; the
+/// historical primary-drag behaviour is [`ViewMode::Orbit`], which stays the
+/// default.  The mode only decides what a *plain* primary drag does — the
+/// Shift/Ctrl box-select drag, the Alt section-cut drag and the right-button
+/// pan drag are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    /// Primary drag orbits the camera (azimuth / elevation).
+    #[default]
+    Orbit,
+    /// Primary drag pans the camera target in the camera plane.
+    Pan,
+    /// Primary drag dollies the camera (vertical drag = zoom).
+    Zoom,
+}
+
+impl ViewMode {
+    /// All modes, in ribbon order.
+    pub const ALL: [ViewMode; 3] = [ViewMode::Orbit, ViewMode::Pan, ViewMode::Zoom];
+
+    /// Short label for the status bar / ribbon tooltips.
+    pub const fn label(self) -> &'static str {
+        match self {
+            ViewMode::Orbit => "Orbit",
+            ViewMode::Pan => "Pan",
+            ViewMode::Zoom => "Zoom",
+        }
+    }
+}
+
 /// Orbit camera with spherical-coordinate parameterisation.
 #[derive(Debug, Clone)]
 pub struct Camera3D {
@@ -677,6 +709,30 @@ mod tests {
                 assert!(v.iter().all(|c| c.is_finite()), "{view:?} non-finite basis");
             }
         }
+    }
+
+    // ── ViewMode (Phase B2: ribbon Pan / Zoom wiring) ─────────────────────
+
+    #[test]
+    fn view_mode_defaults_to_orbit() {
+        assert_eq!(ViewMode::default(), ViewMode::Orbit);
+    }
+
+    #[test]
+    fn view_mode_labels_are_distinct_and_nonempty() {
+        let labels: Vec<&str> = ViewMode::ALL.iter().map(|m| m.label()).collect();
+        assert_eq!(labels, vec!["Orbit", "Pan", "Zoom"]);
+        for l in labels {
+            assert!(!l.is_empty());
+        }
+    }
+
+    #[test]
+    fn view_mode_all_covers_every_variant_once() {
+        assert_eq!(ViewMode::ALL.len(), 3);
+        assert!(ViewMode::ALL.contains(&ViewMode::Orbit));
+        assert!(ViewMode::ALL.contains(&ViewMode::Pan));
+        assert!(ViewMode::ALL.contains(&ViewMode::Zoom));
     }
 
     // ── View-projection matrix ──────────────────────────────────────────

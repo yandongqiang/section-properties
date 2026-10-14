@@ -15,7 +15,7 @@
 use egui;
 
 use viewport_poc::app_state::AnalysisStatus;
-use viewport_poc::camera::StandardView;
+use viewport_poc::camera::{StandardView, ViewMode};
 use viewport_poc::display::ResultViewMode;
 
 use super::icons::{self, IconFn};
@@ -57,6 +57,14 @@ enum RibbonAction {
     Fit,
     Standard(StandardView),
     ToggleTheme,
+    /// Boundary quick-add: support popup for the primary selected node.
+    AddSupport,
+    /// Boundary quick-add: nodal-load popup for the primary selected node.
+    AddNodeLoad,
+    /// Boundary quick-add: member-load popup for the primary selected member.
+    AddMemberLoad,
+    /// View interaction mode (Pan / Zoom radio buttons).
+    ViewMode(ViewMode),
     /// Not implemented yet — rendered disabled with a "Not yet implemented"
     /// tooltip.
     Placeholder,
@@ -74,6 +82,12 @@ impl RibbonAction {
             RibbonAction::Redo => app.history.can_redo(),
             RibbonAction::Delete => !app.selected.is_empty(),
             RibbonAction::Solve => app.can_run_analysis(),
+            // The Boundary quick-adds act on the primary selected entity.
+            RibbonAction::AddSupport | RibbonAction::AddNodeLoad => {
+                app.selected.primary().node_id().is_some()
+            }
+            RibbonAction::AddMemberLoad => app.selected.primary().member_id().is_some(),
+            RibbonAction::ViewMode(_) => true,
             RibbonAction::Placeholder => false,
             _ => true,
         }
@@ -84,6 +98,7 @@ impl RibbonAction {
         match self {
             RibbonAction::ResultMode(m) => app.display.mode == m,
             RibbonAction::ToggleDiagrams => app.display.show_diagrams,
+            RibbonAction::ViewMode(m) => app.view_mode == m,
             // Module buttons deliberately do not highlight: the module tab
             // strip already shows the active module, and both "Node" and
             // "Member" target the Model module.
@@ -91,8 +106,20 @@ impl RibbonAction {
         }
     }
 
+    /// Tooltip shown in place of the normal one while the button is
+    /// disabled, explaining what the user must do first.  Empty = keep the
+    /// normal tooltip.
+    fn disabled_hint(self) -> &'static str {
+        match self {
+            RibbonAction::AddSupport => "Select a node first to add a support",
+            RibbonAction::AddNodeLoad => "Select a node first to add a nodal load",
+            RibbonAction::AddMemberLoad => "Select a member first to add a member load",
+            _ => "",
+        }
+    }
+
     /// Run the command — always delegates to the shared `ViewportApp` method.
-    fn run(self, app: &mut ViewportApp) {
+    fn run(self, app: &mut ViewportApp, ctx: &egui::Context) {
         match self {
             RibbonAction::New => app.request_new(),
             RibbonAction::Open => app.request_open(),
@@ -113,6 +140,10 @@ impl RibbonAction {
             RibbonAction::Fit => app.fit_view(),
             RibbonAction::Standard(v) => app.set_standard_view(v),
             RibbonAction::ToggleTheme => app.dark_mode = !app.dark_mode,
+            RibbonAction::AddSupport => app.open_support_popup(ctx),
+            RibbonAction::AddNodeLoad => app.open_nodal_load_popup(ctx),
+            RibbonAction::AddMemberLoad => app.open_member_load_popup(ctx),
+            RibbonAction::ViewMode(m) => app.view_mode = m,
             RibbonAction::Placeholder => {}
         }
     }
@@ -128,8 +159,8 @@ struct Button {
 
 // ── Group contents (single source of truth) ─────────────────────────────
 // Placeholder buttons use `RibbonAction::Placeholder` and are rendered
-// disabled.  The full set of placeholders is: Support, Node Load, Mem Load,
-// Tables, Pan, Zoom.
+// disabled.  The full set of placeholders is: Tables.  The Boundary
+// (Support / Node Load / Mem Load) and View (Pan / Zoom) controls are wired.
 
 const FILE: &[Button] = &[
     Button {
@@ -198,20 +229,20 @@ const BOUNDARY: &[Button] = &[
     Button {
         icon: icons::support,
         caption: "Support",
-        tooltip: "Add a nodal support",
-        action: RibbonAction::Placeholder,
+        tooltip: "Add a support to the selected node (Fixed / Pinned / Custom)",
+        action: RibbonAction::AddSupport,
     },
     Button {
         icon: icons::load_nodal,
         caption: "Node Load",
-        tooltip: "Add a nodal load",
-        action: RibbonAction::Placeholder,
+        tooltip: "Add a nodal load to the selected node (Fx/Fy/Fz/Mx/My/Mz)",
+        action: RibbonAction::AddNodeLoad,
     },
     Button {
         icon: icons::load_dist,
         caption: "Mem Load",
-        tooltip: "Add a member load",
-        action: RibbonAction::Placeholder,
+        tooltip: "Add a member load to the selected member (uniform + point)",
+        action: RibbonAction::AddMemberLoad,
     },
 ];
 
@@ -285,14 +316,14 @@ const VIEW: &[Button] = &[
     Button {
         icon: icons::pan,
         caption: "Pan",
-        tooltip: "Pan the view",
-        action: RibbonAction::Placeholder,
+        tooltip: "Pan mode: primary drag pans the view (Esc returns to Orbit)",
+        action: RibbonAction::ViewMode(ViewMode::Pan),
     },
     Button {
         icon: icons::zoom,
         caption: "Zoom",
-        tooltip: "Zoom the view",
-        action: RibbonAction::Placeholder,
+        tooltip: "Zoom mode: primary drag zooms the view (Esc returns to Orbit)",
+        action: RibbonAction::ViewMode(ViewMode::Zoom),
     },
 ];
 
@@ -363,14 +394,17 @@ fn ribbon_button(ui: &mut egui::Ui, app: &mut ViewportApp, b: &Button) {
     let enabled = b.action.enabled(app);
     let active = b.action.active(app);
     let response = paint_button(ui, b.icon, b.caption, enabled, active);
+    let hint = b.action.disabled_hint();
     let tooltip = if b.action.is_placeholder() {
         NOT_IMPLEMENTED
+    } else if !enabled && !hint.is_empty() {
+        hint
     } else {
         b.tooltip
     };
     let response = response.on_hover_text(tooltip);
     if enabled && response.clicked() {
-        b.action.run(app);
+        b.action.run(app, ui.ctx());
     }
 }
 
@@ -458,5 +492,142 @@ fn analysis_status(app: &ViewportApp, ui: &mut egui::Ui) {
             );
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BoundaryPopup;
+    use viewport_poc::edit_model::{EditModel, MemberId, NodeId};
+    use viewport_poc::persistence;
+    use viewport_poc::selection::SelectionState;
+
+    fn test_app() -> ViewportApp {
+        ViewportApp::new(
+            persistence::AppSettings::default(),
+            std::path::PathBuf::from("unused-settings.json"),
+            None,
+        )
+    }
+
+    /// App with one beam (nodes N0/N1, member M0); returns `(app, node, member)`.
+    fn beam_app() -> (ViewportApp, NodeId, MemberId) {
+        let mut app = test_app();
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let mid = m.add_member(a, b).unwrap();
+        app.project.load_model("test".to_string(), m);
+        (app, a, mid)
+    }
+
+    // ── Boundary group (Phase B1) ───────────────────────────────────────
+
+    #[test]
+    fn boundary_buttons_disabled_without_selection() {
+        let app = test_app();
+        assert!(!RibbonAction::AddSupport.enabled(&app));
+        assert!(!RibbonAction::AddNodeLoad.enabled(&app));
+        assert!(!RibbonAction::AddMemberLoad.enabled(&app));
+    }
+
+    #[test]
+    fn boundary_node_buttons_need_a_node_primary() {
+        let (mut app, a, mid) = beam_app();
+        // A member primary does not enable the node actions.
+        app.select_only(SelectionState::Member(mid));
+        assert!(!RibbonAction::AddSupport.enabled(&app));
+        assert!(!RibbonAction::AddNodeLoad.enabled(&app));
+        assert!(RibbonAction::AddMemberLoad.enabled(&app));
+        // A node primary enables the node actions only.
+        app.select_only(SelectionState::Node(a));
+        assert!(RibbonAction::AddSupport.enabled(&app));
+        assert!(RibbonAction::AddNodeLoad.enabled(&app));
+        assert!(!RibbonAction::AddMemberLoad.enabled(&app));
+    }
+
+    #[test]
+    fn boundary_disabled_hints_name_the_required_entity() {
+        assert_eq!(
+            RibbonAction::AddSupport.disabled_hint(),
+            "Select a node first to add a support"
+        );
+        assert_eq!(
+            RibbonAction::AddNodeLoad.disabled_hint(),
+            "Select a node first to add a nodal load"
+        );
+        assert_eq!(
+            RibbonAction::AddMemberLoad.disabled_hint(),
+            "Select a member first to add a member load"
+        );
+        // Actions without a special hint keep their normal tooltip.
+        assert_eq!(RibbonAction::Fit.disabled_hint(), "");
+    }
+
+    #[test]
+    fn boundary_run_opens_the_matching_popup() {
+        let (mut app, a, _mid) = beam_app();
+        app.select_only(SelectionState::Node(a));
+        let ctx = egui::Context::default();
+        RibbonAction::AddSupport.run(&mut app, &ctx);
+        assert!(matches!(
+            app.boundary_popup,
+            Some(BoundaryPopup::Support { .. })
+        ));
+        RibbonAction::AddNodeLoad.run(&mut app, &ctx);
+        assert!(matches!(
+            app.boundary_popup,
+            Some(BoundaryPopup::NodeLoad { .. })
+        ));
+    }
+
+    #[test]
+    fn member_load_run_opens_popup_for_member_primary() {
+        let (mut app, _a, mid) = beam_app();
+        app.select_only(SelectionState::Member(mid));
+        let ctx = egui::Context::default();
+        RibbonAction::AddMemberLoad.run(&mut app, &ctx);
+        assert!(matches!(
+            app.boundary_popup,
+            Some(BoundaryPopup::MemLoad { .. })
+        ));
+    }
+
+    // ── View group (Phase B2) ───────────────────────────────────────────
+
+    #[test]
+    fn view_mode_buttons_are_radio_buttons() {
+        let (mut app, _a, _mid) = beam_app();
+        let ctx = egui::Context::default();
+        // Orbit is the default; neither Pan nor Zoom is active.
+        assert!(app.view_mode == ViewMode::Orbit);
+        assert!(!RibbonAction::ViewMode(ViewMode::Pan).active(&app));
+        assert!(!RibbonAction::ViewMode(ViewMode::Zoom).active(&app));
+        // Clicking Pan activates exactly Pan.
+        RibbonAction::ViewMode(ViewMode::Pan).run(&mut app, &ctx);
+        assert_eq!(app.view_mode, ViewMode::Pan);
+        assert!(RibbonAction::ViewMode(ViewMode::Pan).active(&app));
+        assert!(!RibbonAction::ViewMode(ViewMode::Zoom).active(&app));
+        // Clicking Zoom moves the highlight.
+        RibbonAction::ViewMode(ViewMode::Zoom).run(&mut app, &ctx);
+        assert_eq!(app.view_mode, ViewMode::Zoom);
+        assert!(RibbonAction::ViewMode(ViewMode::Zoom).active(&app));
+    }
+
+    #[test]
+    fn view_mode_buttons_are_always_enabled() {
+        let app = test_app();
+        assert!(RibbonAction::ViewMode(ViewMode::Pan).enabled(&app));
+        assert!(RibbonAction::ViewMode(ViewMode::Zoom).enabled(&app));
+    }
+
+    // ── Remaining placeholder ───────────────────────────────────────────
+
+    #[test]
+    fn tables_is_still_a_placeholder() {
+        let app = test_app();
+        assert!(RibbonAction::Placeholder.is_placeholder());
+        assert!(!RibbonAction::Placeholder.enabled(&app));
     }
 }

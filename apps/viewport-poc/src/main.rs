@@ -13,10 +13,10 @@ mod ui;
 
 use viewport_poc::{
     app_state::{AppMessage, Project},
-    camera::Camera3D,
+    camera::{Camera3D, ViewMode},
     display::ResultDisplayState,
     edit_history::EditHistory,
-    edit_model::{MemberId, MemberPointLoad3D},
+    edit_model::{MemberId, MemberPointLoad3D, NodalLoadSpec, NodeId, SupportSpec},
     model, persistence,
     scene::ViewportScene,
     selection::{SelectionSet, SelectionState},
@@ -78,9 +78,15 @@ struct ViewportApp {
     ctx_menu_target: SelectionState,
     /// Double-click quick-edit popup state; `None` = closed.
     quick_edit: Option<QuickEdit>,
+    /// Boundary quick-add popup state (Support / Node Load / Mem Load,
+    /// opened from the ribbon); `None` = closed.
+    boundary_popup: Option<BoundaryPopup>,
     /// Screen position where a rubber-band box-select drag began
     /// (Shift/Ctrl + primary drag), or `None` when no box select is active.
     box_select_start: Option<egui::Pos2>,
+    /// Primary-drag interaction mode (Orbit / Pan / Zoom), driven by the
+    /// ribbon's View group.  Camera-only state — never persisted.
+    view_mode: ViewMode,
 }
 
 /// Action waiting for unsaved-changes confirmation.
@@ -156,6 +162,74 @@ struct QuickEdit {
     node_j: String,
 }
 
+/// Transient state for the Boundary quick-add popups (ribbon group).
+///
+/// Each variant targets the **primary** selected entity (a node for Support /
+/// Node Load, a member for Mem Load) and carries the values being edited plus
+/// a one-line validation error to surface inside the popup.  Applying reuses
+/// the shared [`ViewportApp`] edit paths (`commit_edit` / undo) — the popup
+/// never mutates the model itself.  Kept in memory only — never serialized.
+enum BoundaryPopup {
+    /// Support: Fixed / Pinned / Custom (per-DOF) specification.
+    Support {
+        node: NodeId,
+        anchor: egui::Pos2,
+        spec: SupportSpec,
+        error: Option<String>,
+    },
+    /// Nodal load: six global components (N, N·m).
+    NodeLoad {
+        node: NodeId,
+        anchor: egui::Pos2,
+        load: NodalLoadSpec,
+        error: Option<String>,
+    },
+    /// Member load: uniform local qx/qy/qz plus an optional point load
+    /// (position xi + local fx/fy/fz).
+    MemLoad {
+        member: MemberId,
+        anchor: egui::Pos2,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+        add_point: bool,
+        xi: f64,
+        fx: f64,
+        fy: f64,
+        fz: f64,
+        error: Option<String>,
+    },
+}
+
+impl BoundaryPopup {
+    /// Screen anchor the popup was opened at.
+    fn anchor(&self) -> egui::Pos2 {
+        match self {
+            BoundaryPopup::Support { anchor, .. }
+            | BoundaryPopup::NodeLoad { anchor, .. }
+            | BoundaryPopup::MemLoad { anchor, .. } => *anchor,
+        }
+    }
+
+    /// Validation error to surface inside the popup, if any.
+    fn error(&self) -> Option<&str> {
+        match self {
+            BoundaryPopup::Support { error, .. }
+            | BoundaryPopup::NodeLoad { error, .. }
+            | BoundaryPopup::MemLoad { error, .. } => error.as_deref(),
+        }
+    }
+
+    /// Record a validation error; keeps the popup open.
+    fn set_error(&mut self, msg: String) {
+        match self {
+            BoundaryPopup::Support { error, .. }
+            | BoundaryPopup::NodeLoad { error, .. }
+            | BoundaryPopup::MemLoad { error, .. } => *error = Some(msg),
+        }
+    }
+}
+
 impl eframe::App for ViewportApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ui::theme::apply_theme(ctx, self.dark_mode);
@@ -203,6 +277,9 @@ impl eframe::App for ViewportApp {
 
         // ── Double-click quick-edit popup (floats over the viewport) ────
         ui::viewport::show_quick_edit(self, ctx);
+
+        // ── Boundary quick-add popup (floats over the viewport) ─────────
+        ui::viewport::show_boundary_popup(self, ctx);
 
         // ── Screenshot reply (Phase P7-3 C1) ────────────────────────────
         // `ViewportCommand::Screenshot` is answered by eframe *after* the
