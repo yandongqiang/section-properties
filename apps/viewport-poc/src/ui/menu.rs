@@ -65,6 +65,22 @@ fn file_menu(app: &mut ViewportApp, ui: &mut egui::Ui, ctx: &egui::Context) {
             ui.close_menu();
         }
         ui.separator();
+        ui.menu_button("Export", |ui| {
+            if ui
+                .button("Viewport screenshot\u{2026}")
+                .on_hover_text(
+                    "Save the viewport as a BMP image in Pictures\\section-properties (Ctrl+Shift+S)",
+                )
+                .clicked()
+            {
+                // Phase P7-3 C1: asks egui/eframe to capture the composited
+                // window; the reply is handled in `main.rs` and the saved
+                // path is reported in the Messages dock.
+                super::screenshot::request(ctx);
+                ui.close_menu();
+            }
+        });
+        ui.separator();
         if ui.button("Clear project").clicked() {
             app.request_clear();
             ui.close_menu();
@@ -354,6 +370,7 @@ fn help_menu(app: &mut ViewportApp, ui: &mut egui::Ui) {
         ui.label("Delete: delete selection");
         ui.label("Esc: clear selection");
         ui.label("Ctrl+Z / Ctrl+Y: undo / redo");
+        ui.label("Ctrl+Shift+S: viewport screenshot");
         ui.separator();
         if ui.button(theme::toggle_label(app.dark_mode)).clicked() {
             app.dark_mode = !app.dark_mode;

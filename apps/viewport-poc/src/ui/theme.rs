@@ -1,25 +1,30 @@
 //! Centralized UI palette, egui visuals, and light/dark theme toggle.
 //!
-//! Two layers of colour live here:
+//! Three layers of colour live here:
 //!
-//! * the **panel / semantic** constants below are the single source of truth
-//!   for the egui panels (tree, inspector, dock, section preview).  They are
-//!   dark-tuned by design and are *not* theme-dependent.
-//! * [`ViewportPalette`] is the theme-dependent palette for the 3-D canvas.
-//!   It is chosen by [`ViewportPalette::for_theme`] and consumed by **both**
-//!   renderers — the painter path ([`super::viewport`]) and the GPU path
+//! * the **panel / semantic** constants below are the dark-tuned historical
+//!   values.  They remain the single source of truth for the *dark* theme:
+//!   [`ViewportPalette::dark`] and [`TextPalette::dark`] reproduce them
+//!   byte-for-byte.
+//! * [`ViewportPalette`] is the theme-dependent palette for the 3-D canvas
+//!   (and the 2-D section preview).  It is chosen by
+//!   [`ViewportPalette::for_theme`] and consumed by **both** renderers — the
+//!   painter path ([`super::viewport`]) and the GPU path
 //!   ([`super::gl_renderer`]) — so the viewport follows the light/dark toggle
 //!   instead of staying dark-tuned.
+//! * [`TextPalette`] is the theme-dependent counterpart of the semantic
+//!   constants for **chrome text** (panel labels, status badges, message
+//!   levels): the dark values are the historical constants, the light values
+//!   are darkened so they stay legible on the light egui panels.
 //!
 //! [`apply_theme`] installs a compact, CAD-like [`egui::Visuals`] /
 //! [`egui::Style`] for the application chrome.
 
 use egui;
 
-// ── Panel / semantic palette (not theme-dependent) ───────────────────────
-// Used by the egui panels and the 2-D section preview.  Kept dark-tuned
-// regardless of the chrome theme; viewport colours live in
-// [`ViewportPalette`].
+// ── Panel / semantic palette (dark-tuned historical values) ─────────────
+// Used as the *dark* half of [`ViewportPalette`] / [`TextPalette`]; the light
+// halves are tuned separately in those palettes.
 pub const BG: egui::Color32 = egui::Color32::from_rgb(25, 25, 30);
 pub const GRID_C: egui::Color32 = egui::Color32::from_rgb(50, 50, 55);
 pub const AXIS_X: egui::Color32 = egui::Color32::from_rgb(255, 80, 80);
@@ -41,7 +46,8 @@ pub const MEMBER_LOAD_C: egui::Color32 = egui::Color32::from_rgb(100, 255, 100);
 
 // ── Viewport palette (theme-dependent) ───────────────────────────────────
 
-/// Every colour the 3-D viewport draws, resolved for one theme.
+/// Every colour the 3-D viewport (and the 2-D section preview) draws,
+/// resolved for one theme.
 ///
 /// The dark values are exactly the historical hardcoded constants, so the
 /// dark theme is pixel-identical to before.  The light values form a CAD
@@ -90,6 +96,10 @@ pub struct ViewportPalette {
     pub cube_face: egui::Color32,
     pub cube_text: egui::Color32,
     pub cube_edge: egui::Color32,
+    /// Force-diagram legend box (fill + border) floating on the canvas
+    /// (Phase P7-3).
+    pub legend_bg: egui::Color32,
+    pub legend_border: egui::Color32,
 }
 
 impl ViewportPalette {
@@ -121,6 +131,8 @@ impl ViewportPalette {
             cube_face: NODE_C,
             cube_text: egui::Color32::from_rgb(30, 30, 36),
             cube_edge: egui::Color32::from_rgba_unmultiplied(255, 235, 150, 90),
+            legend_bg: egui::Color32::from_rgba_premultiplied(20, 20, 26, 200),
+            legend_border: GRID_C,
         }
     }
 
@@ -152,10 +164,69 @@ impl ViewportPalette {
             cube_face: egui::Color32::from_rgb(75, 115, 170),
             cube_text: egui::Color32::from_rgb(255, 255, 255),
             cube_edge: egui::Color32::from_rgba_unmultiplied(30, 50, 80, 110),
+            legend_bg: egui::Color32::from_rgba_premultiplied(231, 232, 234, 235),
+            legend_border: egui::Color32::from_rgb(168, 174, 182),
         }
     }
 
     /// The palette for the current chrome theme (`dark == true` → dark).
+    pub fn for_theme(dark: bool) -> Self {
+        if dark {
+            Self::dark()
+        } else {
+            Self::light()
+        }
+    }
+}
+
+// ── Chrome text palette (theme-dependent) ───────────────────────────────
+
+/// Semantic **text** colours for the egui chrome (panels, dock, ribbon),
+/// resolved for one theme.
+///
+/// These are the theme-aware replacements for the dark-tuned semantic
+/// constants: the dark values are byte-identical to the historical
+/// constants, while the light values are darkened so status badges, hints
+/// and message levels stay legible on the light panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextPalette {
+    /// Neutral informational text (message level Info).
+    pub label: egui::Color32,
+    /// De-emphasised hints / secondary text.
+    pub help: egui::Color32,
+    /// Warning / stale-analysis amber.
+    pub stale: egui::Color32,
+    /// Error red.
+    pub error: egui::Color32,
+    /// Success / "current" green.
+    pub ok: egui::Color32,
+}
+
+impl TextPalette {
+    /// The dark chrome text colours (the historical constants).
+    pub fn dark() -> Self {
+        Self {
+            label: LABEL_C,
+            help: HELP_C,
+            stale: STALE_C,
+            error: ERROR_C,
+            ok: SUPPORT_C,
+        }
+    }
+
+    /// The light chrome text colours: the same hues, darkened for a light
+    /// background.
+    pub fn light() -> Self {
+        Self {
+            label: egui::Color32::from_rgb(64, 69, 75),
+            help: egui::Color32::from_rgb(105, 110, 116),
+            stale: egui::Color32::from_rgb(140, 95, 0),
+            error: egui::Color32::from_rgb(190, 30, 30),
+            ok: egui::Color32::from_rgb(0, 120, 80),
+        }
+    }
+
+    /// The text palette for the current chrome theme (`dark == true` → dark).
     pub fn for_theme(dark: bool) -> Self {
         if dark {
             Self::dark()
@@ -176,7 +247,8 @@ impl ViewportPalette {
 /// The egui light visuals already provide light panels, dark text, visible
 /// widget borders and the accent (`Visuals::selection`, read by the ribbon),
 /// so both themes are symmetric here; the *viewport* colours follow the
-/// theme separately via [`ViewportPalette`].
+/// theme separately via [`ViewportPalette`] and the semantic *text* colours
+/// via [`TextPalette`].
 pub fn apply_theme(ctx: &egui::Context, dark: bool) {
     let mut visuals = if dark {
         egui::Visuals::dark()
@@ -205,6 +277,23 @@ pub fn toggle_label(dark: bool) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Rec. 709 relative luminance of a colour, in `0.0..=1.0`.
+    ///
+    /// Used by the palette tests to assert that every theme colour stays
+    /// legible against its own background (dark colours on light, light
+    /// colours on dark).
+    fn luminance(c: egui::Color32) -> f32 {
+        fn channel(v: u8) -> f32 {
+            let s = v as f32 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
     /// The dark palette must reproduce the historical hardcoded viewport
     /// colours exactly, so switching renderers / themes changes nothing in
     /// dark mode.
@@ -227,6 +316,12 @@ mod tests {
         assert_eq!(p.member_load, MEMBER_LOAD_C);
         assert_eq!(p.label, LABEL_C);
         assert_eq!(p.help, HELP_C);
+        // The diagram legend box keeps its historical dark fill.
+        assert_eq!(
+            p.legend_bg,
+            egui::Color32::from_rgba_premultiplied(20, 20, 26, 200)
+        );
+        assert_eq!(p.legend_border, GRID_C);
     }
 
     /// The light theme must actually differ from the dark one on the canvas
@@ -246,11 +341,57 @@ mod tests {
         for c in [l.axis_x, l.axis_y, l.axis_z, l.support, l.load_f, l.load_m, l.member_load, l.node, l.def_node, l.def_member] {
             assert!(c.r() < 240 || c.g() < 240 || c.b() < 240, "{c:?} too close to white");
         }
+        // The light legend box is a light fill with a visible border.
+        assert_ne!(l.legend_bg, d.legend_bg);
+        assert_ne!(l.legend_border, d.legend_border);
     }
 
     #[test]
     fn for_theme_selects_the_matching_palette() {
         assert_eq!(ViewportPalette::for_theme(true), ViewportPalette::dark());
         assert_eq!(ViewportPalette::for_theme(false), ViewportPalette::light());
+    }
+
+    /// The dark text palette reproduces the historical semantic constants
+    /// exactly.
+    #[test]
+    fn dark_text_palette_matches_legacy_constants() {
+        let t = TextPalette::dark();
+        assert_eq!(t.label, LABEL_C);
+        assert_eq!(t.help, HELP_C);
+        assert_eq!(t.stale, STALE_C);
+        assert_eq!(t.error, ERROR_C);
+        assert_eq!(t.ok, SUPPORT_C);
+    }
+
+    /// The light text palette must actually differ from the dark one, and
+    /// every colour must be dark enough to read on the light egui panels
+    /// (relative luminance well below mid-grey).
+    #[test]
+    fn light_text_palette_is_legible_on_light_chrome() {
+        let d = TextPalette::dark();
+        let l = TextPalette::light();
+        assert_ne!(l, d);
+        for c in [l.label, l.help, l.stale, l.error, l.ok] {
+            assert!(
+                luminance(c) < 0.30,
+                "{c:?} too bright for light chrome (luminance {})",
+                luminance(c)
+            );
+        }
+        // The dark text colours stay bright on the dark chrome.
+        for c in [d.label, d.help, d.stale, d.error, d.ok] {
+            assert!(
+                luminance(c) > 0.20,
+                "{c:?} too dim for dark chrome (luminance {})",
+                luminance(c)
+            );
+        }
+    }
+
+    #[test]
+    fn text_for_theme_selects_the_matching_palette() {
+        assert_eq!(TextPalette::for_theme(true), TextPalette::dark());
+        assert_eq!(TextPalette::for_theme(false), TextPalette::light());
     }
 }

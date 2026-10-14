@@ -29,7 +29,7 @@ use viewport_poc::section_def::{
 };
 use viewport_poc::selection::SelectionState;
 
-use super::theme;
+use super::theme::{TextPalette, ViewportPalette};
 use crate::ViewportApp;
 
 /// Persistent Section-module state (shape definition + cached results).
@@ -239,15 +239,21 @@ impl SectionEditorState {
 
 /// Draw the Section module into the inspector panel.
 pub fn show_section_module(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    // Theme-dependent colours (Phase P7-3): the preview canvas follows the
+    // viewport palette and the panel text follows the chrome text palette,
+    // so the Section module reads correctly in light mode too.
+    let pal = ViewportPalette::for_theme(app.dark_mode);
+    let text = TextPalette::for_theme(app.dark_mode);
+
     ui.heading("Section");
     ui.label(
         egui::RichText::new("Cross-section library \u{2014} compute and bind to a member")
-            .color(theme::HELP_C),
+            .color(text.help),
     );
     ui.separator();
 
     // ── Shape + dimensions ──────────────────────────────────────────────
-    shape_controls(&mut app.section_editor, ui);
+    shape_controls(&mut app.section_editor, ui, text);
 
     // ── Material ────────────────────────────────────────────────────────
     material_controls(&mut app.section_editor, ui);
@@ -277,11 +283,11 @@ pub fn show_section_module(app: &mut ViewportApp, ui: &mut egui::Ui) {
     // ── Preview ─────────────────────────────────────────────────────────
     ui.label(egui::RichText::new("Preview").strong());
     match app.section_editor.geometry.as_ref() {
-        Some(cache) => draw_preview(ui, cache),
+        Some(cache) => draw_preview(ui, cache, pal),
         None => {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.label(
-                    egui::RichText::new("(no valid geometry to preview)").color(theme::ERROR_C),
+                    egui::RichText::new("(no valid geometry to preview)").color(text.error),
                 );
             });
         }
@@ -290,15 +296,15 @@ pub fn show_section_module(app: &mut ViewportApp, ui: &mut egui::Ui) {
     ui.separator();
 
     // ── Properties ──────────────────────────────────────────────────────
-    property_table(&mut app.section_editor, ui);
+    property_table(&mut app.section_editor, ui, text);
 
     ui.separator();
 
     // ── Bind to member ──────────────────────────────────────────────────
-    bind_controls(app, ui);
+    bind_controls(app, ui, text);
 }
 
-fn shape_controls(state: &mut SectionEditorState, ui: &mut egui::Ui) {
+fn shape_controls(state: &mut SectionEditorState, ui: &mut egui::Ui, text: TextPalette) {
     egui::CollapsingHeader::new("Shape")
         .default_open(true)
         .show(ui, |ui| {
@@ -351,7 +357,7 @@ fn shape_controls(state: &mut SectionEditorState, ui: &mut egui::Ui) {
             });
             ui.label(
                 egui::RichText::new("Dimensions in mm; properties in SI (m², m⁴).")
-                    .color(theme::HELP_C),
+                    .color(text.help),
             );
         });
 }
@@ -432,11 +438,11 @@ fn material_controls(state: &mut SectionEditorState, ui: &mut egui::Ui) {
         });
 }
 
-fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui) {
+fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui, text: TextPalette) {
     ui.label(egui::RichText::new("Properties").strong());
 
     if let Some(err) = state.geometry_error.clone() {
-        ui.label(egui::RichText::new(format!("\u{26a0} {err}")).color(theme::ERROR_C));
+        ui.label(egui::RichText::new(format!("\u{26a0} {err}")).color(text.error));
         return;
     }
     let Some(cache) = state.geometry.as_ref() else {
@@ -478,7 +484,7 @@ fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui) {
     if computing {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(egui::RichText::new("Computing torsion (J)\u{2026}").color(theme::HELP_C));
+            ui.label(egui::RichText::new("Computing torsion (J)\u{2026}").color(text.help));
         });
     } else {
         match state.current_torsion().copied() {
@@ -494,11 +500,11 @@ fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui) {
                     });
             }
             None => {
-                ui.label(egui::RichText::new("J (torsion): not computed").color(theme::STALE_C));
+                ui.label(egui::RichText::new("J (torsion): not computed").color(text.stale));
             }
         }
         if let Some(err) = state.torsion_error.clone() {
-            ui.label(egui::RichText::new(format!("\u{26a0} {err}")).color(theme::ERROR_C));
+            ui.label(egui::RichText::new(format!("\u{26a0} {err}")).color(text.error));
         }
     }
 
@@ -521,7 +527,7 @@ fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui) {
         } else {
             "Solved by the warping FEM in the background; the UI stays responsive."
         };
-        ui.label(egui::RichText::new(note).color(theme::HELP_C));
+        ui.label(egui::RichText::new(note).color(text.help));
     }
 }
 
@@ -534,11 +540,11 @@ fn row(ui: &mut egui::Ui, name: &str, si: String, other: String) {
 
 // ── Binding ─────────────────────────────────────────────────────────────
 
-fn bind_controls(app: &mut ViewportApp, ui: &mut egui::Ui) {
+fn bind_controls(app: &mut ViewportApp, ui: &mut egui::Ui, text: TextPalette) {
     ui.label(egui::RichText::new("Bind to member").strong());
 
     let Some(props) = app.section_editor.geometry.as_ref().map(|g| g.props) else {
-        ui.label(egui::RichText::new("(fix the geometry error first)").color(theme::ERROR_C));
+        ui.label(egui::RichText::new("(fix the geometry error first)").color(text.error));
         return;
     };
     let torsion = app.section_editor.current_torsion().copied();
@@ -572,7 +578,7 @@ fn bind_controls(app: &mut ViewportApp, ui: &mut egui::Ui) {
         egui::RichText::new(
             "Writes E, G, A, Iy, Iz, J into the member's section (visible/tweakable on the Model tab).",
         )
-        .color(theme::HELP_C),
+        .color(text.help),
     );
 }
 
@@ -593,11 +599,16 @@ fn apply_to_member(app: &mut ViewportApp, id: MemberId, props: &GeometryProperti
 
 // ── Preview painting ────────────────────────────────────────────────────
 
-fn draw_preview(ui: &mut egui::Ui, cache: &GeometryCache) {
+/// Paint the 2-D section preview.
+///
+/// The preview canvas uses the active theme's [`ViewportPalette`] (the same
+/// background / member / node colours as the 3-D viewport), so it no longer
+/// stays dark-tuned in light mode (Phase P7-3).
+fn draw_preview(ui: &mut egui::Ui, cache: &GeometryCache, pal: ViewportPalette) {
     let width = ui.available_width().clamp(120.0, 320.0);
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, 200.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 3.0, theme::BG);
+    painter.rect_filled(rect, 3.0, pal.bg);
 
     let span_x = (cache.max[0] - cache.min[0]).max(1e-9);
     let span_y = (cache.max[1] - cache.min[1]).max(1e-9);
@@ -618,13 +629,13 @@ fn draw_preview(ui: &mut egui::Ui, cache: &GeometryCache) {
             continue;
         }
         let pts: Vec<egui::Pos2> = loop_pts.iter().map(|p| to_screen(*p)).collect();
-        let color = if i == 0 { theme::MEMBER_C } else { theme::HELP_C };
+        let color = if i == 0 { pal.member } else { pal.help };
         painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.5_f32, color)));
     }
 
     // Centroid crosshair.
     let c = to_screen([cache.props.cx, cache.props.cy]);
-    let stroke = egui::Stroke::new(1.0_f32, theme::NODE_C);
+    let stroke = egui::Stroke::new(1.0_f32, pal.node);
     painter.line_segment([egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x + 4.0, c.y)], stroke);
     painter.line_segment([egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x, c.y + 4.0)], stroke);
 }

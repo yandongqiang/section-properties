@@ -29,6 +29,7 @@ use viewport_poc::scene::{SectionForces3D, ViewportScene};
 use viewport_poc::selection::SelectionState;
 use structural_analysis::FrameAnalysisResult3D;
 
+use super::theme::ViewportPalette;
 use crate::ViewportApp;
 
 /// Samples per member along its length.
@@ -49,8 +50,10 @@ const C_SHEAR_Z: egui::Color32 = egui::Color32::from_rgb(255, 215, 130);
 const C_MOMENT_Z: egui::Color32 = egui::Color32::from_rgb(90, 150, 255);
 const C_MOMENT_Y: egui::Color32 = egui::Color32::from_rgb(160, 205, 255);
 const C_BASELINE: egui::Color32 = egui::Color32::from_rgb(120, 120, 130);
-const C_LABEL: egui::Color32 = egui::Color32::from_rgb(225, 225, 235);
-const C_LEGEND_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(20, 20, 26, 200);
+// The legend box fill / text follow the active theme via `ViewportPalette`
+// (`legend_bg` / `legend_border` / `label`), so the legend reads correctly on
+// both the dark and the light canvas.  The per-component curve colours above
+// are saturated mid-tones that stay legible on either background.
 
 /// One selectable internal-force component.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -406,7 +409,7 @@ pub fn show_diagrams(
         }
     }
     paint_labels(&app.camera, &d, w, h, rect, painter);
-    draw_legend(painter, rect, &d);
+    draw_legend(painter, rect, &d, ViewportPalette::for_theme(app.dark_mode));
 }
 
 /// Painter-only companion used in GPU mode: the 3-D strips are drawn by the
@@ -428,7 +431,7 @@ pub fn show_diagram_labels(
         return;
     }
     paint_labels(&app.camera, &d, w, h, rect, painter);
-    draw_legend(painter, rect, &d);
+    draw_legend(painter, rect, &d, ViewportPalette::for_theme(app.dark_mode));
 }
 
 /// Paint the projected peak-value labels.
@@ -454,7 +457,11 @@ fn paint_labels(
 }
 
 /// Short scale legend with the peak value of each active component.
-fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
+///
+/// The box fill / border / text come from the active theme's
+/// [`ViewportPalette`], so the legend reads correctly on both the dark and
+/// the light canvas (Phase P7-3).
+fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams, pal: ViewportPalette) {
     if d.legend.is_empty() {
         return;
     }
@@ -467,7 +474,12 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
     painter.rect_filled(
         egui::Rect::from_min_size(origin, egui::vec2(width, height)),
         4.0,
-        C_LEGEND_BG,
+        pal.legend_bg,
+    );
+    painter.rect_stroke(
+        egui::Rect::from_min_size(origin, egui::vec2(width, height)),
+        4.0,
+        egui::Stroke::new(1.0_f32, pal.legend_border),
     );
 
     let mut y = origin.y + pad * 0.5;
@@ -476,7 +488,7 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
         egui::Align2::LEFT_TOP,
         format!("Force diagrams (x{:.2})", d.scale),
         egui::FontId::proportional(11.0),
-        C_LABEL,
+        pal.label,
     );
     y += line_h;
     for row in &d.legend {
@@ -494,7 +506,7 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
             egui::Align2::LEFT_TOP,
             format!("{}  peak {}", row.label, fmt_eng(row.peak)),
             egui::FontId::proportional(10.0),
-            C_LABEL,
+            pal.label,
         );
         y += line_h;
     }
@@ -503,7 +515,7 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams) {
         egui::Align2::LEFT_TOP,
         "local axes; N, N\u{00b7}m",
         egui::FontId::proportional(9.0),
-        egui::Color32::from_rgb(170, 170, 180),
+        pal.help,
     );
 }
 

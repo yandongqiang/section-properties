@@ -14,8 +14,9 @@ use viewport_poc::display::ResultViewMode;
 use viewport_poc::edit_model::{MemberPointLoad3D, NodalLoadSpec, SupportSpec};
 use viewport_poc::selection::{SelectionSet, SelectionState};
 
+use super::layout;
 use super::module::WorkModule;
-use super::theme;
+use super::theme::TextPalette;
 use super::{fmt, forces_grid};
 use crate::ViewportApp;
 
@@ -54,8 +55,10 @@ pub fn show_inspector(app: &mut ViewportApp, ctx: &egui::Context) {
     }
     let window_w = ctx.screen_rect().width();
     let max_w = (window_w * INSPECTOR_MAX_FRACTION).max(INSPECTOR_DEFAULT_MAX);
-    let default_w =
-        (window_w * INSPECTOR_DEFAULT_FRACTION).clamp(INSPECTOR_DEFAULT_MIN, INSPECTOR_DEFAULT_MAX);
+    // Phase P7-3 C2: a persisted layout preset overrides the window-fraction
+    // default width (egui still clamps it into the panel's allowed range).
+    let default_w = layout::restored_inspector_width(ctx)
+        .unwrap_or_else(|| (window_w * INSPECTOR_DEFAULT_FRACTION).clamp(INSPECTOR_DEFAULT_MIN, INSPECTOR_DEFAULT_MAX));
 
     egui::SidePanel::right("inspector")
         .resizable(true)
@@ -99,6 +102,15 @@ pub fn show_inspector(app: &mut ViewportApp, ctx: &egui::Context) {
                 ui.separator();
                 show_camera_section(app, ui);
             });
+
+            // Publish the live panel width for layout-preset persistence
+            // (Phase P7-3 C2).  `ui.max_rect()` is the panel's *inner* rect;
+            // add the frame's inner margin back to recover the outer width.
+            let margin = egui::Frame::side_top_panel(ui.style()).inner_margin;
+            layout::publish_inspector_width(
+                ctx,
+                ui.max_rect().width() + (margin.left + margin.right) as f32,
+            );
         });
 }
 
@@ -122,7 +134,7 @@ fn show_analysis_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
     ui.separator();
     show_job_status(app, ui);
     ui.separator();
-    show_model_summary(ui, summary.as_ref());
+    show_model_summary(ui, summary.as_ref(), TextPalette::for_theme(app.dark_mode));
     ui.separator();
     show_solver_options(app, ui);
     ui.separator();
@@ -140,6 +152,7 @@ fn show_analysis_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
 /// ([`ViewportApp::can_run_analysis`]) with the Analysis menu and the
 /// quick-action Solve button.
 fn show_run_control(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let colors = TextPalette::for_theme(app.dark_mode);
     let can_run = app.can_run_analysis();
     let status = app.project.analysis_status();
     let label = if status == AnalysisStatus::Stale {
@@ -173,7 +186,7 @@ fn show_run_control(app: &mut ViewportApp, ui: &mut egui::Ui) {
             "Add at least one node to run the analysis."
         };
         let response = response.on_disabled_hover_text(reason);
-        ui.label(egui::RichText::new(reason).color(theme::HELP_C).small());
+        ui.label(egui::RichText::new(reason).color(colors.help).small());
         response
     };
 
@@ -184,26 +197,27 @@ fn show_run_control(app: &mut ViewportApp, ui: &mut egui::Ui) {
 
 /// Current analysis-status badge.
 fn show_job_status(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     let status = app.project.analysis_status();
     ui.horizontal(|ui| {
         ui.label("Status:");
-        let (text, color) = match status {
-            AnalysisStatus::Current => ("Current \u{2713}", theme::SUPPORT_C),
-            AnalysisStatus::Stale => ("Stale \u{2014} re-run", theme::STALE_C),
-            AnalysisStatus::Failed => ("Failed", theme::ERROR_C),
-            AnalysisStatus::NeverSolved => ("Not run", theme::HELP_C),
+        let (text_label, color) = match status {
+            AnalysisStatus::Current => ("Current \u{2713}", text.ok),
+            AnalysisStatus::Stale => ("Stale \u{2014} re-run", text.stale),
+            AnalysisStatus::Failed => ("Failed", text.error),
+            AnalysisStatus::NeverSolved => ("Not run", text.help),
         };
-        ui.label(egui::RichText::new(text).color(color).strong());
+        ui.label(egui::RichText::new(text_label).color(color).strong());
     });
 }
 
 /// Counts table + a compact validity-warning indicator.
-fn show_model_summary(ui: &mut egui::Ui, summary: Option<&ModelSummary>) {
+fn show_model_summary(ui: &mut egui::Ui, summary: Option<&ModelSummary>, text: TextPalette) {
     egui::CollapsingHeader::new("Model summary")
         .default_open(true)
         .show(ui, |ui| {
             let Some(s) = summary else {
-                ui.label(egui::RichText::new("No model loaded.").color(theme::HELP_C));
+                ui.label(egui::RichText::new("No model loaded.").color(text.help));
                 return;
             };
             egui::Grid::new("analysis_model_summary")
@@ -228,7 +242,7 @@ fn show_model_summary(ui: &mut egui::Ui, summary: Option<&ModelSummary>) {
                         "\u{26a0} {} model warning(s) \u{2014} see below",
                         s.warnings.len()
                     ))
-                    .color(theme::STALE_C),
+                    .color(text.stale),
                 );
             }
         });
@@ -236,6 +250,7 @@ fn show_model_summary(ui: &mut egui::Ui, summary: Option<&ModelSummary>) {
 
 /// The one real solver option: the linear backend. Plus reset-to-defaults.
 fn show_solver_options(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     egui::CollapsingHeader::new("Solver options")
         .default_open(true)
         .show(ui, |ui| {
@@ -258,7 +273,7 @@ fn show_solver_options(app: &mut ViewportApp, ui: &mut egui::Ui) {
             });
             ui.label(
                 egui::RichText::new(solver_hint(current))
-                    .color(theme::HELP_C)
+                    .color(text.help)
                     .small(),
             );
             ui.add_space(2.0);
@@ -275,13 +290,14 @@ fn show_solver_options(app: &mut ViewportApp, ui: &mut egui::Ui) {
 /// Post-solve headline figures. The 3D solver exposes no equilibrium report,
 /// so none is shown.
 fn show_results_summary(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     egui::CollapsingHeader::new("Results summary")
         .default_open(true)
         .show(ui, |ui| {
             let Some(result) = app.analysis_result() else {
                 ui.label(
                     egui::RichText::new("(no current result \u{2014} run analysis)")
-                        .color(theme::STALE_C),
+                        .color(text.stale),
                 );
                 return;
             };
@@ -308,7 +324,7 @@ fn show_results_summary(app: &ViewportApp, ui: &mut egui::Ui) {
                     "Solver returns displacements, reactions and member end forces; \
                      it provides no equilibrium/iteration report.",
                 )
-                .color(theme::HELP_C)
+                .color(text.help)
                 .small(),
             );
         });
@@ -321,6 +337,7 @@ fn show_analysis_diagnostics(
     ui: &mut egui::Ui,
     summary: Option<&ModelSummary>,
 ) {
+    let text = TextPalette::for_theme(app.dark_mode);
     egui::CollapsingHeader::new("Warnings / errors")
         .default_open(true)
         .show(ui, |ui| {
@@ -329,17 +346,17 @@ fn show_analysis_diagnostics(
                 any = true;
                 ui.label(
                     egui::RichText::new(format!("\u{2717} Solve failed: {err}"))
-                        .color(theme::ERROR_C),
+                        .color(text.error),
                 );
             }
             if let Some(s) = summary {
                 for w in &s.warnings {
                     any = true;
-                    ui.label(egui::RichText::new(format!("\u{26a0} {w}")).color(theme::STALE_C));
+                    ui.label(egui::RichText::new(format!("\u{26a0} {w}")).color(text.stale));
                 }
             }
             if !any {
-                ui.label(egui::RichText::new("No issues.").color(theme::HELP_C));
+                ui.label(egui::RichText::new("No issues.").color(text.help));
             }
         });
 }
@@ -381,6 +398,7 @@ fn solver_hint(backend: SolverBackend) -> &'static str {
 // ── Display ──────────────────────────────────────────────────────────────
 
 fn show_display_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     egui::CollapsingHeader::new("Display")
         .default_open(true)
         .show(ui, |ui| {
@@ -399,7 +417,7 @@ fn show_display_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
 
             let result_available = app.analysis_result().is_some();
             if app.display.mode.requires_result() && !result_available {
-                ui.label(egui::RichText::new("(no current result \u{2014} solve first)").color(theme::STALE_C));
+                ui.label(egui::RichText::new("(no current result \u{2014} solve first)").color(text.stale));
             }
 
             ui.separator();
@@ -510,6 +528,7 @@ fn show_selection_geometry(app: &mut ViewportApp, ui: &mut egui::Ui) {
 /// selection in one undo step, hide it, or route to the Section module when the
 /// selection contains members.
 fn show_multi_selection(app: &mut ViewportApp, ui: &mut egui::Ui, set: &SelectionSet) {
+    let text = TextPalette::for_theme(app.dark_mode);
     ui.strong(format!("{} entities selected", set.len()));
     ui.label(format!(
         "{} node(s), {} member(s)",
@@ -555,7 +574,7 @@ fn show_multi_selection(app: &mut ViewportApp, ui: &mut egui::Ui, set: &Selectio
         };
         ui.label(
             egui::RichText::new(format!("{}{}", preview.join(", "), suffix))
-                .color(theme::HELP_C)
+                .color(text.help)
                 .small(),
         );
     }
@@ -877,6 +896,7 @@ fn show_member_geometry(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_p
 // ── Selection: loads (Load module) ──────────────────────────────────────
 
 fn show_selection_loads(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     let set = app.selected.clone();
     egui::CollapsingHeader::new("Selection")
         .default_open(true)
@@ -901,7 +921,7 @@ fn show_selection_loads(app: &mut ViewportApp, ui: &mut egui::Ui) {
                 ));
                 ui.label(
                     egui::RichText::new("Select a single entity to edit its load.")
-                        .color(theme::HELP_C),
+                        .color(text.help),
                 );
             }
         });
@@ -1148,6 +1168,7 @@ fn show_member_loads(app: &mut ViewportApp, ui: &mut egui::Ui, id: viewport_poc:
 // ── Selection: read-only results (Results module) ───────────────────────
 
 fn show_selection_results(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     // Read-only member results need a single member; with a multi-selection we
     // simply show nothing here (the detail lives on the primary member via the
     // viewport's end-force / local-axis overlays).
@@ -1164,7 +1185,7 @@ fn show_selection_results(app: &mut ViewportApp, ui: &mut egui::Ui) {
                 return;
             };
             let Some(r) = app.analysis_result() else {
-                ui.label(egui::RichText::new("(no current result \u{2014} solve first)").color(theme::STALE_C));
+                ui.label(egui::RichText::new("(no current result \u{2014} solve first)").color(text.stale));
                 return;
             };
             if let Ok(f) = r.member_end_forces(idx) {

@@ -996,9 +996,12 @@ pub struct WindowPrefs {
 /// Application settings persisted outside of any project.
 ///
 /// Kept deliberately small: the chrome theme plus the cheaply captured window
-/// size.  Panel widths are **not** stored — egui already remembers those in
-/// its own memory, and re-implementing a layout store here would be needless
-/// complexity.
+/// size.  The **layout preset** (panel widths / dock height / collapsed
+/// flags) is stored alongside these fields in the same file under the
+/// `"layout"` key — see [`LayoutPrefs`], [`save_layout`] and
+/// [`load_layout_or_default`].  It is kept as a separate top-level key (not a
+/// field of this struct) so that both writers cooperate without either
+/// clobbering the other's keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     /// egui chrome theme (`true` = dark).
@@ -1021,6 +1024,36 @@ impl Default for AppSettings {
             window: None,
         }
     }
+}
+
+/// Persisted panel layout preset (additive extension of the settings file).
+///
+/// Stored under the `"layout"` key of the settings file, next to
+/// [`AppSettings`].  Every field is `#[serde(default)]`, so an older settings
+/// file without the key (or without individual fields) loads cleanly with
+/// defaults.  Widths / heights are `Option`: `None` means "never captured",
+/// and the panels fall back to their window-fraction defaults.
+///
+/// The **theme** is deliberately *not* duplicated here — it already lives in
+/// [`AppSettings::dark_mode`], which stays the single source of truth (the
+/// theme is written by the settings save path on every toggle).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct LayoutPrefs {
+    /// Width of the left model-tree panel (points).
+    #[serde(default)]
+    pub tree_width: Option<f32>,
+    /// Width of the right inspector panel (points).
+    #[serde(default)]
+    pub inspector_width: Option<f32>,
+    /// Height of the bottom Messages / Results dock (points).
+    #[serde(default)]
+    pub dock_height: Option<f32>,
+    /// Whether the inspector panel is collapsed.
+    #[serde(default)]
+    pub inspector_collapsed: bool,
+    /// Whether the bottom dock is collapsed.
+    #[serde(default)]
+    pub dock_collapsed: bool,
 }
 
 /// The per-user settings file path.
@@ -1070,10 +1103,76 @@ pub fn load_settings_or_default(path: &Path) -> (AppSettings, Option<String>) {
 }
 
 /// Save settings to `path` (creating the parent directory if needed).
+///
+/// The additive `"layout"` key written by [`save_layout`] is preserved: this
+/// function serializes the [`AppSettings`] fields and re-attaches any
+/// existing `"layout"` value, so the two writers never clobber each other.
 pub fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), PersistenceError> {
-    let json = serde_json::to_string_pretty(settings)
+    let mut json = serde_json::to_value(settings)
         .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
-    write_atomic(path, &json)
+    if let Some(layout) = read_layout_value(path)
+        && let Some(obj) = json.as_object_mut()
+    {
+        obj.insert("layout".to_string(), layout);
+    }
+    let text = serde_json::to_string_pretty(&json)
+        .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+    write_atomic(path, &text)
+}
+
+/// Load the persisted layout preset from the settings file at `path`.
+///
+/// A **missing** `"layout"` key (every settings file written before layout
+/// presets existed) is not an error and yields [`LayoutPrefs::default`].  A
+/// key that is present but malformed also yields defaults, with the problem
+/// returned as the second tuple element so the caller can surface it rather
+/// than silently swallow it.
+pub fn load_layout_or_default(path: &Path) -> (LayoutPrefs, Option<String>) {
+    match read_layout_value(path) {
+        None => (LayoutPrefs::default(), None),
+        Some(value) => match serde_json::from_value::<LayoutPrefs>(value) {
+            Ok(layout) => (layout, None),
+            Err(e) => (
+                LayoutPrefs::default(),
+                Some(format!(
+                    "settings file {} has an invalid layout ({e})",
+                    path.display()
+                )),
+            ),
+        },
+    }
+}
+
+/// Merge `layout` into the settings file at `path` (read-modify-write,
+/// atomic).
+///
+/// The existing `dark_mode` / `window` keys are preserved; a file that is
+/// missing or does not parse as a JSON object starts fresh with just the
+/// layout key.
+pub fn save_layout(path: &Path, layout: &LayoutPrefs) -> Result<(), PersistenceError> {
+    let mut root = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        },
+        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+    };
+    let value =
+        serde_json::to_value(layout).map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("layout".to_string(), value);
+    }
+    let text = serde_json::to_string_pretty(&root)
+        .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+    write_atomic(path, &text)
+}
+
+/// Read the raw `"layout"` JSON value out of the settings file, if the file
+/// exists, parses as an object and carries the key.
+fn read_layout_value(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.as_object()?.get("layout").cloned()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -1319,6 +1418,127 @@ mod tests {
                 height: 600.0
             })
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Layout preset (additive extension of the settings file) ─────────
+
+    fn sample_layout() -> LayoutPrefs {
+        LayoutPrefs {
+            tree_width: Some(240.0),
+            inspector_width: Some(320.0),
+            dock_height: Some(140.0),
+            inspector_collapsed: true,
+            dock_collapsed: false,
+        }
+    }
+
+    #[test]
+    fn layout_round_trip_through_the_settings_file() {
+        let path = std::env::temp_dir().join("test_layout_round_trip.json");
+        let _ = std::fs::remove_file(&path);
+
+        save_layout(&path, &sample_layout()).unwrap();
+        let (loaded, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded, sample_layout());
+
+        // The layout shares the settings file: the settings loader still
+        // works and ignores the extra key.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"layout\""), "{text}");
+        let (settings, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(settings, AppSettings::default());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_settings_preserves_the_layout_key() {
+        let path = std::env::temp_dir().join("test_layout_preserved_by_settings.json");
+        let _ = std::fs::remove_file(&path);
+
+        save_layout(&path, &sample_layout()).unwrap();
+        // The theme/window writer must not clobber the layout preset.
+        save_settings(
+            &path,
+            &AppSettings {
+                dark_mode: false,
+                window: Some(WindowPrefs {
+                    width: 1000.0,
+                    height: 700.0,
+                }),
+            },
+        )
+        .unwrap();
+
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(layout, sample_layout());
+        let (settings, _) = load_settings_or_default(&path);
+        assert!(!settings.dark_mode);
+        assert_eq!(
+            settings.window,
+            Some(WindowPrefs {
+                width: 1000.0,
+                height: 700.0
+            })
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_settings_without_layout_yield_defaults() {
+        // A settings file written before layout presets existed.
+        let path = std::env::temp_dir().join("test_layout_legacy.json");
+        std::fs::write(
+            &path,
+            br#"{"dark_mode":false,"window":{"width":900.0,"height":600.0}}"#,
+        )
+        .unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(layout, LayoutPrefs::default());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn missing_settings_file_yields_default_layout_without_warning() {
+        let path = std::env::temp_dir().join("test_layout_missing_xyz.json");
+        let _ = std::fs::remove_file(&path);
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none(), "missing file must not warn");
+        assert_eq!(layout, LayoutPrefs::default());
+    }
+
+    #[test]
+    fn layout_partial_json_uses_field_defaults() {
+        let path = std::env::temp_dir().join("test_layout_partial.json");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"layout":{"tree_width":250.0}}"#).unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(layout.tree_width, Some(250.0));
+        assert_eq!(layout.inspector_width, None);
+        assert_eq!(layout.dock_height, None);
+        assert!(!layout.inspector_collapsed);
+        assert!(!layout.dock_collapsed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_layout_falls_back_with_warning() {
+        // A failed computation is always surfaced, never a silent zero.
+        let path = std::env::temp_dir().join("test_layout_corrupt.json");
+        std::fs::write(&path, br#"{"layout":42}"#).unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert_eq!(layout, LayoutPrefs::default());
+        assert!(warning.is_some(), "corrupt layout must be reported");
+
         let _ = std::fs::remove_file(&path);
     }
 

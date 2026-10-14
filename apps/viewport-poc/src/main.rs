@@ -168,6 +168,18 @@ impl eframe::App for ViewportApp {
         let size = ctx.input(|i| i.screen_rect().size());
         self.window_size = Some([size.x, size.y]);
 
+        // Phase P7-3 C1: Ctrl+Shift+S captures the viewport.  Handled here
+        // rather than in `handle_shortcuts` (which owns the undo / redo /
+        // view keys) with the same no-text-focus guard, so the chord does
+        // not fire while a DragValue / TextEdit has focus.
+        if ctx.memory(|m| m.focused().is_none())
+            && ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S)
+            })
+        {
+            ui::screenshot::request(ctx);
+        }
+
         self.handle_shortcuts(ctx);
 
         // ── Top: menu bar + module tabs ─────────────────────────────────
@@ -192,12 +204,60 @@ impl eframe::App for ViewportApp {
         // ── Double-click quick-edit popup (floats over the viewport) ────
         ui::viewport::show_quick_edit(self, ctx);
 
+        // ── Screenshot reply (Phase P7-3 C1) ────────────────────────────
+        // `ViewportCommand::Screenshot` is answered by eframe *after* the
+        // frame is painted: the composited window is read back (renderer-
+        // agnostic — see `ui::screenshot`) and delivered as
+        // `Event::Screenshot` on a later frame.  Drain every pending reply
+        // and write each to disk, surfacing the full path in the dock.
+        let shots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for image in &shots {
+            match ui::screenshot::save(image) {
+                Ok(path) => {
+                    self.messages.push(AppMessage::info(format!(
+                        "Viewport screenshot saved to {}",
+                        path.display()
+                    )));
+                    // Make sure the path is seen even when the dock sits on
+                    // the Results tab.
+                    self.bottom_tab = BottomTab::Messages;
+                }
+                Err(e) => self
+                    .messages
+                    .push(AppMessage::error(format!("Viewport screenshot failed: {e}"))),
+            }
+        }
+
         // ── Persist settings ────────────────────────────────────────────
         // The theme is toggled directly by the menu module, so detect the
         // change here; also flush the latest window size on close.
         let closing = ctx.input(|i| i.viewport().close_requested());
         if closing || self.dark_mode != self.last_persisted_dark_mode {
             self.persist_settings();
+        }
+
+        // ── Persist the layout preset (Phase P7-3 C2) ───────────────────
+        // The panels publish their live sizes while drawing (above), so the
+        // capture is fresh here; persist whenever it changes, and on exit.
+        let layout =
+            ui::layout::capture(ctx, self.inspector_collapsed, self.bottom_dock_collapsed);
+        if closing || Some(layout) != ui::layout::last_saved(ctx) {
+            // Record the attempted value either way so a permanently failing
+            // save does not retry (and re-warn) on every subsequent frame —
+            // the same policy as `persist_settings`.
+            ui::layout::set_last_saved(ctx, layout);
+            if let Err(e) = persistence::save_layout(&self.settings_path, &layout) {
+                self.messages
+                    .push(AppMessage::warning(format!("Could not save layout: {e}")));
+            }
         }
     }
 }
@@ -206,6 +266,9 @@ impl eframe::App for ViewportApp {
 fn main() -> eframe::Result {
     let settings_path = persistence::settings_path();
     let (settings, settings_warning) = persistence::load_settings_or_default(&settings_path);
+    // Phase P7-3 C2: the layout preset shares the settings file under the
+    // additive "layout" key; a file without it simply yields defaults.
+    let (layout, layout_warning) = persistence::load_layout_or_default(&settings_path);
     let inner_size = settings
         .window
         .map(|w| [w.width.max(320.0), w.height.max(240.0)])
@@ -227,6 +290,18 @@ fn main() -> eframe::Result {
             // the Messages dock.
             let gl_status = ui::gl_renderer::init(cc.gl.clone());
             let mut app = ViewportApp::new(settings, settings_path, settings_warning);
+            // Phase P7-3 C2: restore the persisted layout preset.  The panel
+            // widths are installed into egui's data map for the panels to
+            // read back; the collapsed flags apply to the app directly.  The
+            // theme stays owned by `AppSettings::dark_mode` (already applied
+            // above) so there is a single source of truth.
+            app.inspector_collapsed = layout.inspector_collapsed;
+            app.bottom_dock_collapsed = layout.dock_collapsed;
+            if let Some(warning) = layout_warning {
+                app.messages
+                    .push(AppMessage::warning(format!("Settings: {warning}")));
+            }
+            ui::layout::install_restored(&cc.egui_ctx, layout);
             match gl_status {
                 Ok(()) => app.messages.push(AppMessage::info(
                     "GPU viewport renderer ready (depth-tested 3-D view).",

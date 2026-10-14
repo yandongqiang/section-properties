@@ -443,17 +443,18 @@ fn paint_button(
 
 /// The stale / failed analysis warning, kept reachable from the ribbon.
 fn analysis_status(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = theme::TextPalette::for_theme(app.dark_mode);
     match app.project.analysis_status() {
         AnalysisStatus::Stale => {
             ui.label(
                 egui::RichText::new("\u{26a0} Results are stale \u{2014} re-solve")
-                    .color(theme::STALE_C),
+                    .color(text.stale),
             );
         }
         AnalysisStatus::Failed => {
             ui.label(
                 egui::RichText::new("\u{26a0} Last solve failed \u{2014} fix and re-solve")
-                    .color(theme::ERROR_C),
+                    .color(text.error),
             );
         }
         _ => {}

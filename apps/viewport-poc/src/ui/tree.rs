@@ -11,6 +11,7 @@ use viewport_poc::display::{displacement_magnitudes, fmt_eng};
 use viewport_poc::edit_model::EditModel;
 use viewport_poc::selection::{SelectionSet, SelectionState};
 
+use super::layout;
 use crate::ViewportApp;
 
 /// Smallest the left panel may be dragged.  Keeps the resize handle grabbable.
@@ -29,8 +30,10 @@ const TREE_MAX_FRACTION: f32 = 0.45;
 pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
     let window_w = ctx.screen_rect().width();
     let max_w = (window_w * TREE_MAX_FRACTION).max(TREE_DEFAULT_MAX);
-    let default_w =
-        (window_w * TREE_DEFAULT_FRACTION).clamp(TREE_DEFAULT_MIN, TREE_DEFAULT_MAX);
+    // Phase P7-3 C2: a persisted layout preset overrides the window-fraction
+    // default width (egui still clamps it into the panel's allowed range).
+    let default_w = layout::restored_tree_width(ctx)
+        .unwrap_or_else(|| (window_w * TREE_DEFAULT_FRACTION).clamp(TREE_DEFAULT_MIN, TREE_DEFAULT_MAX));
 
     egui::SidePanel::left("model_tree")
         .resizable(true)
@@ -70,6 +73,15 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
 
             ui.separator();
             project_file_section(app, ui);
+
+            // Publish the live panel width for layout-preset persistence
+            // (Phase P7-3 C2).  `ui.max_rect()` is the panel's *inner* rect;
+            // add the frame's inner margin back to recover the outer width.
+            let margin = egui::Frame::side_top_panel(ui.style()).inner_margin;
+            layout::publish_tree_width(
+                ctx,
+                ui.max_rect().width() + (margin.left + margin.right) as f32,
+            );
         });
 }
 
@@ -351,6 +363,7 @@ fn results_branch(
 
 /// File path / open / save controls, kept at the bottom of the browser.
 fn project_file_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
+    let text = super::theme::TextPalette::for_theme(app.dark_mode);
     egui::CollapsingHeader::new("Project file")
         .default_open(false)
         .show(ui, |ui| {
@@ -368,9 +381,9 @@ fn project_file_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
                 }
             });
             if app.is_dirty() {
-                ui.label(egui::RichText::new("\u{26a0} Unsaved changes").color(super::theme::STALE_C));
+                ui.label(egui::RichText::new("\u{26a0} Unsaved changes").color(text.stale));
             } else if app.project_path.is_some() {
-                ui.label(egui::RichText::new("\u{2713} Saved").color(super::theme::SUPPORT_C));
+                ui.label(egui::RichText::new("\u{2713} Saved").color(text.ok));
             }
         });
 }

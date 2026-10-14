@@ -6,8 +6,9 @@ use structural_analysis::Dof3D;
 use viewport_poc::app_state::{AnalysisStatus, MessageLevel};
 use viewport_poc::selection::{SelectionSet, SelectionState};
 
+use super::layout;
 use super::module::WorkModule;
-use super::theme;
+use super::theme::TextPalette;
 use super::{fmt, forces_grid};
 use crate::ViewportApp;
 
@@ -69,7 +70,10 @@ pub fn show_bottom_dock(app: &mut ViewportApp, ctx: &egui::Context) {
     }
     let window_h = ctx.screen_rect().height();
     let max_h = (window_h * DOCK_MAX_FRACTION).max(DOCK_DEFAULT_MAX);
-    let default_h = (window_h * DOCK_DEFAULT_FRACTION).clamp(DOCK_DEFAULT_MIN, DOCK_DEFAULT_MAX);
+    // Phase P7-3 C2: a persisted layout preset overrides the window-fraction
+    // default height (egui still clamps it into the dock's allowed range).
+    let default_h = layout::restored_dock_height(ctx)
+        .unwrap_or_else(|| (window_h * DOCK_DEFAULT_FRACTION).clamp(DOCK_DEFAULT_MIN, DOCK_DEFAULT_MAX));
 
     egui::TopBottomPanel::bottom("bottom_dock")
         .resizable(true)
@@ -111,6 +115,15 @@ pub fn show_bottom_dock(app: &mut ViewportApp, ctx: &egui::Context) {
                     BottomTab::Messages => messages_view(app, ui),
                     BottomTab::Results => results_view(app, ui),
                 });
+
+            // Publish the live dock height for layout-preset persistence
+            // (Phase P7-3 C2).  `ui.max_rect()` is the dock's *inner* rect;
+            // add the frame's inner margin back to recover the outer height.
+            let margin = egui::Frame::side_top_panel(ui.style()).inner_margin;
+            layout::publish_dock_height(
+                ctx,
+                ui.max_rect().height() + (margin.top + margin.bottom) as f32,
+            );
         });
 }
 
@@ -131,15 +144,16 @@ fn collapse_toggle(app: &mut ViewportApp, ui: &mut egui::Ui) {
 }
 
 fn messages_view(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     if app.messages.is_empty() {
-        ui.label(egui::RichText::new("(no messages)").color(theme::HELP_C));
+        ui.label(egui::RichText::new("(no messages)").color(text.help));
         return;
     }
     for msg in &app.messages {
         let color = match msg.level {
-            MessageLevel::Info => theme::LABEL_C,
-            MessageLevel::Warning => theme::STALE_C,
-            MessageLevel::Error => theme::ERROR_C,
+            MessageLevel::Info => text.label,
+            MessageLevel::Warning => text.stale,
+            MessageLevel::Error => text.error,
         };
         let prefix = match msg.level {
             MessageLevel::Info => "",
@@ -151,13 +165,14 @@ fn messages_view(app: &ViewportApp, ui: &mut egui::Ui) {
 }
 
 fn results_view(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     let Some(model) = app.project.model.as_ref() else {
         ui.label("No model loaded");
         return;
     };
     let Some(result) = app.analysis_result() else {
         ui.label(
-            egui::RichText::new("(no current result \u{2014} solve first)").color(theme::STALE_C),
+            egui::RichText::new("(no current result \u{2014} solve first)").color(text.stale),
         );
         return;
     };
@@ -207,6 +222,7 @@ fn results_view(app: &ViewportApp, ui: &mut egui::Ui) {
 }
 
 fn status_line(app: &ViewportApp, ui: &mut egui::Ui) {
+    let text = TextPalette::for_theme(app.dark_mode);
     ui.horizontal(|ui| {
         if app.project.is_empty() {
             ui.label("No model loaded");
@@ -221,10 +237,10 @@ fn status_line(app: &ViewportApp, ui: &mut egui::Ui) {
                     ui.label("Analysis: \u{2713}");
                 }
                 AnalysisStatus::Stale => {
-                    ui.label(egui::RichText::new("Analysis: STALE").color(theme::STALE_C));
+                    ui.label(egui::RichText::new("Analysis: STALE").color(text.stale));
                 }
                 AnalysisStatus::Failed => {
-                    ui.label(egui::RichText::new("Analysis: FAILED").color(theme::ERROR_C));
+                    ui.label(egui::RichText::new("Analysis: FAILED").color(text.error));
                 }
                 AnalysisStatus::NeverSolved => {
                     ui.label("Analysis: not run");
