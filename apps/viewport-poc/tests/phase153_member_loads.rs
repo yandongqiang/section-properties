@@ -449,12 +449,12 @@ fn v2_round_trip_empty_loads() {
 }
 
 #[test]
-fn v2_format_version_in_json() {
+fn v4_format_version_in_json() {
     let m = EditModel::new();
     let json = persistence::serialize_project(&m).unwrap();
     assert!(
-        json.contains("\"format_version\": 3"),
-        "serialized JSON should contain format_version 3, got: {json}"
+        json.contains("\"format_version\": 4"),
+        "serialized JSON should contain format_version 4, got: {json}"
     );
 }
 

@@ -24,8 +24,8 @@ use egui;
 use viewport_poc::app_state::AppMessage;
 use viewport_poc::edit_model::MemberId;
 use viewport_poc::section_def::{
-    outline, GeometryProperties, MaterialPreset, SectionDef, SectionKind, SectionMaterial,
-    TorsionProperties,
+    GeometryProperties, MaterialPreset, SectionDef, SectionKind, SectionMaterial,
+    TorsionProperties, outline,
 };
 use viewport_poc::selection::SelectionState;
 
@@ -286,9 +286,7 @@ pub fn show_section_module(app: &mut ViewportApp, ui: &mut egui::Ui) {
         Some(cache) => draw_preview(ui, cache, pal),
         None => {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("(no valid geometry to preview)").color(text.error),
-                );
+                ui.label(egui::RichText::new("(no valid geometry to preview)").color(text.error));
             });
         }
     }
@@ -328,31 +326,29 @@ fn shape_controls(state: &mut SectionEditorState, ui: &mut egui::Ui, text: TextP
             ui.add_space(4.0);
 
             let p = &mut state.def.params;
-            ui.horizontal_wrapped(|ui| {
-                match state.def.kind {
-                    SectionKind::Rectangle | SectionKind::Triangle => {
-                        dim(ui, "Width", &mut p.width);
-                        dim(ui, "Height", &mut p.height);
-                    }
-                    SectionKind::Circle => {
-                        dim(ui, "Diameter", &mut p.diameter);
-                    }
-                    SectionKind::Tube => {
-                        dim(ui, "Diameter", &mut p.diameter);
-                        dim(ui, "Wall t", &mut p.thickness);
-                    }
-                    SectionKind::Box => {
-                        dim(ui, "Width", &mut p.width);
-                        dim(ui, "Height", &mut p.height);
-                        dim(ui, "Wall t", &mut p.thickness);
-                    }
-                    SectionKind::IBeam => {
-                        dim(ui, "Depth h", &mut p.height);
-                        dim(ui, "Flange b", &mut p.width);
-                        dim(ui, "Web tw", &mut p.web_thickness);
-                        dim(ui, "Flange tf", &mut p.thickness);
-                        dim(ui, "Root r", &mut p.radius);
-                    }
+            ui.horizontal_wrapped(|ui| match state.def.kind {
+                SectionKind::Rectangle | SectionKind::Triangle => {
+                    dim(ui, "Width", &mut p.width);
+                    dim(ui, "Height", &mut p.height);
+                }
+                SectionKind::Circle => {
+                    dim(ui, "Diameter", &mut p.diameter);
+                }
+                SectionKind::Tube => {
+                    dim(ui, "Diameter", &mut p.diameter);
+                    dim(ui, "Wall t", &mut p.thickness);
+                }
+                SectionKind::Box => {
+                    dim(ui, "Width", &mut p.width);
+                    dim(ui, "Height", &mut p.height);
+                    dim(ui, "Wall t", &mut p.thickness);
+                }
+                SectionKind::IBeam => {
+                    dim(ui, "Depth h", &mut p.height);
+                    dim(ui, "Flange b", &mut p.width);
+                    dim(ui, "Web tw", &mut p.web_thickness);
+                    dim(ui, "Flange tf", &mut p.thickness);
+                    dim(ui, "Root r", &mut p.radius);
                 }
             });
             ui.label(
@@ -391,7 +387,8 @@ fn material_controls(state: &mut SectionEditorState, ui: &mut egui::Ui) {
                             );
                         }
                     });
-                if state.def.material.preset != before && state.def.material.preset != MaterialPreset::Custom
+                if state.def.material.preset != before
+                    && state.def.material.preset != MaterialPreset::Custom
                 {
                     // Adopt the preset's numbers into the custom slots so a
                     // later switch to Custom starts from sensible values.
@@ -460,13 +457,43 @@ fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui, text: TextP
             ui.strong("Other");
             ui.end_row();
 
-            row(ui, "A", format!("{:.6e} m²", p.area), format!("{:.1} mm²", p.area * 1e6));
-            row(ui, "Iy (local y)", format!("{:.6e} m⁴", p.iy), format!("{:.1} mm⁴", p.iy * 1e12));
-            row(ui, "Iz (local z)", format!("{:.6e} m⁴", p.iz), format!("{:.1} mm⁴", p.iz * 1e12));
+            row(
+                ui,
+                "A",
+                format!("{:.6e} m²", p.area),
+                format!("{:.1} mm²", p.area * 1e6),
+            );
+            row(
+                ui,
+                "Iy (local y)",
+                format!("{:.6e} m⁴", p.iy),
+                format!("{:.1} mm⁴", p.iy * 1e12),
+            );
+            row(
+                ui,
+                "Iz (local z)",
+                format!("{:.6e} m⁴", p.iz),
+                format!("{:.1} mm⁴", p.iz * 1e12),
+            );
             row(ui, "Ixy", format!("{:.6e} m⁴", p.ixy), String::new());
-            row(ui, "I11 (major)", format!("{:.6e} m⁴", p.i11), String::new());
-            row(ui, "I22 (minor)", format!("{:.6e} m⁴", p.i22), String::new());
-            row(ui, "φ", format!("{:.4} rad", p.phi), format!("{:.3}°", p.phi.to_degrees()));
+            row(
+                ui,
+                "I11 (major)",
+                format!("{:.6e} m⁴", p.i11),
+                String::new(),
+            );
+            row(
+                ui,
+                "I22 (minor)",
+                format!("{:.6e} m⁴", p.i22),
+                String::new(),
+            );
+            row(
+                ui,
+                "φ",
+                format!("{:.4} rad", p.phi),
+                format!("{:.3}°", p.phi.to_degrees()),
+            );
             row(
                 ui,
                 "Centroid",
@@ -494,8 +521,18 @@ fn property_table(state: &mut SectionEditorState, ui: &mut egui::Ui, text: TextP
                     .spacing([10.0, 3.0])
                     .striped(true)
                     .show(ui, |ui| {
-                        row(ui, "J (torsion)", format!("{:.6e} m⁴", t.j), format!("{:.1} mm⁴", t.j * 1e12));
-                        row(ui, "Iw (warping)", format!("{:.6e} m⁶", t.iw), String::new());
+                        row(
+                            ui,
+                            "J (torsion)",
+                            format!("{:.6e} m⁴", t.j),
+                            format!("{:.1} mm⁴", t.j * 1e12),
+                        );
+                        row(
+                            ui,
+                            "Iw (warping)",
+                            format!("{:.6e} m⁶", t.iw),
+                            String::new(),
+                        );
                         row(ui, "G·J", format!("{:.4e} N·m²", t.gj), String::new());
                     });
             }
@@ -555,10 +592,7 @@ fn bind_controls(app: &mut ViewportApp, ui: &mut egui::Ui, text: TextPalette) {
     };
 
     let ready = target.is_some() && torsion.is_some();
-    let response = ui.add_enabled(
-        ready,
-        egui::Button::new("Apply to selected member"),
-    );
+    let response = ui.add_enabled(ready, egui::Button::new("Apply to selected member"));
 
     if target.is_none() {
         response
@@ -630,14 +664,23 @@ fn draw_preview(ui: &mut egui::Ui, cache: &GeometryCache, pal: ViewportPalette) 
         }
         let pts: Vec<egui::Pos2> = loop_pts.iter().map(|p| to_screen(*p)).collect();
         let color = if i == 0 { pal.member } else { pal.help };
-        painter.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.5_f32, color)));
+        painter.add(egui::Shape::closed_line(
+            pts,
+            egui::Stroke::new(1.5_f32, color),
+        ));
     }
 
     // Centroid crosshair.
     let c = to_screen([cache.props.cx, cache.props.cy]);
     let stroke = egui::Stroke::new(1.0_f32, pal.node);
-    painter.line_segment([egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x + 4.0, c.y)], stroke);
-    painter.line_segment([egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x, c.y + 4.0)], stroke);
+    painter.line_segment(
+        [egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x + 4.0, c.y)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x, c.y + 4.0)],
+        stroke,
+    );
 }
 
 fn outline_min(loops: &[Vec<[f64; 2]>]) -> [f64; 2] {
@@ -648,11 +691,7 @@ fn outline_min(loops: &[Vec<[f64; 2]>]) -> [f64; 2] {
             m[1] = m[1].min(p[1]);
         }
     }
-    if m[0].is_finite() {
-        m
-    } else {
-        [0.0, 0.0]
-    }
+    if m[0].is_finite() { m } else { [0.0, 0.0] }
 }
 
 fn outline_max(loops: &[Vec<[f64; 2]>]) -> [f64; 2] {
@@ -663,9 +702,5 @@ fn outline_max(loops: &[Vec<[f64; 2]>]) -> [f64; 2] {
             m[1] = m[1].max(p[1]);
         }
     }
-    if m[0].is_finite() {
-        m
-    } else {
-        [0.0, 0.0]
-    }
+    if m[0].is_finite() { m } else { [0.0, 0.0] }
 }

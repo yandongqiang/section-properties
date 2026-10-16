@@ -10,6 +10,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 structural-analysis = { path = "../../crates/structural-analysis" }
 section-properties = { path = "../../crates/section-properties" }
+rfd = "0.15"
+
+# Windows 11 native rounded window corners (Change 1).  Direct dependency added
+# for `DwmSetWindowAttribute` + the window-lookup calls only; the same 0.59.0
+# version is already in the tree via `rfd`, so this downloads nothing new.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 structural-analysis = { path = "../../crates/structural-analysis" }

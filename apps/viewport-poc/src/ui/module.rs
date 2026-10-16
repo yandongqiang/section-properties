@@ -6,6 +6,7 @@
 
 use egui;
 
+use super::theme;
 use crate::ViewportApp;
 
 /// The active work module.
@@ -53,11 +54,8 @@ pub fn show_module_tabs(app: &mut ViewportApp, ctx: &egui::Context) {
             ui.add_space(2.0);
             for module in WorkModule::ALL {
                 let selected = app.module == module;
-                let text = egui::RichText::new(module.label()).strong();
-                if ui
-                    .add(egui::SelectableLabel::new(selected, text))
-                    .clicked()
-                {
+                let text = theme::header(module.label());
+                if ui.add(egui::SelectableLabel::new(selected, text)).clicked() {
                     app.module = module;
                 }
             }

@@ -1,17 +1,22 @@
-//! Left-hand hierarchical model browser (MIDAS-style tree).
+//! Left-hand **Project** panel (Zed-like).
 //!
-//! The tree is the primary left panel in every module.  Clicking a leaf
-//! selects the corresponding entity through the existing
-//! [`SelectionState`](viewport_poc::selection::SelectionState).
+//! The panel header is "Project"; under it sits the "Project file" path
+//! section (open / save) and the **Model Explorer**, whose groups are
+//! `Nodes`, `Members`, `Supports` and `Loads`.  Clicking a leaf selects the
+//! corresponding entity through the authoritative
+//! [`SelectionSet`](viewport_poc::selection::SelectionSet).
+//!
+//! The panel is collapsible; its width is preserved when reopened through the
+//! shared layout-preset mechanism (Phase P7-3 / 159-B).
 
 use egui;
 
-use structural_analysis::FrameAnalysisResult3D;
-use viewport_poc::display::{displacement_magnitudes, fmt_eng};
 use viewport_poc::edit_model::EditModel;
 use viewport_poc::selection::{SelectionSet, SelectionState};
 
+use super::icons;
 use super::layout;
+use super::theme;
 use crate::ViewportApp;
 
 /// Smallest the left panel may be dragged.  Keeps the resize handle grabbable.
@@ -26,14 +31,20 @@ const TREE_DEFAULT_FRACTION: f32 = 0.2;
 /// never swallow the viewport.
 const TREE_MAX_FRACTION: f32 = 0.45;
 
-/// Draw the left model-browser panel.
+/// Draw the left Project panel.
 pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
+    // A collapsed panel is not created at all, so the viewport reclaims its
+    // space with no residual gap (matching the right / bottom panels).
+    if app.left_panel_collapsed {
+        return;
+    }
     let window_w = ctx.screen_rect().width();
     let max_w = (window_w * TREE_MAX_FRACTION).max(TREE_DEFAULT_MAX);
     // Phase P7-3 C2: a persisted layout preset overrides the window-fraction
     // default width (egui still clamps it into the panel's allowed range).
-    let default_w = layout::restored_tree_width(ctx)
-        .unwrap_or_else(|| (window_w * TREE_DEFAULT_FRACTION).clamp(TREE_DEFAULT_MIN, TREE_DEFAULT_MAX));
+    let default_w = layout::restored_tree_width(ctx).unwrap_or_else(|| {
+        (window_w * TREE_DEFAULT_FRACTION).clamp(TREE_DEFAULT_MIN, TREE_DEFAULT_MAX)
+    });
 
     egui::SidePanel::left("model_tree")
         .resizable(true)
@@ -41,18 +52,34 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
         .max_width(max_w)
         .default_width(default_w)
         .show(ctx, |ui| {
-            ui.heading("Model Browser");
+            // Compact panel header: leading glyph + label + trailing Hide.
+            theme::panel_header(ui, icons::panel_left, "Project", |ui| {
+                if ui
+                    .button("\u{25c0} Hide")
+                    .on_hover_text("Hide the Project panel")
+                    .clicked()
+                {
+                    app.left_panel_collapsed = true;
+                }
+            });
             ui.separator();
 
+            // File controls are drawn *above* the scrolling tree so they are
+            // always visible: the tree's ScrollArea fills the remaining panel
+            // height (egui `auto_shrink([false, false])`), which would otherwise
+            // push this section below the fold and make it unreachable.
+            project_file_section(app, ui);
+            ui.separator();
+            ui.label(theme::header("Model Explorer"));
+
             let selection = app.selected.clone();
-            let result = app.analysis_result();
             let mut clicked: Option<SelectionState> = None;
 
             if let Some(model) = app.project.model.as_ref() {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        clicked = render_tree(ui, model, result, &selection);
+                        clicked = render_tree(ui, model, &selection);
                     });
             } else {
                 ui.label("No model loaded");
@@ -71,9 +98,6 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
                 }
             }
 
-            ui.separator();
-            project_file_section(app, ui);
-
             // Publish the live panel width for layout-preset persistence
             // (Phase P7-3 C2).  `ui.max_rect()` is the panel's *inner* rect;
             // add the frame's inner margin back to recover the outer width.
@@ -85,26 +109,23 @@ pub fn show_model_tree(app: &mut ViewportApp, ctx: &egui::Context) {
         });
 }
 
-/// Render all tree branches, returning any newly requested selection.
+/// Render the Model Explorer groups, returning any newly requested selection.
+///
+/// Groups are `Nodes`, `Members`, `Supports` and `Loads` (Phase 159-B, B3).
+/// The former Materials / Sections / Results branches are gone: their content
+/// is available in the Inspector (Section / Results modules), the Outline mode
+/// and the bottom Results tab, so no capability is lost.
 fn render_tree(
     ui: &mut egui::Ui,
     model: &EditModel,
-    result: Option<&FrameAnalysisResult3D>,
     selection: &SelectionSet,
 ) -> Option<SelectionState> {
     let mut clicked: Option<SelectionState> = None;
 
-    egui::CollapsingHeader::new("Model")
-        .default_open(true)
-        .show(ui, |ui| {
-            nodes_branch(ui, model, selection, &mut clicked);
-            members_branch(ui, model, selection, &mut clicked);
-            materials_branch(ui, model, selection, &mut clicked);
-            sections_branch(ui, model, selection, &mut clicked);
-            supports_branch(ui, model, selection, &mut clicked);
-            loads_branch(ui, model, selection, &mut clicked);
-            results_branch(ui, model, result);
-        });
+    nodes_branch(ui, model, selection, &mut clicked);
+    members_branch(ui, model, selection, &mut clicked);
+    supports_branch(ui, model, selection, &mut clicked);
+    loads_branch(ui, model, selection, &mut clicked);
 
     clicked
 }
@@ -159,65 +180,21 @@ fn members_branch(
                 } else {
                     String::new()
                 };
-                let text = format!(
-                    "M{}: N{} \u{2192} N{}{}{}",
-                    member.id.0, member.node_i.0, member.node_j.0, load_label, point_label
-                );
-                if ui.selectable_label(is_sel, text).clicked() {
-                    *clicked = Some(SelectionState::Member(member.id));
-                }
-            }
-        });
-}
-
-fn materials_branch(
-    ui: &mut egui::Ui,
-    model: &EditModel,
-    selection: &SelectionSet,
-    clicked: &mut Option<SelectionState>,
-) {
-    egui::CollapsingHeader::new(format!("Materials ({})", model.n_members()))
-        .default_open(false)
-        .show(ui, |ui| {
-            for member in model.members() {
-                let Some(sec) = model.member_section(member.id) else {
-                    continue;
+                // Pin marker for rotational end releases (MIDAS-style).
+                let release_label = match EditModel::release_label(member.releases) {
+                    Some("Pin i") => " [\u{25cb}i]".to_string(),
+                    Some("Pin j") => " [\u{25cb}j]".to_string(),
+                    Some(_) => " [\u{25cb}i+j]".to_string(),
+                    None => String::new(),
                 };
-                let is_sel = selection.contains_member(member.id);
                 let text = format!(
-                    "M{}: E={:.3e} G={:.3e}",
+                    "M{}: N{} \u{2192} N{}{}{}{}",
                     member.id.0,
-                    sec.E(),
-                    sec.G()
-                );
-                if ui.selectable_label(is_sel, text).clicked() {
-                    *clicked = Some(SelectionState::Member(member.id));
-                }
-            }
-        });
-}
-
-fn sections_branch(
-    ui: &mut egui::Ui,
-    model: &EditModel,
-    selection: &SelectionSet,
-    clicked: &mut Option<SelectionState>,
-) {
-    egui::CollapsingHeader::new(format!("Sections ({})", model.n_members()))
-        .default_open(false)
-        .show(ui, |ui| {
-            for member in model.members() {
-                let Some(sec) = model.member_section(member.id) else {
-                    continue;
-                };
-                let is_sel = selection.contains_member(member.id);
-                let text = format!(
-                    "M{}: A={:.3e} Iy={:.3e} Iz={:.3e} J={:.3e}",
-                    member.id.0,
-                    sec.area(),
-                    sec.iy(),
-                    sec.iz(),
-                    sec.j()
+                    member.node_i.0,
+                    member.node_j.0,
+                    load_label,
+                    point_label,
+                    release_label
                 );
                 if ui.selectable_label(is_sel, text).clicked() {
                     *clicked = Some(SelectionState::Member(member.id));
@@ -330,45 +307,33 @@ fn loads_branch(
         });
 }
 
-fn results_branch(
-    ui: &mut egui::Ui,
-    model: &EditModel,
-    result: Option<&FrameAnalysisResult3D>,
-) {
-    egui::CollapsingHeader::new("Results")
-        .default_open(false)
-        .show(ui, |ui| {
-            let Some(result) = result else {
-                ui.label("(no current result \u{2014} solve first)");
-                return;
-            };
-            let mags = displacement_magnitudes(&result.displacements, model.n_nodes());
-            ui.label("Nodal |u|:");
-            for (i, node) in model.nodes().iter().enumerate() {
-                let mag = mags.get(i).copied().unwrap_or(0.0);
-                ui.label(format!("N{}: {}", node.id.0, fmt_eng(mag)));
-            }
-            ui.separator();
-            ui.label("Member end forces:");
-            for (i, member) in model.members().iter().enumerate() {
-                let peak = result
-                    .member_end_forces_global(i)
-                    .ok()
-                    .map(|f| f.iter().fold(0.0_f64, |a, b| a.max(b.abs())))
-                    .unwrap_or(0.0);
-                ui.label(format!("M{}: |F|max = {}", member.id.0, fmt_eng(peak)));
-            }
-        });
-}
-
-/// File path / open / save controls, kept at the bottom of the browser.
+/// File path / open / save controls, pinned to the top of the browser so they
+/// are always visible.
+///
+/// A dead-ended **Open** / **Save** (no usable path) raises
+/// [`ViewportApp::focus_project_path`]; the section is then forced open and its
+/// field focused, so the command guides the user to type a path instead of
+/// erroring.  The flag is only cleared once the field has actually been drawn
+/// and focused — the header's open *animation* can delay the body by a frame —
+/// and a request raised by a button inside this section survives to the next
+/// frame.
 fn project_file_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
     let text = super::theme::TextPalette::for_theme(app.dark_mode);
+    let reveal = app.focus_project_path;
     egui::CollapsingHeader::new("Project file")
         .default_open(false)
+        .open(reveal.then_some(true))
         .show(ui, |ui| {
             ui.label("File path:");
-            ui.text_edit_singleline(&mut app.file_path_input);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.file_path_input)
+                    .hint_text("path to a .saproject file"),
+            );
+            if app.focus_project_path {
+                response.request_focus();
+                // Consumed only now that the field is really on screen.
+                app.focus_project_path = false;
+            }
             ui.horizontal(|ui| {
                 if ui.button("Open").clicked() {
                     app.request_open();
@@ -386,4 +351,55 @@ fn project_file_section(app: &mut ViewportApp, ui: &mut egui::Ui) {
                 ui.label(egui::RichText::new("\u{2713} Saved").color(text.ok));
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use viewport_poc::persistence;
+
+    fn app() -> ViewportApp {
+        ViewportApp::new(
+            persistence::AppSettings::default(),
+            std::path::PathBuf::from("unused-settings.json"),
+            None,
+        )
+    }
+
+    /// Run one headless frame of the left panel.
+    fn frame(app: &mut ViewportApp, ctx: &egui::Context) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            show_model_tree(app, ctx);
+        });
+    }
+
+    #[test]
+    fn reveal_expands_and_focuses_the_project_file_field() {
+        let mut app = app();
+        app.focus_project_path = true;
+        let ctx = egui::Context::default();
+        // The section animates open, so the field only appears a few frames
+        // after the request; the flag is cleared exactly when it is focused.
+        for _ in 0..30 {
+            frame(&mut app, &ctx);
+            if !app.focus_project_path {
+                break;
+            }
+        }
+        assert!(
+            !app.focus_project_path,
+            "the reveal request must be consumed once the field is drawn"
+        );
+        assert!(
+            ctx.memory(|m| m.focused().is_some()),
+            "the revealed path field must take keyboard focus"
+        );
+    }
 }

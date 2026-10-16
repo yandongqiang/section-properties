@@ -660,7 +660,12 @@ mod tests {
         let all_nodes = [NodeId(0), NodeId(1), NodeId(2)];
         let all_members = [MemberId(0), MemberId(1)];
         let mut d = ResultDisplayState::default();
-        d.isolate_member(&all_nodes, &all_members, MemberId(0), &[NodeId(0), NodeId(1)]);
+        d.isolate_member(
+            &all_nodes,
+            &all_members,
+            MemberId(0),
+            &[NodeId(0), NodeId(1)],
+        );
         assert!(!d.is_member_hidden(MemberId(0)));
         assert!(d.is_member_hidden(MemberId(1)));
         assert!(!d.is_node_hidden(NodeId(0)));

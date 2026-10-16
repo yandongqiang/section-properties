@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### 3-D frame member end releases (pins)
+
+- Added `EndReleases3D`: rotational end releases (`rx`/`ry`/`rz` at each end)
+  for the 3-D frame element, applied by static condensation of the local
+  stiffness — a released rotation transmits no moment at that end.
+- `FrameElement3D::with_releases` / `releases()` / `set_releases()`, and
+  `FrameModel3D::set_member_releases` / `member_releases`.
+- End releases condense the consistent member-load vector as well, and
+  released DOFs report exactly zero end force while the joint's remaining
+  members carry the equilibrium.
+- Breaking-free: an element with no releases behaves bit-for-bit as before.
+
 ### Result / post-processing consistency
 
 - Added typed `LoadSource` with model-load, load-case and combination variants;

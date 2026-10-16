@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::edit_model::{
-    EditMember, EditModel, EditNode, MemberId, MemberPointLoad3D, MemberUniformLoad3D,
-    NodalLoadSpec, NodeId, SupportSpec,
+    ComboTerm, DEFAULT_DENSITY, EditLoadCase, EditLoadCombination, EditMember, EditModel, EditNode,
+    LoadCaseId, MemberId, MemberPointLoad3D, MemberUniformLoad3D, NodalLoadSpec, NodeId,
+    SupportSpec,
 };
 use crate::section_def::SectionDef;
 use structural_analysis::FrameSection3D;
@@ -29,7 +30,11 @@ use structural_analysis::FrameSection3D;
 // ── File format version ───────────────────────────────────────────────
 
 /// Currently supported file format version.
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+///
+/// Version 4 adds load cases, load combinations, per-member density and
+/// case-tagged loads.  Versions 1–3 remain loadable: every legacy load is
+/// migrated into load case 0 (`DL`) and members default to steel density.
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
 // ── DTO types ────────────────────────────────────────────────────────
 
@@ -73,6 +78,141 @@ pub struct MemberFileV1 {
     pub iy: f64,
     pub iz: f64,
     pub j: f64,
+}
+
+// ── V4 DTO types ─────────────────────────────────────────────────────
+
+/// Member DTO (version 4): the version-1 fields plus additive end releases
+/// (`[false; 6]` when absent, so old-style payloads keep loading).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct MemberFileV4 {
+    pub id: u32,
+    pub node_i: u32,
+    pub node_j: u32,
+    pub ref_vec: [f64; 3],
+    pub e: f64,
+    pub g: f64,
+    pub area: f64,
+    pub iy: f64,
+    pub iz: f64,
+    pub j: f64,
+    /// Rotational end releases `(rx_i, ry_i, rz_i, rx_j, ry_j, rz_j)`.
+    #[serde(default)]
+    pub releases: [bool; 6],
+}
+
+/// Model data within a project file (version 4).
+///
+/// The load-case fields (`load_cases`, `combinations`, `next_case_id`,
+/// `next_combination_id`) are the only *required* additions; the case tags
+/// on the load lists and the member densities are additive with defaults,
+/// so a version-4 file that predates those additions still loads.
+#[derive(Serialize, Deserialize)]
+pub struct ModelFileV4 {
+    pub next_node_id: u32,
+    pub next_member_id: u32,
+    pub nodes: Vec<NodeFileV1>,
+    pub members: Vec<MemberFileV4>,
+    #[serde(default)]
+    pub member_densities: Vec<MemberDensityFileV4>,
+    pub supports: Vec<SupportFileV1>,
+    #[serde(default)]
+    pub load_cases: Vec<LoadCaseFileV4>,
+    #[serde(default)]
+    pub combinations: Vec<LoadCombinationFileV4>,
+    #[serde(default)]
+    pub next_case_id: u32,
+    #[serde(default)]
+    pub next_combination_id: u32,
+    /// Case-tagged nodal loads; a missing `case` tag means load case 0.
+    #[serde(default)]
+    pub nodal_loads: Vec<NodalLoadFileV4>,
+    /// Case-tagged member uniform loads.
+    #[serde(default)]
+    pub member_uniform_loads: Vec<MemberUniformLoadFileV4>,
+    /// Case-tagged member point loads.
+    #[serde(default)]
+    pub member_point_loads: Vec<MemberPointLoadFileV4>,
+}
+
+/// Nodal load DTO (version 4): the version-1 fields plus its case tag.
+#[derive(Serialize, Deserialize)]
+pub struct NodalLoadFileV4 {
+    pub node_id: u32,
+    #[serde(default)]
+    pub case: u32,
+    pub fx: f64,
+    pub fy: f64,
+    pub fz: f64,
+    pub mx: f64,
+    pub my: f64,
+    pub mz: f64,
+}
+
+/// Member uniform load DTO (version 4).
+#[derive(Serialize, Deserialize)]
+pub struct MemberUniformLoadFileV4 {
+    pub member_id: u32,
+    #[serde(default)]
+    pub case: u32,
+    pub qx: f64,
+    pub qy: f64,
+    pub qz: f64,
+}
+
+/// Member point load DTO (version 4).
+#[derive(Serialize, Deserialize)]
+pub struct MemberPointLoadFileV4 {
+    pub member_id: u32,
+    #[serde(default)]
+    pub case: u32,
+    pub xi: f64,
+    pub fx: f64,
+    pub fy: f64,
+    pub fz: f64,
+}
+
+/// Member mass density (kg/m³) entry, keyed by member ID.
+#[derive(Serialize, Deserialize)]
+pub struct MemberDensityFileV4 {
+    pub member_id: u32,
+    pub density: f64,
+}
+
+/// Load case DTO (version 4).
+#[derive(Serialize, Deserialize)]
+pub struct LoadCaseFileV4 {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub self_weight: bool,
+}
+
+/// One term of a load combination DTO (version 4).
+#[derive(Serialize, Deserialize)]
+pub struct ComboTermFileV4 {
+    pub case: u32,
+    pub factor: f64,
+}
+
+/// Load combination DTO (version 4).
+#[derive(Serialize, Deserialize)]
+pub struct LoadCombinationFileV4 {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub terms: Vec<ComboTermFileV4>,
+}
+
+/// Top-level project file (version 4).
+///
+/// Like [`ProjectFileV3`], the `section` field is **additive and optional**.
+#[derive(Serialize, Deserialize)]
+pub struct ProjectFileV4 {
+    pub format_version: u32,
+    pub model: ModelFileV4,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionDef>,
 }
 
 /// Support DTO.
@@ -206,7 +346,7 @@ impl std::error::Error for PersistenceError {}
 
 // ── DTO conversion: EditModel → DTO ──────────────────────────────────
 
-fn model_to_dto(model: &EditModel) -> ModelFileV1 {
+fn model_to_dto_v4(model: &EditModel) -> ModelFileV4 {
     let nodes: Vec<NodeFileV1> = model
         .nodes()
         .iter()
@@ -218,10 +358,10 @@ fn model_to_dto(model: &EditModel) -> ModelFileV1 {
         })
         .collect();
 
-    let members: Vec<MemberFileV1> = model
+    let members: Vec<MemberFileV4> = model
         .members()
         .iter()
-        .map(|m| MemberFileV1 {
+        .map(|m| MemberFileV4 {
             id: m.id.0,
             node_i: m.node_i.0,
             node_j: m.node_j.0,
@@ -232,6 +372,19 @@ fn model_to_dto(model: &EditModel) -> ModelFileV1 {
             iy: m.section.iy(),
             iz: m.section.iz(),
             j: m.section.j(),
+            releases: m.releases,
+        })
+        .collect();
+
+    // Only non-default densities are written, so a model with uniform
+    // (steel) members serializes compactly and a hand-written file stays valid.
+    let member_densities: Vec<MemberDensityFileV4> = model
+        .members()
+        .iter()
+        .filter(|m| m.density != DEFAULT_DENSITY)
+        .map(|m| MemberDensityFileV4 {
+            member_id: m.id.0,
+            density: m.density,
         })
         .collect();
 
@@ -244,11 +397,41 @@ fn model_to_dto(model: &EditModel) -> ModelFileV1 {
         })
         .collect();
 
-    let nodal_loads: Vec<NodalLoadFileV1> = model
-        .nodal_loads()
+    let load_cases: Vec<LoadCaseFileV4> = model
+        .load_cases()
         .iter()
-        .map(|(nid, load)| NodalLoadFileV1 {
+        .map(|c| LoadCaseFileV4 {
+            id: c.id.0,
+            name: c.name.clone(),
+            self_weight: c.self_weight,
+        })
+        .collect();
+
+    let combinations: Vec<LoadCombinationFileV4> = model
+        .combinations()
+        .iter()
+        .map(|c| LoadCombinationFileV4 {
+            id: c.id.0,
+            name: c.name.clone(),
+            terms: c
+                .terms
+                .iter()
+                .map(|t| ComboTermFileV4 {
+                    case: t.case.0,
+                    factor: t.factor,
+                })
+                .collect(),
+        })
+        .collect();
+
+    // Loads carry the case they belong to, so round-tripping preserves
+    // every case exactly (the active-case selection is view state, not data).
+    let nodal_loads: Vec<NodalLoadFileV4> = model
+        .nodal_loads_all()
+        .iter()
+        .map(|(nid, load, case)| NodalLoadFileV4 {
             node_id: nid.0,
+            case: case.0,
             fx: load.fx,
             fy: load.fy,
             fz: load.fz,
@@ -258,51 +441,47 @@ fn model_to_dto(model: &EditModel) -> ModelFileV1 {
         })
         .collect();
 
-    ModelFileV1 {
-        next_node_id: model.next_node_id(),
-        next_member_id: model.next_member_id(),
-        nodes,
-        members,
-        supports,
-        nodal_loads,
-    }
-}
-
-fn model_to_dto_v3(model: &EditModel) -> ModelFileV3 {
-    let v1 = model_to_dto(model);
-    let member_uniform_loads: Vec<MemberUniformLoadFileV2> = model
-        .member_uniform_loads()
+    let member_uniform_loads: Vec<MemberUniformLoadFileV4> = model
+        .member_uniform_loads_all()
         .iter()
-        .map(|(mid, load)| MemberUniformLoadFileV2 {
+        .map(|(mid, load, case)| MemberUniformLoadFileV4 {
             member_id: mid.0,
+            case: case.0,
             qx: load.qx,
             qy: load.qy,
             qz: load.qz,
         })
         .collect();
-    let member_point_loads: Vec<MemberPointLoadFileV3> = model
-        .member_point_loads()
+
+    let member_point_loads: Vec<MemberPointLoadFileV4> = model
+        .member_point_loads_all()
         .iter()
-        .map(|(mid, load)| MemberPointLoadFileV3 {
+        .map(|(mid, load, case)| MemberPointLoadFileV4 {
             member_id: mid.0,
+            case: case.0,
             xi: load.xi,
             fx: load.fx,
             fy: load.fy,
             fz: load.fz,
         })
         .collect();
-    ModelFileV3 {
-        next_node_id: v1.next_node_id,
-        next_member_id: v1.next_member_id,
-        nodes: v1.nodes,
-        members: v1.members,
-        supports: v1.supports,
-        nodal_loads: v1.nodal_loads,
+
+    ModelFileV4 {
+        next_node_id: model.next_node_id(),
+        next_member_id: model.next_member_id(),
+        next_case_id: model.next_load_case_id(),
+        next_combination_id: model.next_combination_id(),
+        nodes,
+        members,
+        member_densities,
+        supports,
+        load_cases,
+        combinations,
+        nodal_loads,
         member_uniform_loads,
         member_point_loads,
     }
 }
-
 // ── DTO conversion: DTO → EditModel (with validation) ────────────────
 
 fn dto_to_model(dto: &ModelFileV1) -> Result<EditModel, PersistenceError> {
@@ -329,6 +508,8 @@ fn dto_to_model(dto: &ModelFileV1) -> Result<EditModel, PersistenceError> {
             ref_vec: m.ref_vec,
             section: FrameSection3D::new(m.e, m.g, m.area, m.iy, m.iz, m.j)
                 .expect("validated above"),
+            density: DEFAULT_DENSITY,
+            releases: [false; 6],
         })
         .collect();
 
@@ -356,7 +537,7 @@ fn dto_to_model(dto: &ModelFileV1) -> Result<EditModel, PersistenceError> {
         })
         .collect();
 
-    Ok(EditModel::from_parts(
+    Ok(EditModel::from_parts_single_case(
         nodes,
         members,
         supports,
@@ -427,6 +608,8 @@ fn dto_v2_to_model(dto: &ModelFileV2) -> Result<EditModel, PersistenceError> {
             ref_vec: m.ref_vec,
             section: FrameSection3D::new(m.e, m.g, m.area, m.iy, m.iz, m.j)
                 .expect("validated above"),
+            density: DEFAULT_DENSITY,
+            releases: [false; 6],
         })
         .collect();
 
@@ -469,7 +652,7 @@ fn dto_v2_to_model(dto: &ModelFileV2) -> Result<EditModel, PersistenceError> {
         })
         .collect();
 
-    Ok(EditModel::from_parts(
+    Ok(EditModel::from_parts_single_case(
         nodes,
         members,
         supports,
@@ -562,6 +745,8 @@ fn dto_v3_to_model(dto: &ModelFileV3) -> Result<EditModel, PersistenceError> {
             ref_vec: m.ref_vec,
             section: FrameSection3D::new(m.e, m.g, m.area, m.iy, m.iz, m.j)
                 .expect("validated above"),
+            density: DEFAULT_DENSITY,
+            releases: [false; 6],
         })
         .collect();
 
@@ -620,7 +805,7 @@ fn dto_v3_to_model(dto: &ModelFileV3) -> Result<EditModel, PersistenceError> {
         })
         .collect();
 
-    Ok(EditModel::from_parts(
+    Ok(EditModel::from_parts_single_case(
         nodes,
         members,
         supports,
@@ -630,6 +815,359 @@ fn dto_v3_to_model(dto: &ModelFileV3) -> Result<EditModel, PersistenceError> {
         dto.next_node_id,
         dto.next_member_id,
     ))
+}
+
+// ── DTO conversion: V4 DTO → EditModel (with validation) ─────────────
+
+/// Convert a version-4 model DTO to an [`EditModel`], validating fully
+/// before any construction (the legacy DTO-level checks in
+/// [`validate_dto`] run first, so the total count of nodes / members /
+/// supports and the load-to-entity references are already known sane).
+fn dto_v4_to_model(dto: &ModelFileV4) -> Result<EditModel, PersistenceError> {
+    use PersistenceError::Validation as V;
+
+    // Reuse the legacy structural validation (IDs, finiteness, endpoints,
+    // supports) by projecting down to a V1 view.
+    validate_dto(&ModelFileV1 {
+        next_node_id: dto.next_node_id,
+        next_member_id: dto.next_member_id,
+        nodes: dto.nodes.clone(),
+        members: dto
+            .members
+            .iter()
+            .map(|m| MemberFileV1 {
+                id: m.id,
+                node_i: m.node_i,
+                node_j: m.node_j,
+                ref_vec: m.ref_vec,
+                e: m.e,
+                g: m.g,
+                area: m.area,
+                iy: m.iy,
+                iz: m.iz,
+                j: m.j,
+            })
+            .collect(),
+        supports: dto.supports.clone(),
+        nodal_loads: Vec::new(),
+    })?;
+
+    let node_exists = |id: u32| dto.nodes.iter().any(|n| n.id == id);
+    let member_exists = |id: u32| dto.members.iter().any(|m| m.id == id);
+
+    // ── Load cases: non-empty, unique IDs, unique non-empty names ──
+    if dto.load_cases.is_empty() {
+        return Err(V("model must define at least one load case".into()));
+    }
+    let mut seen_case_ids = std::collections::HashSet::new();
+    let mut seen_case_names = std::collections::HashSet::new();
+    for c in &dto.load_cases {
+        if !seen_case_ids.insert(c.id) {
+            return Err(V(format!("duplicate load case ID {}", c.id)));
+        }
+        if c.name.trim().is_empty() {
+            return Err(V(format!("load case {} has an empty name", c.id)));
+        }
+        if !seen_case_names.insert(c.name.clone()) {
+            return Err(V(format!("duplicate load case name '{}'", c.name)));
+        }
+    }
+    let max_case_id = dto.load_cases.iter().map(|c| c.id).max().unwrap_or(0);
+    if dto.next_case_id <= max_case_id {
+        return Err(V(format!(
+            "next_case_id {} must exceed the largest load case ID {}",
+            dto.next_case_id, max_case_id
+        )));
+    }
+
+    // ── Combinations: unique IDs/names, valid case references, finite factors ──
+    let mut seen_combo_ids = std::collections::HashSet::new();
+    let mut seen_combo_names = std::collections::HashSet::new();
+    for combo in &dto.combinations {
+        if !seen_combo_ids.insert(combo.id) {
+            return Err(V(format!("duplicate load combination ID {}", combo.id)));
+        }
+        if combo.name.trim().is_empty() {
+            return Err(V(format!(
+                "load combination {} has an empty name",
+                combo.id
+            )));
+        }
+        if !seen_combo_names.insert(combo.name.clone()) {
+            return Err(V(format!(
+                "duplicate load combination name '{}'",
+                combo.name
+            )));
+        }
+        for t in &combo.terms {
+            if !dto.load_cases.iter().any(|c| c.id == t.case) {
+                return Err(V(format!(
+                    "load combination '{}' references unknown load case {}",
+                    combo.name, t.case
+                )));
+            }
+            if !t.factor.is_finite() {
+                return Err(V(format!(
+                    "load combination '{}' has a non-finite factor for case {}",
+                    combo.name, t.case
+                )));
+            }
+        }
+    }
+    if let Some(max_combo_id) = dto.combinations.iter().map(|c| c.id).max() {
+        if dto.next_combination_id <= max_combo_id {
+            return Err(V(format!(
+                "next_combination_id {} must exceed the largest combination ID {}",
+                dto.next_combination_id, max_combo_id
+            )));
+        }
+    }
+
+    // ── Nodal / member loads: existing owners, existing cases, finite values ──
+    let case_exists = |id: u32| dto.load_cases.iter().any(|c| c.id == id);
+    let mut seen_loads = std::collections::HashSet::new();
+    for l in &dto.nodal_loads {
+        if !node_exists(l.node_id) {
+            return Err(V(format!(
+                "nodal load references nonexistent node {}",
+                l.node_id
+            )));
+        }
+        if !case_exists(l.case) {
+            return Err(V(format!(
+                "nodal load on node {} references unknown load case {}",
+                l.node_id, l.case
+            )));
+        }
+        if !seen_loads.insert((l.node_id, l.case)) {
+            return Err(V(format!(
+                "duplicate nodal load on node {} in case {}",
+                l.node_id, l.case
+            )));
+        }
+        if ![l.fx, l.fy, l.fz, l.mx, l.my, l.mz]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(V(format!(
+                "nodal load on node {} has non-finite values",
+                l.node_id
+            )));
+        }
+    }
+
+    let mut seen_uniform = std::collections::HashSet::new();
+    for ml in &dto.member_uniform_loads {
+        if !member_exists(ml.member_id) {
+            return Err(V(format!(
+                "member uniform load references nonexistent member {}",
+                ml.member_id
+            )));
+        }
+        if !case_exists(ml.case) {
+            return Err(V(format!(
+                "uniform load on member {} references unknown load case {}",
+                ml.member_id, ml.case
+            )));
+        }
+        if !seen_uniform.insert((ml.member_id, ml.case)) {
+            return Err(V(format!(
+                "duplicate uniform load on member {} in case {}",
+                ml.member_id, ml.case
+            )));
+        }
+        if ![ml.qx, ml.qy, ml.qz].iter().all(|v| v.is_finite()) {
+            return Err(V(format!(
+                "uniform load on member {} has non-finite values",
+                ml.member_id
+            )));
+        }
+    }
+
+    for pl in &dto.member_point_loads {
+        if !member_exists(pl.member_id) {
+            return Err(V(format!(
+                "member point load references nonexistent member {}",
+                pl.member_id
+            )));
+        }
+        if !case_exists(pl.case) {
+            return Err(V(format!(
+                "point load on member {} references unknown load case {}",
+                pl.member_id, pl.case
+            )));
+        }
+        if ![pl.xi, pl.fx, pl.fy, pl.fz].iter().all(|v| v.is_finite()) {
+            return Err(V(format!(
+                "point load on member {} has non-finite values",
+                pl.member_id
+            )));
+        }
+        if !(0.0..=1.0).contains(&pl.xi) {
+            return Err(V(format!(
+                "point load on member {} has xi = {} outside [0, 1]",
+                pl.member_id, pl.xi
+            )));
+        }
+    }
+
+    // ── Member densities: existing members, positive and finite ──
+    let mut seen_densities = std::collections::HashSet::new();
+    for d in &dto.member_densities {
+        if !member_exists(d.member_id) {
+            return Err(V(format!(
+                "density references nonexistent member {}",
+                d.member_id
+            )));
+        }
+        if !seen_densities.insert(d.member_id) {
+            return Err(V(format!("duplicate density for member {}", d.member_id)));
+        }
+        if !d.density.is_finite() || d.density <= 0.0 {
+            return Err(V(format!(
+                "density for member {} must be positive and finite",
+                d.member_id
+            )));
+        }
+    }
+    let density_of = |id: MemberId| -> f64 {
+        dto.member_densities
+            .iter()
+            .find(|d| d.member_id == id.0)
+            .map(|d| d.density)
+            .unwrap_or(DEFAULT_DENSITY)
+    };
+
+    // ── Build the model ──
+    let nodes: Vec<EditNode> = dto
+        .nodes
+        .iter()
+        .map(|n| EditNode {
+            id: NodeId(n.id),
+            x: n.x,
+            y: n.y,
+            z: n.z,
+        })
+        .collect();
+
+    let members: Vec<EditMember> = dto
+        .members
+        .iter()
+        .map(|m| EditMember {
+            id: MemberId(m.id),
+            node_i: NodeId(m.node_i),
+            node_j: NodeId(m.node_j),
+            ref_vec: m.ref_vec,
+            section: FrameSection3D::new(m.e, m.g, m.area, m.iy, m.iz, m.j)
+                .expect("validated above"),
+            density: density_of(MemberId(m.id)),
+            releases: m.releases,
+        })
+        .collect();
+
+    let supports: Vec<(NodeId, SupportSpec)> = dto
+        .supports
+        .iter()
+        .map(|s| (NodeId(s.node_id), SupportSpec::custom(s.dofs)))
+        .collect();
+
+    let load_cases: Vec<EditLoadCase> = dto
+        .load_cases
+        .iter()
+        .map(|c| EditLoadCase {
+            id: LoadCaseId(c.id),
+            name: c.name.clone(),
+            self_weight: c.self_weight,
+        })
+        .collect();
+
+    let combinations: Vec<EditLoadCombination> = dto
+        .combinations
+        .iter()
+        .map(|c| EditLoadCombination {
+            id: LoadCaseId(c.id),
+            name: c.name.clone(),
+            terms: c
+                .terms
+                .iter()
+                .map(|t| ComboTerm {
+                    case: LoadCaseId(t.case),
+                    factor: t.factor,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let nodal_loads: Vec<(NodeId, NodalLoadSpec, LoadCaseId)> = dto
+        .nodal_loads
+        .iter()
+        .map(|l| {
+            (
+                NodeId(l.node_id),
+                NodalLoadSpec {
+                    fx: l.fx,
+                    fy: l.fy,
+                    fz: l.fz,
+                    mx: l.mx,
+                    my: l.my,
+                    mz: l.mz,
+                },
+                LoadCaseId(l.case),
+            )
+        })
+        .collect();
+
+    let member_uniform_loads: Vec<(MemberId, MemberUniformLoad3D, LoadCaseId)> = dto
+        .member_uniform_loads
+        .iter()
+        .map(|ml| {
+            (
+                MemberId(ml.member_id),
+                MemberUniformLoad3D {
+                    qx: ml.qx,
+                    qy: ml.qy,
+                    qz: ml.qz,
+                },
+                LoadCaseId(ml.case),
+            )
+        })
+        .collect();
+
+    let member_point_loads: Vec<(MemberId, MemberPointLoad3D, LoadCaseId)> = dto
+        .member_point_loads
+        .iter()
+        .map(|pl| {
+            (
+                MemberId(pl.member_id),
+                MemberPointLoad3D {
+                    xi: pl.xi,
+                    fx: pl.fx,
+                    fy: pl.fy,
+                    fz: pl.fz,
+                },
+                LoadCaseId(pl.case),
+            )
+        })
+        .collect();
+
+    // The active case is view state: restore the first case rather than
+    // trusting a file-field that could have gone stale.
+    let model = EditModel::from_parts(
+        nodes,
+        members,
+        supports,
+        load_cases,
+        combinations,
+        LoadCaseId(dto.load_cases[0].id),
+        nodal_loads,
+        member_uniform_loads,
+        member_point_loads,
+        dto.next_case_id,
+        dto.next_combination_id,
+        dto.next_node_id,
+        dto.next_member_id,
+    );
+    Ok(model)
 }
 
 // ── Validation ───────────────────────────────────────────────────────
@@ -860,9 +1398,9 @@ pub fn serialize_project_with_section(
     model: &EditModel,
     section: Option<&SectionDef>,
 ) -> Result<String, PersistenceError> {
-    let file = ProjectFileV3 {
+    let file = ProjectFileV4 {
         format_version: CURRENT_FORMAT_VERSION,
-        model: model_to_dto_v3(model),
+        model: model_to_dto_v4(model),
         section: section.cloned(),
     };
     serde_json::to_string_pretty(&file).map_err(|e| PersistenceError::JsonError(e.to_string()))
@@ -871,8 +1409,9 @@ pub fn serialize_project_with_section(
 /// Deserialize a JSON string to an EditModel (dropping any section state).
 ///
 /// Supports version 1 (legacy, no member loads), version 2 (member
-/// uniform loads only), and version 3 (current, with member uniform
-/// and point loads plus optional Section-module state).
+/// uniform loads only), version 3 (member uniform and point loads), and
+/// version 4 (current: named load cases, load combinations, self-weight
+/// toggles, per-member density).
 pub fn deserialize_project(json: &str) -> Result<EditModel, PersistenceError> {
     Ok(deserialize_loaded_project(json)?.model)
 }
@@ -912,6 +1451,14 @@ pub fn deserialize_loaded_project(json: &str) -> Result<LoadedProject, Persisten
                 .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
             Ok(LoadedProject {
                 model: dto_v3_to_model(&file.model)?,
+                section: file.section,
+            })
+        }
+        4 => {
+            let file: ProjectFileV4 = serde_json::from_str(json)
+                .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+            Ok(LoadedProject {
+                model: dto_v4_to_model(&file.model)?,
                 section: file.section,
             })
         }
@@ -984,6 +1531,27 @@ pub fn load_project_with_section(path: &Path) -> Result<LoadedProject, Persisten
     deserialize_loaded_project(&contents)
 }
 
+// ── Project path resolution (Open / Save) ────────────────────────────
+
+/// Choose the project path for an Open / Save operation.
+///
+/// A non-empty `typed` path (exactly what the user entered in the "Project
+/// file" field) always wins; otherwise the caller-provided `known` path — the
+/// current project path, or the one remembered from a previous session — is
+/// used.  Returns `None` when neither is usable, so the caller can instead
+/// guide the user to enter a path (rather than dead-ending with an error).
+///
+/// Whitespace-only input counts as empty.  This is the single, testable rule
+/// behind "Open / Save never dead-end".
+pub fn choose_project_path(typed: &str, known: Option<&Path>) -> Option<PathBuf> {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        Some(PathBuf::from(typed))
+    } else {
+        known.map(Path::to_path_buf)
+    }
+}
+
 // ── App settings ─────────────────────────────────────────────────────
 
 /// Window geometry persisted between sessions (in egui points).
@@ -1010,6 +1578,16 @@ pub struct AppSettings {
     /// Last window size, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<WindowPrefs>,
+    /// Path of the most recently opened / saved project, if any.
+    ///
+    /// Additive, optional field: skipped when `None` (so settings files
+    /// written before this field existed stay byte-for-byte unchanged) and
+    /// defaulting to `None` when absent (so old files still load).  It lets
+    /// **Open** / **Save** work immediately on the next launch — and prefills
+    /// the "Project file" path field — instead of dead-ending with "no file
+    /// path".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_project_path: Option<String>,
 }
 
 /// Dark chrome is the historical default.
@@ -1022,6 +1600,7 @@ impl Default for AppSettings {
         Self {
             dark_mode: default_dark_mode(),
             window: None,
+            last_project_path: None,
         }
     }
 }
@@ -1039,21 +1618,40 @@ impl Default for AppSettings {
 /// theme is written by the settings save path on every toggle).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct LayoutPrefs {
-    /// Width of the left model-tree panel (points).
+    /// Width of the left Project panel (points).
     #[serde(default)]
     pub tree_width: Option<f32>,
     /// Width of the right inspector panel (points).
     #[serde(default)]
     pub inspector_width: Option<f32>,
-    /// Height of the bottom Messages / Results dock (points).
+    /// Height of the bottom Output dock (points).
     #[serde(default)]
     pub dock_height: Option<f32>,
-    /// Whether the inspector panel is collapsed.
+    /// Whether the left Project panel is collapsed (Phase 159-B).
+    ///
+    /// Additive, `#[serde(default)]` field: a settings file written before
+    /// this field existed still loads (defaulting to `false`, i.e. visible).
+    #[serde(default)]
+    pub tree_collapsed: bool,
+    /// Whether the right inspector panel is collapsed.
     #[serde(default)]
     pub inspector_collapsed: bool,
     /// Whether the bottom dock is collapsed.
     #[serde(default)]
     pub dock_collapsed: bool,
+    /// Active right-panel mode (Phase 159-D), stored as an index into the UI's
+    /// `RightPanelMode::ALL` list.
+    ///
+    /// Additive, `#[serde(default)]`, `Option`: settings files written before
+    /// this field load with `None`, and an out-of-range value is tolerated by
+    /// the reader (which falls back to the default mode).
+    ///
+    /// A legacy settings file may still carry the retired `workspace_tab` key
+    /// (the centre is now driven by the work module, so that view state is no
+    /// longer persisted): this struct does **not** use `deny_unknown_fields`,
+    /// so such a key is simply ignored on load.
+    #[serde(default)]
+    pub right_panel_mode: Option<u8>,
 }
 
 /// The per-user settings file path.
@@ -1108,8 +1706,8 @@ pub fn load_settings_or_default(path: &Path) -> (AppSettings, Option<String>) {
 /// function serializes the [`AppSettings`] fields and re-attaches any
 /// existing `"layout"` value, so the two writers never clobber each other.
 pub fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), PersistenceError> {
-    let mut json = serde_json::to_value(settings)
-        .map_err(|e| PersistenceError::JsonError(e.to_string()))?;
+    let mut json =
+        serde_json::to_value(settings).map_err(|e| PersistenceError::JsonError(e.to_string()))?;
     if let Some(layout) = read_layout_value(path)
         && let Some(obj) = json.as_object_mut()
     {
@@ -1374,6 +1972,7 @@ mod tests {
                 width: 1280.0,
                 height: 720.0,
             }),
+            last_project_path: None,
         };
         save_settings(&path, &settings).unwrap();
         let (loaded, warning) = load_settings_or_default(&path);
@@ -1399,7 +1998,10 @@ mod tests {
         std::fs::write(&path, b"{ this is not json").unwrap();
         let (loaded, warning) = load_settings_or_default(&path);
         assert_eq!(loaded, AppSettings::default());
-        assert!(warning.is_some(), "corrupt file must be reported, not masked");
+        assert!(
+            warning.is_some(),
+            "corrupt file must be reported, not masked"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1421,6 +2023,62 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn settings_remember_the_last_project_path() {
+        let path = std::env::temp_dir().join("test_settings_last_path.json");
+        let _ = std::fs::remove_file(&path);
+        let settings = AppSettings {
+            dark_mode: true,
+            window: None,
+            last_project_path: Some("D:/models/portal_frame.saproject".to_string()),
+        };
+        save_settings(&path, &settings).unwrap();
+        let (loaded, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(
+            loaded.last_project_path.as_deref(),
+            Some("D:/models/portal_frame.saproject")
+        );
+
+        // A settings file written before this field existed still loads, with
+        // the path defaulting to `None`.
+        std::fs::write(&path, br#"{"dark_mode":false}"#).unwrap();
+        let (legacy, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(legacy.last_project_path, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Project path resolution (Open / Save) ────────────────────────────
+
+    #[test]
+    fn choose_project_path_prefers_the_typed_path() {
+        let known = PathBuf::from("remembered.saproject");
+        assert_eq!(
+            choose_project_path("  typed.saproject  ", Some(&known)),
+            Some(PathBuf::from("typed.saproject")),
+            "a typed path wins, trimmed, over the known path"
+        );
+    }
+
+    #[test]
+    fn choose_project_path_falls_back_to_the_known_path() {
+        let known = PathBuf::from("remembered.saproject");
+        assert_eq!(choose_project_path("", Some(&known)), Some(known.clone()));
+        assert_eq!(
+            choose_project_path("   ", Some(&known)),
+            Some(known),
+            "whitespace-only input counts as empty"
+        );
+    }
+
+    #[test]
+    fn choose_project_path_is_none_when_nothing_is_known() {
+        assert_eq!(choose_project_path("", None), None);
+        assert_eq!(choose_project_path("  ", None), None);
+    }
+
     // ── Layout preset (additive extension of the settings file) ─────────
 
     fn sample_layout() -> LayoutPrefs {
@@ -1428,8 +2086,10 @@ mod tests {
             tree_width: Some(240.0),
             inspector_width: Some(320.0),
             dock_height: Some(140.0),
+            tree_collapsed: true,
             inspector_collapsed: true,
             dock_collapsed: false,
+            right_panel_mode: Some(1),
         }
     }
 
@@ -1469,6 +2129,7 @@ mod tests {
                     width: 1000.0,
                     height: 700.0,
                 }),
+                last_project_path: None,
             },
         )
         .unwrap();
@@ -1524,9 +2185,133 @@ mod tests {
         assert_eq!(layout.tree_width, Some(250.0));
         assert_eq!(layout.inspector_width, None);
         assert_eq!(layout.dock_height, None);
+        assert!(!layout.tree_collapsed);
         assert!(!layout.inspector_collapsed);
         assert!(!layout.dock_collapsed);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A layout payload written before the Phase 159-B `tree_collapsed` field
+    /// existed must still load, defaulting the panel to visible.
+    #[test]
+    fn legacy_layout_without_tree_collapsed_loads() {
+        let path = std::env::temp_dir().join("test_layout_legacy159.json");
+        std::fs::write(
+            &path,
+            br#"{"layout":{"tree_width":210.0,"inspector_collapsed":true,"dock_collapsed":true}}"#,
+        )
+        .unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(layout.tree_width, Some(210.0));
+        assert!(!layout.tree_collapsed, "missing field defaults to visible");
+        assert!(layout.inspector_collapsed);
+        assert!(layout.dock_collapsed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A layout payload written before the Phase 159-D mode field existed must
+    /// still load, defaulting it to "unset".
+    #[test]
+    fn legacy_layout_without_mode_loads() {
+        let path = std::env::temp_dir().join("test_layout_legacy159d.json");
+        std::fs::write(
+            &path,
+            br#"{"layout":{"tree_width":210.0,"tree_collapsed":true,"dock_collapsed":true}}"#,
+        )
+        .unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(layout.tree_width, Some(210.0));
+        assert_eq!(layout.right_panel_mode, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The right-panel-mode field round-trips, and an out-of-range index still
+    /// parses (the enum reader is what clamps it, not the deserializer).
+    #[test]
+    fn layout_mode_round_trips_and_tolerates_out_of_range() {
+        let path = std::env::temp_dir().join("test_layout_mode.json");
+        let _ = std::fs::remove_file(&path);
+
+        let prefs = LayoutPrefs {
+            right_panel_mode: Some(1),
+            ..LayoutPrefs::default()
+        };
+        save_layout(&path, &prefs).unwrap();
+        let (loaded, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded.right_panel_mode, Some(1));
+
+        std::fs::write(&path, br#"{"layout":{"right_panel_mode":9}}"#).unwrap();
+        let (loaded, warning) = load_layout_or_default(&path);
+        assert!(
+            warning.is_none(),
+            "out-of-range indices are still valid JSON"
+        );
+        assert_eq!(loaded.right_panel_mode, Some(9));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The centre is now driven by the work module, so the `workspace_tab`
+    /// field was retired.  A legacy settings file that still carries the key
+    /// must load without error (the struct does not use
+    /// `deny_unknown_fields`), with `right_panel_mode` still honoured.
+    #[test]
+    fn legacy_layout_with_retired_workspace_tab_key_still_loads() {
+        let path = std::env::temp_dir().join("test_layout_retired_tab_key.json");
+        std::fs::write(
+            &path,
+            br#"{"layout":{"tree_width":200.0,"workspace_tab":2,"right_panel_mode":1}}"#,
+        )
+        .unwrap();
+        let (layout, warning) = load_layout_or_default(&path);
+        assert!(
+            warning.is_none(),
+            "the retired key must be ignored, not rejected"
+        );
+        assert_eq!(layout.tree_width, Some(200.0));
+        assert_eq!(layout.right_panel_mode, Some(1));
+
+        // A whole settings file carrying the legacy layout key loads too.
+        save_settings(
+            &path,
+            &AppSettings {
+                dark_mode: false,
+                window: None,
+                last_project_path: None,
+            },
+        )
+        .unwrap();
+        let (settings, warning) = load_settings_or_default(&path);
+        assert!(warning.is_none());
+        assert!(!settings.dark_mode);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The new visibility fields must survive a save → load round-trip.
+    #[test]
+    fn layout_visibility_fields_round_trip() {
+        let path = std::env::temp_dir().join("test_layout_visibility_round_trip.json");
+        let _ = std::fs::remove_file(&path);
+        let prefs = LayoutPrefs {
+            tree_width: Some(230.0),
+            inspector_width: None,
+            dock_height: Some(120.0),
+            tree_collapsed: true,
+            inspector_collapsed: false,
+            dock_collapsed: true,
+            ..LayoutPrefs::default()
+        };
+        save_layout(&path, &prefs).unwrap();
+        let (loaded, warning) = load_layout_or_default(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded, prefs);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1618,5 +2403,101 @@ mod tests {
         let loaded = deserialize_loaded_project(json).unwrap();
         assert!(loaded.section.is_none());
         assert_eq!(loaded.model.n_nodes(), 0);
+    }
+    // ── Version-4 load cases / combinations / releases ─────────────────
+
+    #[test]
+    fn v4_round_trips_load_cases_combinations_and_releases() {
+        use crate::edit_model::{ComboTerm, LoadCaseId};
+
+        let mut m = EditModel::new();
+        let a = m.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = m.add_node(4.0, 0.0, 0.0).unwrap();
+        let mem = m.add_member(a, b).unwrap();
+        m.set_member_density(mem, 2700.0).unwrap();
+        m.set_member_releases(mem, [false, false, false, true, true, true])
+            .unwrap();
+        m.set_member_uniform_load(mem, MemberUniformLoad3D::new(0.0, -1e3, 0.0))
+            .unwrap();
+        let ll = m.add_load_case("LL").unwrap();
+        m.set_nodal_load(
+            b,
+            crate::edit_model::NodalLoadSpec::new(0.0, -5e3, 0.0, 0.0, 0.0, 0.0),
+        )
+        .unwrap();
+        m.set_case_self_weight(ll, true).unwrap();
+        let combo = m.add_load_combination("1.35DL+1.4LL").unwrap();
+        m.set_combination_terms(
+            combo,
+            vec![
+                ComboTerm {
+                    case: LoadCaseId(0),
+                    factor: 1.35,
+                },
+                ComboTerm {
+                    case: ll,
+                    factor: 1.4,
+                },
+            ],
+        )
+        .unwrap();
+
+        let json = serialize_project(&m).unwrap();
+        assert!(json.contains("\"format_version\": 4"));
+        let back = deserialize_project(&json).unwrap();
+
+        // Cases, loads, self-weight and combinations survive.
+        assert_eq!(back.n_load_cases(), 2);
+        assert_eq!(back.load_cases()[1].name, "LL");
+        assert!(back.load_case(ll).unwrap().self_weight);
+        assert_eq!(back.nodal_loads_in(ll).len(), 1);
+        assert_eq!(back.nodal_loads_in(LoadCaseId(0)).len(), 0);
+        assert_eq!(back.member_uniform_loads().len(), 1);
+        assert_eq!(back.member_density(mem), Some(2700.0));
+
+        // Releases survive exactly.
+        assert_eq!(
+            back.member_releases(mem),
+            Some([false, false, false, true, true, true])
+        );
+        assert_eq!(
+            back.combination(combo).unwrap().terms.len(),
+            2,
+            "duplicate cases merge on write"
+        );
+        assert!((back.combination(combo).unwrap().terms[1].factor - 1.4).abs() < 1e-15);
+
+        // The restored model solves identically (same fingerprint).
+        assert_eq!(back.fingerprint(), m.fingerprint());
+    }
+
+    #[test]
+    fn v3_files_load_with_default_releases_and_density() {
+        let json = r#"{"format_version":3,"model":{"next_node_id":2,"next_member_id":1,"nodes":[{"id":0,"x":0.0,"y":0.0,"z":0.0},{"id":1,"x":3.0,"y":0.0,"z":0.0}],"members":[{"id":0,"node_i":0,"node_j":1,"ref_vec":[0.0,0.0,1.0],"e":200e9,"g":80e9,"area":1e-3,"iy":2e-6,"iz":1e-6,"j":3e-6}],"supports":[{"node_id":0,"dofs":[0.0,0.0,0.0,null,null,null]}],"nodal_loads":[{"node_id":1,"fx":0.0,"fy":-1000.0,"fz":0.0,"mx":0.0,"my":0.0,"mz":0.0}],"member_uniform_loads":[],"member_point_loads":[]}}"#;
+        let m = deserialize_project(json).unwrap();
+        let mem = MemberId(0);
+        assert_eq!(m.member_releases(mem), Some([false; 6]));
+        assert_eq!(m.member_density(mem), Some(DEFAULT_DENSITY));
+        assert_eq!(m.n_load_cases(), 1);
+        assert_eq!(m.nodal_loads_in(LoadCaseId(0)).len(), 1);
+        // (Solving this particular two-node cantilever would be a mechanism —
+        // the pinned support leaves the beam's rotations unrestrained — so
+        // only the migration of the data is asserted here.)
+    }
+
+    #[test]
+    fn v4_member_without_release_field_defaults_to_rigid() {
+        let json = r#"{"format_version":4,"model":{"next_node_id":2,"next_member_id":1,"next_case_id":1,"next_combination_id":0,"nodes":[{"id":0,"x":0.0,"y":0.0,"z":0.0},{"id":1,"x":3.0,"y":0.0,"z":0.0}],"members":[{"id":0,"node_i":0,"node_j":1,"ref_vec":[0.0,0.0,1.0],"e":200e9,"g":80e9,"area":1e-3,"iy":2e-6,"iz":1e-6,"j":3e-6}],"supports":[{"node_id":0,"dofs":[0.0,0.0,0.0,null,null,null]}],"load_cases":[{"id":0,"name":"DL"}],"combinations":[],"nodal_loads":[{"node_id":1,"fx":0.0,"fy":-1000.0,"fz":0.0,"mx":0.0,"my":0.0,"mz":0.0,"case":0}],"member_uniform_loads":[],"member_point_loads":[]}}"#;
+        let m = deserialize_project(json).unwrap();
+        assert_eq!(m.member_releases(MemberId(0)), Some([false; 6]));
+        assert_eq!(m.member_density(MemberId(0)), Some(DEFAULT_DENSITY));
+    }
+
+    #[test]
+    fn v4_rejects_an_empty_load_case_list() {
+        let json = r#"{"format_version":4,"model":{"next_node_id":1,"next_member_id":0,"next_case_id":0,"next_combination_id":0,"nodes":[],"members":[],"supports":[],"load_cases":[],"combinations":[],"nodal_loads":[],"member_uniform_loads":[],"member_point_loads":[]}}"#;
+        let err = deserialize_project(json).unwrap_err();
+        assert!(matches!(err, PersistenceError::Validation(_)));
+        assert!(err.to_string().contains("load case"));
     }
 }

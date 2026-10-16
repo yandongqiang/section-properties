@@ -22,6 +22,8 @@
 
 use egui;
 
+use super::icons;
+
 // ── Panel / semantic palette (dark-tuned historical values) ─────────────
 // Used as the *dark* half of [`ViewportPalette`] / [`TextPalette`]; the light
 // halves are tuned separately in those palettes.
@@ -171,11 +173,7 @@ impl ViewportPalette {
 
     /// The palette for the current chrome theme (`dark == true` → dark).
     pub fn for_theme(dark: bool) -> Self {
-        if dark {
-            Self::dark()
-        } else {
-            Self::light()
-        }
+        if dark { Self::dark() } else { Self::light() }
     }
 }
 
@@ -228,12 +226,147 @@ impl TextPalette {
 
     /// The text palette for the current chrome theme (`dark == true` → dark).
     pub fn for_theme(dark: bool) -> Self {
-        if dark {
-            Self::dark()
-        } else {
-            Self::light()
-        }
+        if dark { Self::dark() } else { Self::light() }
     }
+}
+
+// ── Typography scale + chrome metrics (Phase 159-D) ─────────────────────
+//
+// One small, consistent scale used by *every* piece of chrome.  The sizes are
+// in points; the `*_font` helper returns a [`egui::FontId`] for painter-drawn
+// text, while the `*_text` helpers return a styled [`egui::RichText`] for
+// label / button text.  Centralising the scale here is what keeps the title
+// bar, menu bar, module strip, panel headers, dock tabs and status bar
+// reading as one surface — rather than a scatter of ad-hoc
+// `RichText::new(..).size(..)` sprinkles.
+
+/// Panel / section header, tab-bar and title-bar text size (points).
+pub const TEXT_HEADER: f32 = 13.0;
+/// Body / control text size (points).
+pub const TEXT_BODY: f32 = 12.5;
+/// De-emphasised hint / metadata / badge text size (points).
+pub const TEXT_SMALL: f32 = 11.0;
+/// Monospace size for numeric / code-like readouts (points).
+pub const TEXT_MONO: f32 = 12.0;
+
+/// Height of a compact chrome row: panel headers, tab strips, dock tabs.
+pub const ROW_HEIGHT: f32 = 24.0;
+/// Square size of an inline chrome glyph.
+pub const ICON_SIZE: f32 = 14.0;
+
+/// Body font (proportional).
+pub fn body_font() -> egui::FontId {
+    egui::FontId::proportional(TEXT_BODY)
+}
+
+/// Header [`egui::RichText`] (strong, sized to the scale).
+pub fn header(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).size(TEXT_HEADER).strong()
+}
+/// Body [`egui::RichText`] (sized to the scale).
+pub fn body(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).size(TEXT_BODY)
+}
+/// Small / de-emphasised [`egui::RichText`].
+pub fn small(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).size(TEXT_SMALL)
+}
+/// Monospace [`egui::RichText`] for numeric / code-like readouts.
+pub fn mono(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).monospace().size(TEXT_MONO)
+}
+
+/// The single, restrained chrome accent for the current theme: selection,
+/// focus and the segmented-control highlight.  Kept deliberately muted so the
+/// viewport stays the visual priority.
+pub fn accent(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_rgb(64, 112, 190)
+    } else {
+        egui::Color32::from_rgb(0, 102, 204)
+    }
+}
+
+/// Text / glyph colour that stays legible on top of [`accent`].
+pub fn on_accent(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_rgb(238, 242, 250)
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+/// Modal backdrop scrim for the current theme: a heavier dark scrim dims the
+/// dark chrome, a lighter one dims the light chrome without turning it muddy.
+pub fn scrim(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_black_alpha(130)
+    } else {
+        egui::Color32::from_black_alpha(70)
+    }
+}
+
+/// The chrome [`accent`] at a given alpha — used for subtle hover surfaces so
+/// they stay within the theme's single accent instead of inventing a colour.
+///
+/// The custom (undecorated) window's resize grips use this for their hover
+/// highlight: a barely-there accent edge, not a chrome colour of its own.
+pub fn accent_alpha(dark: bool, alpha: u8) -> egui::Color32 {
+    let a = accent(dark);
+    egui::Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), alpha)
+}
+
+/// Hover fill for the window **Close** control: a warning red, per theme.
+///
+/// Kept here (rather than ad-hoc in the title bar) so the one "destructive"
+/// chrome surface is theme-tuned like every other colour the app uses.
+pub fn close_hover(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_rgba_unmultiplied(200, 60, 60, 130)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(205, 50, 50, 110)
+    }
+}
+
+/// Glyph colour for the window Close control while [`close_hover`] is shown.
+pub fn close_hover_fg(dark: bool) -> egui::Color32 {
+    if dark {
+        egui::Color32::from_rgb(255, 240, 240)
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+/// Draw a compact panel-header row: a small leading glyph, a header-weight
+/// label, then the caller's trailing controls, all on one [`ROW_HEIGHT`] row.
+///
+/// Every panel (Project, right panel, Output dock, workspace) uses this so
+/// their headers share the same height, typography and spacing.  The caller
+/// adds the `separator()` afterwards (tab strips may omit it).
+pub fn panel_header(
+    ui: &mut egui::Ui,
+    icon: icons::IconFn,
+    label: &str,
+    trailing: impl FnOnce(&mut egui::Ui),
+) {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ROW_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ICON_SIZE, ICON_SIZE), egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                let fg = ui.visuals().text_color();
+                icon(ui.painter(), rect, fg);
+            }
+            ui.label(header(label));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                trailing(ui);
+            });
+        },
+    );
 }
 
 // ── Theme ───────────────────────────────────────────────────────────────
@@ -257,6 +390,40 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) {
     };
     visuals.window_rounding = 4.0.into();
     visuals.menu_rounding = 4.0.into();
+
+    // ── Hover / focus / selection states (Phase 159-D) ──────────────────
+    // One restrained accent drives every interactive surface (segmented tabs,
+    // panel toggles, tree rows, menu highlights, palette rows) in BOTH themes;
+    // the hover tint is a translucent version of the same accent so "hover"
+    // and "selected" read as clearly different strengths.  Sourcing these from
+    // `Visuals` (rather than per-widget colours) keeps the states consistent
+    // wherever egui draws a widget.
+    let accent = accent(dark);
+    let on_accent = on_accent(dark);
+    visuals.selection.bg_fill = accent;
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, on_accent);
+    visuals.hyperlink_color = accent;
+    let hover_alpha = if dark { 52 } else { 40 };
+    let active_alpha = if dark { 90 } else { 70 };
+    let hover =
+        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), hover_alpha);
+    let active =
+        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), active_alpha);
+    visuals.widgets.hovered.weak_bg_fill = hover;
+    visuals.widgets.hovered.bg_fill = hover;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    visuals.widgets.active.weak_bg_fill = active;
+    visuals.widgets.active.bg_fill = active;
+    // Minimal borders, subtle separators: fade the non-interactive stroke a
+    // little so panel / section dividers stay quiet.
+    let sep = visuals
+        .widgets
+        .noninteractive
+        .bg_stroke
+        .color
+        .gamma_multiply(0.7);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, sep);
+
     ctx.set_visuals(visuals);
     ctx.style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -338,8 +505,22 @@ mod tests {
         // Annotation text is dark on the light canvas.
         assert!(l.label.r() < 100 && l.help.r() < 130);
         // Axis colours stay legible: none of them is near-white.
-        for c in [l.axis_x, l.axis_y, l.axis_z, l.support, l.load_f, l.load_m, l.member_load, l.node, l.def_node, l.def_member] {
-            assert!(c.r() < 240 || c.g() < 240 || c.b() < 240, "{c:?} too close to white");
+        for c in [
+            l.axis_x,
+            l.axis_y,
+            l.axis_z,
+            l.support,
+            l.load_f,
+            l.load_m,
+            l.member_load,
+            l.node,
+            l.def_node,
+            l.def_member,
+        ] {
+            assert!(
+                c.r() < 240 || c.g() < 240 || c.b() < 240,
+                "{c:?} too close to white"
+            );
         }
         // The light legend box is a light fill with a visible border.
         assert_ne!(l.legend_bg, d.legend_bg);
@@ -393,5 +574,120 @@ mod tests {
     fn text_for_theme_selects_the_matching_palette() {
         assert_eq!(TextPalette::for_theme(true), TextPalette::dark());
         assert_eq!(TextPalette::for_theme(false), TextPalette::light());
+    }
+
+    // ── Typography scale + chrome metrics (Phase 159-D) ─────────────────
+
+    /// The scale is strictly ordered and the font helpers carry the matching
+    /// size / family, so a module cannot silently drift to an ad-hoc size.
+    #[test]
+    fn typography_scale_is_ordered_and_centralised() {
+        assert!(TEXT_HEADER > TEXT_BODY);
+        assert!(TEXT_BODY > TEXT_SMALL);
+        assert!(TEXT_MONO > 0.0);
+
+        assert_eq!(body_font().size, TEXT_BODY);
+        assert_eq!(body_font().family, egui::FontFamily::Proportional);
+        assert_eq!(
+            egui::FontId::monospace(TEXT_MONO).family,
+            egui::FontFamily::Monospace
+        );
+
+        assert!(ROW_HEIGHT >= TEXT_HEADER, "a header row must fit its text");
+        assert!(ICON_SIZE > 0.0 && ICON_SIZE <= ROW_HEIGHT);
+
+        // The RichText helpers must not panic and must carry body-sized text.
+        let _ = header("h");
+        let _ = body("b");
+        let _ = small("s");
+        let _ = mono("m");
+    }
+
+    /// The accent must be theme-specific, and its on-accent text must stay
+    /// legible on top of it (a real WCAG-style contrast check).
+    #[test]
+    fn accent_is_theme_specific_with_legible_foreground() {
+        let d = accent(true);
+        let l = accent(false);
+        assert_ne!(d, l, "the accent differs between themes");
+        for (a, on) in [(d, on_accent(true)), (l, on_accent(false))] {
+            let (hi, lo) = {
+                let (la, lon) = (luminance(a), luminance(on));
+                if la >= lon { (la, lon) } else { (lon, la) }
+            };
+            let ratio = (hi + 0.05) / (lo + 0.05);
+            assert!(ratio > 4.0, "accent/on-accent contrast too low: {ratio}");
+        }
+    }
+
+    /// The custom-chrome helpers must be theme-specific and stay within the
+    /// theme's accent / warning-red family (no ad-hoc window colours).
+    #[test]
+    fn chrome_window_helpers_are_theme_specific() {
+        // The resize-grip hover is the accent at the requested alpha.
+        assert_eq!(accent_alpha(true, 70).a(), 70);
+        assert_ne!(accent_alpha(true, 70), accent_alpha(false, 70));
+
+        // The close-button hover is translucent and red-dominant, and differs
+        // between themes.
+        for c in [close_hover(true), close_hover(false)] {
+            assert!(c.a() > 0, "close hover must be visible: {c:?}");
+            assert!(c.r() > c.g() && c.r() > c.b(), "not red: {c:?}");
+        }
+        assert_ne!(close_hover(true), close_hover(false));
+        // Its glyph stays bright on the hover fill.
+        for c in [close_hover_fg(true), close_hover_fg(false)] {
+            assert!(c.r() > 200 && c.g() > 200 && c.b() > 200, "{c:?}");
+        }
+    }
+
+    /// `apply_theme` must install the accent for selection and a *distinct*,
+    /// translucent hover tint — in BOTH the dark and the light theme.
+    #[test]
+    fn apply_theme_installs_accent_hover_and_selection_in_both_themes() {
+        for dark in [true, false] {
+            egui::__run_test_ctx(|ctx| {
+                apply_theme(ctx, dark);
+                let v = ctx.style().visuals.clone();
+                assert_eq!(v.selection.bg_fill, accent(dark));
+                assert_eq!(v.selection.stroke.color, on_accent(dark));
+                assert_eq!(v.hyperlink_color, accent(dark));
+                // Hover is translucent and distinct from both the resting
+                // widget fill and the solid selection fill.
+                assert!(v.widgets.hovered.weak_bg_fill.a() > 0);
+                assert_ne!(v.widgets.hovered.weak_bg_fill, v.widgets.inactive.bg_fill);
+                assert_ne!(v.widgets.hovered.weak_bg_fill, v.selection.bg_fill);
+                assert_ne!(
+                    v.widgets.active.weak_bg_fill,
+                    v.widgets.hovered.weak_bg_fill
+                );
+            });
+        }
+    }
+
+    /// The shared panel-header helper must paint headlessly (with trailing
+    /// controls) and must not fire a click on its own.
+    #[test]
+    fn panel_header_paints_headlessly() {
+        egui::__run_test_ctx(|ctx| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            };
+            let mut clicked = false;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    panel_header(ui, super::icons::panel_left, "Project", |ui| {
+                        if ui.button("\u{25c0} Hide").clicked() {
+                            clicked = true;
+                        }
+                    });
+                });
+            });
+            assert!(!clicked, "a freshly drawn header is not clicked");
+        });
     }
 }

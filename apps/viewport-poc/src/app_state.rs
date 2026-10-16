@@ -9,7 +9,7 @@ use section_properties::SolverSelection;
 use structural_analysis::{FrameAnalysisResult3D, FrameSolver3D};
 
 use crate::display;
-use crate::edit_model::EditModel;
+use crate::edit_model::{ComboTerm, EditModel, LoadCaseId};
 
 // ── Messages ───────────────────────────────────────────────────────────
 
@@ -152,6 +152,17 @@ impl SolverBackend {
 
 // ── Analysis result ────────────────────────────────────────────────────
 
+/// Which solved result the display surfaces: one load case, or one
+/// load combination (built by linear superposition of its cases).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveResult {
+    /// A load case's direct results (the default).
+    #[default]
+    Case,
+    /// A load combination's superposed results.
+    Combination,
+}
+
 /// Analysis result paired with the model revision and solver backend it was
 /// produced from.
 ///
@@ -160,24 +171,144 @@ impl SolverBackend {
 /// the model's current revision.  [`solved_backend`](Self::solved_backend)
 /// records the requested solver so that changing the backend also marks the
 /// result stale.
+///
+/// Every **load case** is solved independently (the stiffness matrix is
+/// identical, only the load vector differs), and every **combination** is
+/// assembled from them by linear superposition — exact for a linear-static
+/// analysis and far cheaper than re-solving.
 pub struct AnalysisResult {
+    /// Per-case results, in model case order.
+    pub cases: Vec<CaseResult>,
+    /// Per-combination results, in model combination order.
+    pub combinations: Vec<ComboResult>,
+    solved_revision: u64,
+    solved_backend: SolverBackend,
+}
+
+/// One load case's solved result.
+pub struct CaseResult {
+    /// The load case ID this result belongs to.
+    pub case: LoadCaseId,
+    /// Case name at solve time (for the result selector).
+    pub name: String,
+    /// The solved linear-static result.
     pub result: FrameAnalysisResult3D,
-    pub solved_revision: u64,
-    /// Solver backend requested for the solve that produced this result.
-    pub solved_backend: SolverBackend,
+}
+
+/// One load combination's superposed result.
+pub struct ComboResult {
+    /// The combination ID this result belongs to.
+    pub combination: LoadCaseId,
+    /// Combination name at solve time (for the result selector).
+    pub name: String,
+    /// The superposed result (`Σ factor · case result`).
+    pub result: FrameAnalysisResult3D,
 }
 
 impl AnalysisResult {
     pub fn new(
-        result: FrameAnalysisResult3D,
+        cases: Vec<CaseResult>,
+        combinations: Vec<ComboResult>,
         solved_revision: u64,
         solved_backend: SolverBackend,
     ) -> Self {
         Self {
-            result,
+            cases,
+            combinations,
             solved_revision,
             solved_backend,
         }
+    }
+
+    /// Model revision this result was solved from.
+    pub fn solved_revision(&self) -> u64 {
+        self.solved_revision
+    }
+
+    /// Solver backend that produced this result.
+    pub fn solved_backend(&self) -> SolverBackend {
+        self.solved_backend
+    }
+
+    /// A load case's result, if that case was solved.
+    pub fn case_result(&self, case: LoadCaseId) -> Option<&FrameAnalysisResult3D> {
+        self.cases
+            .iter()
+            .find(|c| c.case == case)
+            .map(|c| &c.result)
+    }
+
+    /// A combination's result, if that combination was solved.
+    pub fn combination_result(&self, combination: LoadCaseId) -> Option<&FrameAnalysisResult3D> {
+        self.combinations
+            .iter()
+            .find(|c| c.combination == combination)
+            .map(|c| &c.result)
+    }
+
+    /// `(case id, name)` pairs for the result selector, in case order.
+    pub fn case_labels(&self) -> Vec<(LoadCaseId, String)> {
+        self.cases
+            .iter()
+            .map(|c| (c.case, c.name.clone()))
+            .collect()
+    }
+
+    /// `(combination id, name)` pairs for the result selector, in order.
+    pub fn combination_labels(&self) -> Vec<(LoadCaseId, String)> {
+        self.combinations
+            .iter()
+            .map(|c| (c.combination, c.name.clone()))
+            .collect()
+    }
+
+    /// Superpose a combination's terms over the per-case results.
+    ///
+    /// Returns `None` when a term references a case that was not solved or
+    /// the per-case results are topology-incompatible (they cannot be: all
+    /// cases come from the same model revision).  Only the load-dependent
+    /// vectors (`displacements`, `reactions`, `member_end_forces`) are scaled
+    /// and summed; the model topology is copied from the first term.
+    pub fn combine(cases: &[CaseResult], terms: &[ComboTerm]) -> Option<FrameAnalysisResult3D> {
+        let mut iter = terms.iter();
+        let first = iter.next()?;
+        let base = cases.iter().find(|c| c.case == first.case)?;
+        let mut out = base.result.clone();
+        let scale = |v: &mut [f64], k: f64| {
+            for x in v.iter_mut() {
+                *x *= k;
+            }
+        };
+        scale(&mut out.displacements, first.factor);
+        scale(&mut out.reactions, first.factor);
+        for f in out.member_end_forces.iter_mut() {
+            for x in f.iter_mut() {
+                *x *= first.factor;
+            }
+        }
+        for term in iter {
+            let src = cases.iter().find(|c| c.case == term.case)?;
+            for (o, &s) in out
+                .displacements
+                .iter_mut()
+                .zip(src.result.displacements.iter())
+            {
+                *o += term.factor * s;
+            }
+            for (o, &s) in out.reactions.iter_mut().zip(src.result.reactions.iter()) {
+                *o += term.factor * s;
+            }
+            for (o, s) in out
+                .member_end_forces
+                .iter_mut()
+                .zip(src.result.member_end_forces.iter())
+            {
+                for (x, &y) in o.iter_mut().zip(s.iter()) {
+                    *x += term.factor * y;
+                }
+            }
+        }
+        Some(out)
     }
 }
 
@@ -197,6 +328,11 @@ pub struct Project {
     last_solve_failed: bool,
     /// Message from the most recent failed solve attempt (for the job panel).
     last_solve_error: Option<String>,
+    /// ID of the load case / combination whose results are displayed.
+    active_result_id: LoadCaseId,
+    /// Whether [`active_result_id`](Self::active_result_id) names a load
+    /// case or a load combination.
+    active_result_kind: ActiveResult,
 }
 
 impl Default for Project {
@@ -215,6 +351,8 @@ impl Project {
             solver_backend: SolverBackend::default(),
             last_solve_failed: false,
             last_solve_error: None,
+            active_result_id: LoadCaseId(0),
+            active_result_kind: ActiveResult::Case,
         }
     }
 
@@ -233,7 +371,8 @@ impl Project {
         match (&self.model, &self.analysis) {
             (None, _) | (Some(_), None) => AnalysisStatus::NeverSolved,
             (Some(model), Some(a)) => {
-                if a.solved_revision == model.revision() && a.solved_backend == self.solver_backend {
+                if a.solved_revision == model.revision() && a.solved_backend == self.solver_backend
+                {
                     AnalysisStatus::Current
                 } else {
                     AnalysisStatus::Stale
@@ -290,16 +429,87 @@ impl Project {
         self.analysis_status() == AnalysisStatus::Failed
     }
 
+    /// Which result the display currently surfaces: a load case or a
+    /// load combination.
+    pub fn active_result_kind(&self) -> ActiveResult {
+        self.active_result_kind
+    }
+
+    /// ID of the displayed result (a `LoadCaseId` or a combination ID,
+    /// depending on [`active_result_kind`](Self::active_result_kind)).
+    pub fn active_result_id(&self) -> LoadCaseId {
+        self.active_result_id
+    }
+
+    /// Select which **load case**'s results to display.
+    ///
+    /// Ignored (leaves the current selection untouched) when that case was
+    /// not solved — the selection can never point at a result that does
+    /// not exist.
+    pub fn set_active_case(&mut self, case: LoadCaseId) {
+        if self
+            .analysis
+            .as_ref()
+            .and_then(|a| a.case_result(case))
+            .is_none()
+        {
+            return;
+        }
+        self.active_result_kind = ActiveResult::Case;
+        self.active_result_id = case;
+    }
+
+    /// Select which **load combination**'s results to display.
+    ///
+    /// Ignored when that combination was not solved.
+    pub fn set_active_combination(&mut self, combination: LoadCaseId) {
+        if self
+            .analysis
+            .as_ref()
+            .and_then(|a| a.combination_result(combination))
+            .is_none()
+        {
+            return;
+        }
+        self.active_result_kind = ActiveResult::Combination;
+        self.active_result_id = combination;
+    }
+
+    /// Short label of the displayed result (e.g. `Case DL`, `Combo 1.35DL+1.4LL`).
+    pub fn active_result_label(&self) -> Option<String> {
+        let a = self.analysis.as_ref()?;
+        Some(match self.active_result_kind {
+            ActiveResult::Case => {
+                let c = a.cases.iter().find(|c| c.case == self.active_result_id)?;
+                format!("Case {}", c.name)
+            }
+            ActiveResult::Combination => {
+                let c = a
+                    .combinations
+                    .iter()
+                    .find(|c| c.combination == self.active_result_id)?;
+                format!("Combo {}", c.name)
+            }
+        })
+    }
+
     /// Borrow the current analysis result, or `None` if stale/failed/none.
     ///
     /// Implements display Policy A: only [`AnalysisStatus::Current`]
     /// results are returned.  Stale, failed, or absent results are hidden
     /// so the UI never displays outdated diagnostics.
+    ///
+    /// When results are current this returns the result selected by
+    /// [`set_active_case`](Self::set_active_case) /
+    /// [`set_active_combination`](Self::set_active_combination).
     pub fn analysis_result(&self) -> Option<&FrameAnalysisResult3D> {
-        if self.analysis_status() == AnalysisStatus::Current {
-            self.analysis.as_ref().map(|a| &a.result)
-        } else {
-            None
+        if self.analysis_status() != AnalysisStatus::Current {
+            return None;
+        }
+        let a = self.analysis.as_ref()?;
+        match self.active_result_kind {
+            ActiveResult::Case => a.case_result(self.active_result_id),
+            ActiveResult::Combination => a.combination_result(self.active_result_id),
         }
     }
 
@@ -310,6 +520,7 @@ impl Project {
     /// meaningless.  The failed flag is also reset.
     pub fn load_model(&mut self, name: String, model: EditModel) {
         self.name = name;
+        self.select_active_case(model.active_case());
         self.model = Some(model);
         self.analysis = None;
         self.last_solve_failed = false;
@@ -338,11 +549,86 @@ impl Project {
         let edit = self.model.as_ref().ok_or("No model loaded")?;
         let revision = edit.revision();
         let backend = self.solver_backend;
-        let frame_model = edit.to_frame_model().map_err(|e| e.message())?;
-        let mut solver = FrameSolver3D::from_model(&frame_model).map_err(|e| format!("{e}"))?;
-        solver.set_solver(backend.to_selection());
-        let result = solver.solve().map_err(|e| format!("{e}"))?;
-        self.analysis = Some(AnalysisResult::new(result, revision, backend));
+
+        // Validate the load combinations up-front: a combination that
+        // references a deleted load case can never be solved, and failing
+        // here names the culprit instead of producing silently wrong sums.
+        for combo in edit.combinations() {
+            let missing = edit.dangling_combination_cases(combo.id);
+            if !missing.is_empty() {
+                let ids: Vec<String> = missing.iter().map(|m| format!("#{}", m.0)).collect();
+                return Err(format!(
+                    "load combination '{}' references missing load case(s): {}",
+                    combo.name,
+                    ids.join(", ")
+                ));
+            }
+            if combo.terms.is_empty() {
+                return Err(format!(
+                    "load combination '{}' has no terms defined",
+                    combo.name
+                ));
+            }
+        }
+
+        // Solve every load case.  The stiffness matrix is identical across
+        // cases; only the load vector (and self weight) differs, so this is
+        // a per-case re-solve rather than a full re-assembly each time.
+        let mut cases: Vec<CaseResult> = Vec::with_capacity(edit.n_load_cases());
+        for case in edit.load_cases() {
+            let frame_model = edit
+                .to_frame_model_for_case(case.id)
+                .map_err(|e| e.message())?;
+            let mut solver = FrameSolver3D::from_model(&frame_model).map_err(|e| format!("{e}"))?;
+            solver.set_solver(backend.to_selection());
+            let result = solver.solve().map_err(|e| format!("{e}"))?;
+            cases.push(CaseResult {
+                case: case.id,
+                name: case.name.clone(),
+                result,
+            });
+        }
+
+        // Combinations by linear superposition (exact for linear analysis).
+        let mut combinations: Vec<ComboResult> = Vec::with_capacity(edit.n_combinations());
+        for combo in edit.combinations() {
+            let result = AnalysisResult::combine(&cases, &combo.terms).ok_or_else(|| {
+                format!(
+                    "load combination '{}' references an unsolved load case",
+                    combo.name
+                )
+            })?;
+            combinations.push(ComboResult {
+                combination: combo.id,
+                name: combo.name.clone(),
+                result,
+            });
+        }
+
+        self.analysis = Some(AnalysisResult::new(cases, combinations, revision, backend));
+
+        // Keep the display selection valid: if the previously selected case
+        // or combination no longer exists in the fresh result, fall back to
+        // the first solved load case.
+        let still_present = match self.active_result_kind {
+            ActiveResult::Case => matches!(
+                self.analysis.as_ref(),
+                Some(a) if a.case_result(self.active_result_id).is_some()
+            ),
+            ActiveResult::Combination => matches!(
+                self.analysis.as_ref(),
+                Some(a) if a.combination_result(self.active_result_id).is_some()
+            ),
+        };
+        if !still_present {
+            self.active_result_kind = ActiveResult::Case;
+            self.active_result_id = self
+                .analysis
+                .as_ref()
+                .and_then(|a| a.cases.first())
+                .map(|c| c.case)
+                .unwrap_or(LoadCaseId(0));
+        }
         Ok(())
     }
 
@@ -354,6 +640,7 @@ impl Project {
     /// revision invariant (e.g. via `ensure_revision_at_least` for
     /// undo/redo).
     pub fn replace_model(&mut self, model: EditModel) {
+        self.select_active_case(model.active_case());
         self.model = Some(model);
         self.analysis = None;
         self.last_solve_failed = false;
@@ -376,6 +663,7 @@ impl Project {
     /// (its revision differs), so a retained result is never mistaken for
     /// current.
     pub fn replace_model_after_edit(&mut self, model: EditModel) {
+        self.select_active_case(model.active_case());
         self.model = Some(model);
         self.last_solve_failed = false;
         self.last_solve_error = None;
@@ -388,6 +676,14 @@ impl Project {
         self.analysis = None;
         self.last_solve_failed = false;
         self.last_solve_error = None;
+        self.select_active_case(LoadCaseId(0));
+    }
+
+    /// Point the result selection at a load case (None if unsolved is a
+    /// no-op — see [set_active_case](Self::set_active_case)).
+    fn select_active_case(&mut self, case: LoadCaseId) {
+        self.active_result_kind = ActiveResult::Case;
+        self.active_result_id = case;
     }
 }
 
@@ -404,9 +700,16 @@ pub struct ModelSummary {
     /// DOFs constrained by supports.
     pub constrained_dof: usize,
     pub n_supports: usize,
+    /// Nodal loads in the **active** load case.
     pub n_nodal_loads: usize,
-    /// Uniform distributed loads + member point loads.
+    /// Uniform distributed loads + member point loads in the active case.
     pub n_member_loads: usize,
+    /// Number of load cases (always ≥ 1).
+    pub n_load_cases: usize,
+    /// Number of load combinations.
+    pub n_combinations: usize,
+    /// Whether the active load case includes member self weight.
+    pub self_weight: bool,
     /// Distinct member materials, identified by their `(E, G)` pair.
     pub n_materials: usize,
     /// Human-readable model-validity warnings (empty = none).
@@ -427,9 +730,14 @@ impl ModelSummary {
             .map(|(_, spec)| spec.n_constrained())
             .sum();
 
-        let n_nodal_loads = model.nodal_loads().len();
-        let n_member_loads =
-            model.member_uniform_loads().len() + model.member_point_loads().len();
+        let n_nodal_loads = model.n_nodal_loads();
+        let n_member_loads = model.n_member_uniform_loads() + model.member_point_loads().len();
+        let n_load_cases = model.n_load_cases();
+        let n_combinations = model.n_combinations();
+        let self_weight = model
+            .load_case(model.active_case())
+            .map(|c| c.self_weight)
+            .unwrap_or(false);
 
         // Distinct materials by (E, G) bit patterns (f64 has no Hash/Eq).
         let mut materials: Vec<(u64, u64)> = Vec::new();
@@ -463,6 +771,9 @@ impl ModelSummary {
             n_supports,
             n_nodal_loads,
             n_member_loads,
+            n_load_cases,
+            n_combinations,
+            self_weight,
             n_materials: materials.len(),
             warnings,
         }
@@ -539,6 +850,7 @@ impl ResultsSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit_model::{ComboTerm, NodalLoadSpec};
     use crate::model;
 
     #[test]
@@ -726,6 +1038,279 @@ mod tests {
 
         let m = AppMessage::error("broken");
         assert_eq!(m.level, MessageLevel::Error);
+    }
+
+    // ── Load cases & combinations ──
+
+    /// Build a small portal with **two independent load cases** sharing one
+    /// structure: DL carries the lateral load at the left top node, LL the
+    /// vertical load at the right top node (distinct nodes so neither case's
+    /// load can mask the other's).
+    fn two_case_portal() -> EditModel {
+        let mut m = model::build_portal_edit();
+        let ll = m.add_load_case("LL").unwrap();
+        let top_right = m
+            .nodes()
+            .iter()
+            .rev()
+            .find(|n| n.y > 0.0)
+            .map(|n| n.id)
+            .expect("portal has elevated nodes");
+        m.set_active_case(ll).unwrap();
+        m.set_nodal_load(top_right, NodalLoadSpec::new(0.0, -3e3, 0.0, 0.0, 0.0, 0.0))
+            .unwrap();
+        // Leave the model viewing its default case (the active case is view
+        // state, not data).
+        m.set_active_case(LoadCaseId(0)).unwrap();
+        m
+    }
+
+    #[test]
+    fn solve_stores_every_load_case() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), two_case_portal());
+        p.solve().unwrap();
+
+        let a = p.analysis.as_ref().expect("result");
+        assert_eq!(a.cases.len(), 2);
+        assert_eq!(a.cases[0].name, "DL");
+        assert_eq!(a.cases[1].name, "LL");
+        // The two cases solve the same structure with different loads, so
+        // the responses differ.
+        assert_ne!(
+            a.cases[0].result.displacements,
+            a.cases[1].result.displacements
+        );
+        // The default display is the first load case.
+        assert_eq!(p.active_result_kind(), ActiveResult::Case);
+        assert_eq!(p.active_result_id(), LoadCaseId(0));
+        assert_eq!(p.active_result_label().as_deref(), Some("Case DL"));
+    }
+
+    #[test]
+    fn combination_result_is_the_weighted_sum_of_cases() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), two_case_portal());
+        p.solve().unwrap();
+
+        let disps = |p: &Project, kind: ActiveResult, id: LoadCaseId| -> Vec<f64> {
+            match kind {
+                ActiveResult::Case => p
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .case_result(id)
+                    .unwrap()
+                    .displacements
+                    .clone(),
+                ActiveResult::Combination => p
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .combination_result(id)
+                    .unwrap()
+                    .displacements
+                    .clone(),
+            }
+        };
+
+        // Superposition identity: 1.35·DL + 1.4·LL.
+        let a = p.analysis.as_ref().unwrap();
+        let dl = a.case_result(LoadCaseId(0)).unwrap().displacements.clone();
+        let ll = a.case_result(LoadCaseId(1)).unwrap().displacements.clone();
+        assert_ne!(dl, ll);
+
+        // Now add the combination to the model and re-solve.
+        let mut m = two_case_portal();
+        let combo = m.add_load_combination("1.35DL+1.4LL").unwrap();
+        m.set_combination_terms(
+            combo,
+            vec![
+                ComboTerm {
+                    case: LoadCaseId(0),
+                    factor: 1.35,
+                },
+                ComboTerm {
+                    case: LoadCaseId(1),
+                    factor: 1.4,
+                },
+            ],
+        )
+        .unwrap();
+        p.load_model("Portal".into(), m);
+        p.solve().unwrap();
+
+        let combined = disps(&p, ActiveResult::Combination, combo);
+        for (i, (c, (d, l))) in combined.iter().zip(dl.iter().zip(ll.iter())).enumerate() {
+            let want = 1.35 * d + 1.4 * l;
+            assert!(
+                (c - want).abs() < 1e-9 * (1.0 + want.abs()),
+                "combined[{i}] = {c}, want {want}"
+            );
+        }
+
+        // The combination's reactions superpose the same way.
+        let a = p.analysis.as_ref().unwrap();
+        let r_dl = a.case_result(LoadCaseId(0)).unwrap().reactions.clone();
+        let r_ll = a.case_result(LoadCaseId(1)).unwrap().reactions.clone();
+        let r_combo = a.combination_result(combo).unwrap().reactions.clone();
+        for (i, (c, (d, l))) in r_combo.iter().zip(r_dl.iter().zip(r_ll.iter())).enumerate() {
+            assert!(
+                (c - (1.35 * d + 1.4 * l)).abs() < 1e-9 * (1.0 + c.abs()),
+                "reaction[{i}] = {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn combination_result_matches_single_solve_of_the_same_loads() {
+        // Cross-check the superposition against a *direct* solve: a model
+        // where both cases' loads sit in one case must produce the same
+        // displacements as the 1.0·DL + 1.0·LL combination.
+        let combined_model = two_case_portal();
+        let ll = combined_model.load_cases()[1].id;
+        let mut merged = combined_model.clone();
+        merged.set_active_case(LoadCaseId(0)).unwrap();
+        for (node, load) in combined_model.nodal_loads_in(ll) {
+            merged
+                .set_nodal_load(
+                    node,
+                    NodalLoadSpec::new(load.fx, load.fy, load.fz, 0.0, 0.0, 0.0),
+                )
+                .unwrap();
+        }
+        // Keep the combined load exactly what 1.0·DL + 1.0·LL means: DL's
+        // own load is already in case 0 (portal preset) and LL's was merged
+        // additively per node by `set_nodal_load` above.
+
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), two_case_portal());
+        let combo = {
+            let m = p.model.as_mut().unwrap();
+            let c = m.add_load_combination("1.0DL+1.0LL").unwrap();
+            m.set_combination_terms(
+                c,
+                vec![
+                    ComboTerm {
+                        case: LoadCaseId(0),
+                        factor: 1.0,
+                    },
+                    ComboTerm {
+                        case: LoadCaseId(1),
+                        factor: 1.0,
+                    },
+                ],
+            )
+            .unwrap();
+            c
+        };
+        p.solve().unwrap();
+        let combo_disps = p
+            .analysis
+            .as_ref()
+            .unwrap()
+            .combination_result(combo)
+            .unwrap()
+            .displacements
+            .clone();
+
+        let mut q = Project::empty();
+        q.load_model("Portal".into(), merged);
+        q.solve().unwrap();
+        let merged_disps = q.analysis_result().unwrap().displacements.clone();
+
+        for (i, (c, m)) in combo_disps.iter().zip(merged_disps.iter()).enumerate() {
+            assert!(
+                (c - m).abs() < 1e-9 * (1.0 + m.abs()),
+                "superposed[{i}] = {c}, direct = {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_combination_fails_the_solve() {
+        let mut m = two_case_portal();
+        let combo = m.add_load_combination("1.4LL").unwrap();
+        m.set_combination_terms(
+            combo,
+            vec![ComboTerm {
+                case: LoadCaseId(1),
+                factor: 1.4,
+            }],
+        )
+        .unwrap();
+        // Delete the referenced case → the combination dangles.
+        m.delete_load_case(LoadCaseId(1)).unwrap();
+
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), m);
+        let err = p.solve().unwrap_err();
+        assert!(
+            err.contains("load combination") && err.contains("1.4LL"),
+            "error should name the combination, got: {err}"
+        );
+        assert_eq!(p.analysis_status(), AnalysisStatus::Failed);
+    }
+
+    #[test]
+    fn empty_combination_fails_the_solve() {
+        let mut m = two_case_portal();
+        m.add_load_combination("Empty").unwrap();
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), m);
+        let err = p.solve().unwrap_err();
+        assert!(
+            err.contains("no terms"),
+            "error should explain the missing terms, got: {err}"
+        );
+    }
+
+    #[test]
+    fn selecting_a_case_changes_the_displayed_result() {
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), two_case_portal());
+        p.solve().unwrap();
+
+        let dl = p.analysis_result().unwrap().displacements.clone();
+        p.set_active_case(LoadCaseId(1));
+        assert_eq!(p.active_result_id(), LoadCaseId(1));
+        assert_eq!(p.active_result_label().as_deref(), Some("Case LL"));
+        let ll = p.analysis_result().unwrap().displacements.clone();
+        assert_ne!(dl, ll, "the displayed result must follow the selection");
+
+        // Selecting an unsolved case is a no-op.
+        p.set_active_case(LoadCaseId(77));
+        assert_eq!(p.active_result_id(), LoadCaseId(1));
+    }
+
+    #[test]
+    fn self_weight_option_changes_the_case_result() {
+        let mut m = model::build_portal_edit();
+        m.set_case_self_weight(LoadCaseId(0), true).unwrap();
+        let mut p = Project::empty();
+        p.load_model("Portal".into(), m);
+        p.solve().unwrap();
+        let with_sw = p.analysis_result().unwrap().displacements.clone();
+
+        let mut plain = model::build_portal_edit();
+        plain.set_case_self_weight(LoadCaseId(0), false).unwrap();
+        let mut q = Project::empty();
+        q.load_model("Portal".into(), plain);
+        q.solve().unwrap();
+        assert_ne!(
+            with_sw,
+            q.analysis_result().unwrap().displacements,
+            "enabling self weight must change the dead-load response"
+        );
+    }
+
+    #[test]
+    fn model_summary_reports_cases() {
+        let m = two_case_portal();
+        let s = ModelSummary::from_model(&m);
+        assert_eq!(s.n_load_cases, 2);
+        assert_eq!(s.n_combinations, 0);
+        assert!(!s.self_weight);
     }
 
     #[test]

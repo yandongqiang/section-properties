@@ -130,12 +130,8 @@ pub fn equivalent_rectangle(area: f64, iy: f64, iz: f64, length: f64) -> (f64, f
     let max_dim = (len * MAX_DIM_LENGTH_FRACTION).max(MIN_MEMBER_DIM);
     let thin = (0.01 * len).clamp(MIN_MEMBER_DIM, max_dim);
 
-    let valid = area.is_finite()
-        && area > 0.0
-        && iy.is_finite()
-        && iy > 0.0
-        && iz.is_finite()
-        && iz > 0.0;
+    let valid =
+        area.is_finite() && area > 0.0 && iy.is_finite() && iy > 0.0 && iz.is_finite() && iz > 0.0;
     if !valid {
         return (thin, thin);
     }
@@ -149,11 +145,7 @@ pub fn equivalent_rectangle(area: f64, iy: f64, iz: f64, length: f64) -> (f64, f
 
     let h = h.clamp(MIN_MEMBER_DIM, max_dim);
     let b = b.clamp(MIN_MEMBER_DIM, max_dim);
-    if iz_is_strong {
-        (h, b)
-    } else {
-        (b, h)
-    }
+    if iz_is_strong { (h, b) } else { (b, h) }
 }
 
 /// Stable display geometry.
@@ -388,10 +380,7 @@ impl ViewportScene {
     /// Returns `None` for an invalid member, zero length, or a reference vector
     /// parallel to the member axis.
     #[allow(clippy::type_complexity)]
-    pub fn member_local_axes(
-        &self,
-        member_idx: usize,
-    ) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
+    pub fn member_local_axes(&self, member_idx: usize) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
         let (ni, nj) = *self.member_nodes.get(member_idx)?;
         let pi = *self.node_positions.get(ni)?;
         let pj = *self.node_positions.get(nj)?;
@@ -944,9 +933,17 @@ mod tests {
         let scene = ViewportScene::from_edit_model(&m);
         let res = m.to_frame_model().unwrap().solve().unwrap();
         assert!(scene.member_section_forces(99, 0.5, &res).is_none());
-        assert!(scene.member_deformed_point(99, 0.5, &res.displacements, 1.0).is_none());
+        assert!(
+            scene
+                .member_deformed_point(99, 0.5, &res.displacements, 1.0)
+                .is_none()
+        );
         // Too-short displacement vector.
-        assert!(scene.member_deformed_point(0, 0.5, &[0.0; 3], 1.0).is_none());
+        assert!(
+            scene
+                .member_deformed_point(0, 0.5, &[0.0; 3], 1.0)
+                .is_none()
+        );
     }
 
     // ── Equivalent-rectangle derivation ───────────────────────────────

@@ -21,7 +21,13 @@ fn load_and_solve_produces_result() {
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     assert!(p.has_results());
-    assert!(p.analysis.as_ref().unwrap().result.displacements.len() > 0);
+    assert!(
+        p.analysis.as_ref().unwrap().cases[0]
+            .result
+            .displacements
+            .len()
+            > 0
+    );
 }
 
 #[test]
@@ -51,7 +57,7 @@ fn editing_model_marks_results_stale() {
         .unwrap();
     assert!(p.results_are_stale());
     let analysis = p.analysis.as_ref().unwrap();
-    assert!(analysis.result.displacements.len() > 0);
+    assert!(analysis.cases[0].result.displacements.len() > 0);
 }
 
 #[test]
@@ -112,7 +118,7 @@ fn all_presets_solve_and_produce_results() {
 
         let result = p.analysis.as_ref().unwrap();
         assert!(
-            result.result.displacements.len() > 0,
+            result.cases[0].result.displacements.len() > 0,
             "preset '{}' has no displacements",
             preset.name()
         );
@@ -150,7 +156,7 @@ fn deformation_scale_does_not_trigger_solve() {
     p.load_model("Portal".into(), model::build_portal_edit());
     p.solve().unwrap();
     let result_ref = p.analysis.as_ref().unwrap();
-    let original_displacements = result_ref.result.displacements.clone();
+    let original_displacements = result_ref.cases[0].result.displacements.clone();
 
     let model = p.model.as_ref().unwrap();
     let scene = ViewportScene::from_edit_model(model);
@@ -158,7 +164,7 @@ fn deformation_scale_does_not_trigger_solve() {
 
     let result_after = p.analysis.as_ref().unwrap();
     assert_eq!(
-        result_after.result.displacements, original_displacements,
+        result_after.cases[0].result.displacements, original_displacements,
         "deformation scale change must not modify analysis results"
     );
     assert!(!p.results_are_stale());

@@ -329,17 +329,144 @@ const PARALLEL_TOL: f64 = 1e-8;
 /// member axis.
 ///
 /// Fields are private; use getter methods (`node_i()`, `node_j()`,
-/// `section()`, `ref_vec()`) to read.
+/// `section()`, `ref_vec()`, `releases()`) to read.
 #[derive(Debug, Clone)]
 pub struct FrameElement3D {
     node_i: usize,
     node_j: usize,
     section: FrameSection3D,
     ref_vec: [f64; 3],
+    releases: EndReleases3D,
 }
 
+/// Rotational end releases for a 3-D frame element.
+///
+/// A released rotation transmits **no moment** at that end — a pin — exactly
+/// like the 2-D beam's [`EndRelease`](crate::beam_fem::EndRelease).  Only the
+/// six *rotational* element DOFs can be released (`rx, ry, rz` at each end);
+/// the translations always transfer force.
+///
+/// Releases are applied by **static condensation** of the element local
+/// stiffness matrix (see [`FrameElement3D::stiffness_with_releases`]): the
+/// released local DOFs are condensed out *before* the transformation to
+/// global coordinates, so the global system keeps every node DOF (a hinge
+/// end's rotation stays elastic and is shared with the other members at
+/// that node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EndReleases3D {
+    /// Release rotation about local x (torsion) at `node_i`.
+    pub start_rx: bool,
+    /// Release rotation about local y at `node_i`.
+    pub start_ry: bool,
+    /// Release rotation about local z at `node_i`.
+    pub start_rz: bool,
+    /// Release rotation about local x (torsion) at `node_j`.
+    pub end_rx: bool,
+    /// Release rotation about local y at `node_j`.
+    pub end_ry: bool,
+    /// Release rotation about local z at `node_j`.
+    pub end_rz: bool,
+}
+
+impl EndReleases3D {
+    /// No release — fully rigid member-end connections (default).
+    pub const fn none() -> Self {
+        Self {
+            start_rx: false,
+            start_ry: false,
+            start_rz: false,
+            end_rx: false,
+            end_ry: false,
+            end_rz: false,
+        }
+    }
+
+    /// Pin `node_i`: release all three rotations at the start end.
+    pub const fn start_pin() -> Self {
+        Self {
+            start_rx: true,
+            start_ry: true,
+            start_rz: true,
+            ..Self::none()
+        }
+    }
+
+    /// Pin `node_j`: release all three rotations at the end end.
+    pub const fn end_pin() -> Self {
+        Self {
+            end_rx: true,
+            end_ry: true,
+            end_rz: true,
+            ..Self::none()
+        }
+    }
+
+    /// Pinned–pinned: release all three rotations at both ends.
+    pub const fn both_pins() -> Self {
+        Self {
+            start_rx: true,
+            start_ry: true,
+            start_rz: true,
+            end_rx: true,
+            end_ry: true,
+            end_rz: true,
+        }
+    }
+
+    /// Whether no DOF is released (the default, rigid connection).
+    pub const fn is_empty(self) -> bool {
+        !(self.start_rx
+            || self.start_ry
+            || self.start_rz
+            || self.end_rx
+            || self.end_ry
+            || self.end_rz)
+    }
+
+    /// The six rotations as `[rx_i, ry_i, rz_i, rx_j, ry_j, rz_j]`.
+    pub const fn array(self) -> [bool; 6] {
+        [
+            self.start_rx,
+            self.start_ry,
+            self.start_rz,
+            self.end_rx,
+            self.end_ry,
+            self.end_rz,
+        ]
+    }
+
+    /// Rebuild from the `[rx_i, ry_i, rz_i, rx_j, ry_j, rz_j]` array form.
+    pub const fn from_array(a: [bool; 6]) -> Self {
+        Self {
+            start_rx: a[0],
+            start_ry: a[1],
+            start_rz: a[2],
+            end_rx: a[3],
+            end_ry: a[4],
+            end_rz: a[5],
+        }
+    }
+
+    /// Local DOF indices (of the 12-DOF element ordering) that are released:
+    /// the six rotations `3, 4, 5, 9, 10, 11`.
+    fn released_dofs(self) -> Vec<usize> {
+        let mut r = Vec::new();
+        let a = self.array();
+        for (k, &on) in a.iter().enumerate() {
+            if on {
+                r.push(if k < 3 { 3 + k } else { 9 + (k - 3) });
+            }
+        }
+        r
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Element
+// ---------------------------------------------------------------------------
+
 impl FrameElement3D {
-    /// Create a 3D frame element with rigid end connections.
+    /// Create a 3D frame element with rigid end connections (no releases).
     ///
     /// # Errors
     ///
@@ -351,6 +478,20 @@ impl FrameElement3D {
         node_j: usize,
         section: FrameSection3D,
         ref_vec: [f64; 3],
+    ) -> Result<Self, FemError> {
+        Self::with_releases(node_i, node_j, section, ref_vec, EndReleases3D::none())
+    }
+
+    /// Create a 3D frame element with the given rotational end releases.
+    ///
+    /// See [`EndReleases3D`] for the release semantics; the releases are
+    /// applied by static condensation inside every stiffness / load routine.
+    pub fn with_releases(
+        node_i: usize,
+        node_j: usize,
+        section: FrameSection3D,
+        ref_vec: [f64; 3],
+        releases: EndReleases3D,
     ) -> Result<Self, FemError> {
         if node_i == node_j {
             return Err(FemError::InvalidModel(
@@ -374,6 +515,7 @@ impl FrameElement3D {
             node_j,
             section,
             ref_vec,
+            releases,
         })
     }
 
@@ -392,6 +534,14 @@ impl FrameElement3D {
     /// Reference vector (orientation).
     pub fn ref_vec(&self) -> [f64; 3] {
         self.ref_vec
+    }
+    /// Rotational end releases (default: none — rigid connection).
+    pub fn releases(&self) -> EndReleases3D {
+        self.releases
+    }
+    /// Replace the rotational end releases.
+    pub fn set_releases(&mut self, releases: EndReleases3D) {
+        self.releases = releases;
     }
 
     /// Element length from node coordinates.
@@ -609,6 +759,139 @@ impl FrameElement3D {
         Ok(k)
     }
 
+    // ── End releases (static condensation) ─────────────────────────────
+
+    /// Static-condense the released local DOFs out of a 12×12 matrix.
+    ///
+    /// With `K` partitioned into retained (c) and released (r) blocks
+    ///
+    /// ```text
+    /// K = [ K_cc  K_cr ]
+    ///     [ K_rc  K_rr ]
+    /// ```
+    ///
+    /// the returned matrix is `K_cc − K_cr·K_rr⁻¹·K_rc` in the retained
+    /// block and **zero** in the released rows/columns, so the assembly step
+    /// (which skips zero entries) naturally drops them.  Returns `k`
+    /// unchanged when nothing is released.
+    fn condense_matrix(&self, k: [[f64; 12]; 12]) -> [[f64; 12]; 12] {
+        let released = self.releases.released_dofs();
+        if released.is_empty() {
+            return k;
+        }
+        let mut is_released = [false; 12];
+        for &r in &released {
+            is_released[r] = true;
+        }
+        let retained: Vec<usize> = (0..12).filter(|&i| !is_released[i]).collect();
+        let n_r = released.len();
+
+        let mut k_rr = vec![vec![0.0; n_r]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (rj, &b) in released.iter().enumerate() {
+                k_rr[ri][rj] = k[a][b];
+            }
+        }
+        let k_rr_inv = invert_dense(&k_rr).unwrap_or_else(|| {
+            // A released-rotation block of a 3-D frame element is positive
+            // definite for any physically valid section (EI > 0, GJ > 0), so
+            // reaching here means a degenerate section; the caller surfaces
+            // the resulting non-finite entries as an input error.
+            vec![vec![0.0; n_r]; n_r]
+        });
+
+        // correction = K_cr · K_rr⁻¹ · K_rc
+        let mut result = [[0.0f64; 12]; 12];
+        for &a in &retained {
+            for &b in &retained {
+                let mut sum = 0.0;
+                for r1 in 0..n_r {
+                    for r2 in 0..n_r {
+                        sum += k[a][released[r1]] * k_rr_inv[r1][r2] * k[released[r2]][b];
+                    }
+                }
+                result[a][b] = k[a][b] - sum;
+            }
+        }
+        result
+    }
+
+    /// Static-condense a 12-element local equivalent-load vector.
+    ///
+    /// Returns `f_c − K_cr·K_rr⁻¹·f_r` in the retained positions and zero in
+    /// the released positions.  `k_local` is the **un-condensed** local
+    /// stiffness (needed for `K_cr` / `K_rr`); `f` is the consistent load
+    /// vector from [`FrameMemberLoad::equivalent_nodal_loads_local`].
+    pub fn condense_equivalent_loads(
+        &self,
+        f: [f64; 12],
+        k_local: &[[f64; 12]; 12],
+    ) -> [f64; 12] {
+        let released = self.releases.released_dofs();
+        if released.is_empty() {
+            return f;
+        }
+        let mut is_released = [false; 12];
+        for &r in &released {
+            is_released[r] = true;
+        }
+        let retained: Vec<usize> = (0..12).filter(|&i| !is_released[i]).collect();
+        let n_r = released.len();
+
+        let mut k_rr = vec![vec![0.0; n_r]; n_r];
+        for (ri, &a) in released.iter().enumerate() {
+            for (rj, &b) in released.iter().enumerate() {
+                k_rr[ri][rj] = k_local[a][b];
+            }
+        }
+        let k_rr_inv = invert_dense(&k_rr).unwrap_or_else(|| vec![vec![0.0; n_r]; n_r]);
+
+        // x = K_rr⁻¹ · f_r
+        let mut x = vec![0.0; n_r];
+        for (i, xi) in x.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for (r, &rel) in released.iter().enumerate() {
+                sum += k_rr_inv[i][r] * f[rel];
+            }
+            *xi = sum;
+        }
+
+        let mut out = [0.0f64; 12];
+        for &a in &retained {
+            let mut correction = 0.0;
+            for (r, &rel) in released.iter().enumerate() {
+                correction += k_local[a][rel] * x[r];
+            }
+            out[a] = f[a] - correction;
+        }
+        out
+    }
+
+    /// Zero the released entries of a local end-force vector.
+    ///
+    /// A hinge transmits no moment, so the element's end force at a released
+    /// rotational DOF is exactly zero; the retained ends carry the hinge's
+    /// effect through the condensed response.
+    pub fn mask_released_end_forces(&self, mut f: [f64; 12]) -> [f64; 12] {
+        for dof in self.releases.released_dofs() {
+            f[dof] = 0.0;
+        }
+        f
+    }
+
+    /// Local stiffness **with the element's end releases applied**.
+    ///
+    /// Identical to [`local_stiffness`](Self::local_stiffness) when nothing
+    /// is released.
+    pub fn stiffness_with_releases(
+        &self,
+        pi: (f64, f64, f64),
+        pj: (f64, f64, f64),
+    ) -> Result<[[f64; 12]; 12], FemError> {
+        let k = self.local_stiffness(pi, pj)?;
+        Ok(self.condense_matrix(k))
+    }
+
     /// Compute the 12×12 coordinate transformation matrix `T`.
     ///
     /// Maps **global** element DOFs to **local** element DOFs:
@@ -653,11 +936,13 @@ impl FrameElement3D {
         Ok(T)
     }
 
-    /// Compute the 12×12 element stiffness matrix in **global** coordinates.
+    /// Compute the 12×12 element stiffness matrix in **global** coordinates,
+    /// with the element's end releases applied.
     ///
-    /// `K_global = Tᵀ · K_local · T`, with the DOF order
+    /// `K_global = Tᵀ · K_condensed · T`, with the DOF order
     /// `[ux_i, uy_i, uz_i, rx_i, ry_i, rz_i, ux_j, uy_j, uz_j, rx_j, ry_j, rz_j]`
-    /// (global axes).
+    /// (global axes).  Identical to the un-released `Tᵀ·K_local·T` when the
+    /// element has no releases.
     ///
     /// # Errors
     ///
@@ -667,7 +952,7 @@ impl FrameElement3D {
         pi: (f64, f64, f64),
         pj: (f64, f64, f64),
     ) -> Result<[[f64; 12]; 12], FemError> {
-        let k_local = self.local_stiffness(pi, pj)?;
+        let k_local = self.stiffness_with_releases(pi, pj)?;
         let T = self.transformation_matrix(pi, pj)?;
 
         // K_global = T^T * K_local * T
@@ -1085,6 +1370,35 @@ impl FrameModel3D {
         let idx = self.members.len();
         self.members.push(element);
         Ok(idx)
+    }
+
+    /// Set the rotational end releases of member `member_idx`.
+    ///
+    /// See [`EndReleases3D`]: a released rotation transmits no moment at that
+    /// end (a pin), applied by static condensation of the element stiffness.
+    ///
+    /// # Errors
+    ///
+    /// [`FemError::InvalidMember`] if `member_idx` is out of bounds.
+    pub fn set_member_releases(
+        &mut self,
+        member_idx: usize,
+        releases: EndReleases3D,
+    ) -> Result<(), FemError> {
+        let max = self.members.len().saturating_sub(1);
+        if member_idx > max {
+            return Err(FemError::InvalidMember(format!(
+                "member {member_idx} out of bounds (max {max})"
+            )));
+        }
+        self.members[member_idx].set_releases(releases);
+        Ok(())
+    }
+
+    /// Rotational end releases of member `member_idx`, or `None` if out of
+    /// bounds.
+    pub fn member_releases(&self, member_idx: usize) -> Option<EndReleases3D> {
+        self.members.get(member_idx).map(|m| m.releases())
     }
 
     /// Apply a nodal force `(fx, fy, fz)` and moments `(mx, my, mz)` at
@@ -1516,7 +1830,7 @@ impl FrameSolver3D {
             let pi = model.nodes[m.node_i].coords();
             let pj = model.nodes[m.node_j].coords();
             let L = m.length(pi, pj);
-            let f_eq_local = load.equivalent_nodal_loads_local(L);
+            let mut f_eq_local = load.equivalent_nodal_loads_local(L);
             for i in 0..12 {
                 if !f_eq_local[i].is_finite() {
                     return Err(FemError::InvalidInput(format!(
@@ -1525,6 +1839,13 @@ impl FrameSolver3D {
                         f_eq_local[i]
                     )));
                 }
+            }
+
+            // End releases condense the consistent load vector too: the
+            // released rotations pick up their share of fixed-end moments.
+            if !m.releases().is_empty() {
+                let k_local = m.local_stiffness(pi, pj)?;
+                f_eq_local = m.condense_equivalent_loads(f_eq_local, &k_local);
             }
 
             // Accumulate local equivalent loads for end-force recovery
@@ -1690,7 +2011,11 @@ impl FrameSolver3D {
         for (member_idx, m) in self.model.members.iter().enumerate() {
             let pi = self.model.nodes[m.node_i].coords();
             let pj = self.model.nodes[m.node_j].coords();
-            let k_local = m.local_stiffness(pi, pj)?;
+            // End forces follow the **released** stiffness: the condensed
+            // matrix has zero rows/columns at the released DOFs, so a hinge
+            // end reports exactly zero moment (and the sibling-side forces
+            // already carry the hinge's effect).
+            let k_local = m.stiffness_with_releases(pi, pj)?;
             let T = m.transformation_matrix(pi, pj)?;
 
             // Extract 12 global DOFs for this member
@@ -1720,7 +2045,8 @@ impl FrameSolver3D {
             // Local end forces: f_local = K_local · u_local − f_eq_local
             // The equivalent load correction accounts for distributed member
             // loads. Without member loads f_eq_local = 0 and this reduces to
-            // the Phase 134 formula.
+            // the Phase 134 formula.  A released rotation transmits no
+            // moment, so its end force is zeroed (mask).
             let mut f_local = [0.0f64; 12];
             for i in 0..12 {
                 for j in 0..12 {
@@ -1728,6 +2054,7 @@ impl FrameSolver3D {
                 }
                 f_local[i] -= self.member_equiv_loads[member_idx][i];
             }
+            f_local = m.mask_released_end_forces(f_local);
 
             member_end_forces.push(f_local);
         }
@@ -1768,6 +2095,55 @@ impl FrameSolver3D {
     pub fn model(&self) -> &FrameModel3D {
         &self.model
     }
+}
+
+/// Invert a small dense square matrix (Gauss–Jordan, partial pivoting).
+///
+/// Used only by the end-release static condensation, where the matrix is the
+/// ≤6×6 released-rotation block of a 3-D frame element's local stiffness —
+/// positive definite for any physically valid section.  `None` means the
+/// block was singular (degenerate section); the callers then fall back to a
+/// zero matrix and the resulting non-finite response is surfaced by the
+/// solver's finiteness checks.
+fn invert_dense(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = a.len();
+    if n == 0 || a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let mut m: Vec<Vec<f64>> = a
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut r = row.clone();
+            r.extend((0..n).map(|j| if i == j { 1.0 } else { 0.0 }));
+            r
+        })
+        .collect();
+    for col in 0..n {
+        let mut pivot = col;
+        for r in col + 1..n {
+            if m[r][col].abs() > m[pivot][col].abs() {
+                pivot = r;
+            }
+        }
+        if m[pivot][col].abs() < 1e-300 {
+            return None;
+        }
+        m.swap(col, pivot);
+        let d = m[col][col];
+        for v in m[col].iter_mut() {
+            *v /= d;
+        }
+        for r in 0..n {
+            if r != col && m[r][col] != 0.0 {
+                let f = m[r][col];
+                for c in 0..2 * n {
+                    m[r][c] -= f * m[col][c];
+                }
+            }
+        }
+    }
+    Some(m.iter().map(|row| row[n..].to_vec()).collect())
 }
 
 // ---------------------------------------------------------------------------

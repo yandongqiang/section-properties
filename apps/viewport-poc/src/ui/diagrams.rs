@@ -23,11 +23,11 @@
 
 use egui;
 
+use structural_analysis::FrameAnalysisResult3D;
 use viewport_poc::camera::Camera3D;
-use viewport_poc::display::{fmt_eng, ResultDisplayState};
+use viewport_poc::display::{ResultDisplayState, fmt_eng};
 use viewport_poc::scene::{SectionForces3D, ViewportScene};
 use viewport_poc::selection::SelectionState;
-use structural_analysis::FrameAnalysisResult3D;
 
 use super::theme::ViewportPalette;
 use crate::ViewportApp;
@@ -307,7 +307,11 @@ pub(crate) fn compute(
         });
         let amp = AMP_FRACTION * m.length * display.diagram_scale;
         for &c in &comps {
-            let dir = if c.offset_axis() == 2 { m.axes.2 } else { m.axes.1 };
+            let dir = if c.offset_axis() == 2 {
+                m.axes.2
+            } else {
+                m.axes.1
+            };
             let rgb = c.rgb();
             let inv_peak = {
                 let p = peaks.get(c);
@@ -520,13 +524,7 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, d: &Diagrams, pal: Vie
 }
 
 /// Project a world point to screen space, or `None` if not visible.
-fn project(
-    cam: &Camera3D,
-    p: [f64; 3],
-    w: f64,
-    h: f64,
-    rect: egui::Rect,
-) -> Option<egui::Pos2> {
+fn project(cam: &Camera3D, p: [f64; 3], w: f64, h: f64, rect: egui::Rect) -> Option<egui::Pos2> {
     cam.project(p, w, h)
         .map(|s| egui::pos2(rect.min.x + s.x as f32, rect.min.y + s.y as f32))
 }

@@ -158,11 +158,15 @@ impl StandardView {
             StandardView::FrontTop => (std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_4),
             StandardView::FrontRight => (std::f64::consts::FRAC_PI_4, 0.0),
             StandardView::FrontLeft => (3.0 * std::f64::consts::FRAC_PI_4, 0.0),
-            StandardView::FrontBottom => (std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4),
+            StandardView::FrontBottom => {
+                (std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4)
+            }
             StandardView::BackTop => (-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_4),
             StandardView::BackRight => (-std::f64::consts::FRAC_PI_4, 0.0),
             StandardView::BackLeft => (-3.0 * std::f64::consts::FRAC_PI_4, 0.0),
-            StandardView::BackBottom => (-std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4),
+            StandardView::BackBottom => {
+                (-std::f64::consts::FRAC_PI_2, -std::f64::consts::FRAC_PI_4)
+            }
             StandardView::TopRight => (0.0, std::f64::consts::FRAC_PI_4),
             StandardView::TopLeft => (std::f64::consts::PI, std::f64::consts::FRAC_PI_4),
             StandardView::BottomRight => (0.0, -std::f64::consts::FRAC_PI_4),
@@ -179,38 +183,6 @@ impl StandardView {
         let (az, el) = self.angles();
         let ce = el.cos();
         [ce * az.cos(), el.sin(), ce * az.sin()]
-    }
-}
-
-/// Primary-drag interaction mode for the viewport.
-///
-/// The ribbon's View group exposes **Pan** and **Zoom** as radio buttons; the
-/// historical primary-drag behaviour is [`ViewMode::Orbit`], which stays the
-/// default.  The mode only decides what a *plain* primary drag does — the
-/// Shift/Ctrl box-select drag, the Alt section-cut drag and the right-button
-/// pan drag are unaffected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    /// Primary drag orbits the camera (azimuth / elevation).
-    #[default]
-    Orbit,
-    /// Primary drag pans the camera target in the camera plane.
-    Pan,
-    /// Primary drag dollies the camera (vertical drag = zoom).
-    Zoom,
-}
-
-impl ViewMode {
-    /// All modes, in ribbon order.
-    pub const ALL: [ViewMode; 3] = [ViewMode::Orbit, ViewMode::Pan, ViewMode::Zoom];
-
-    /// Short label for the status bar / ribbon tooltips.
-    pub const fn label(self) -> &'static str {
-        match self {
-            ViewMode::Orbit => "Orbit",
-            ViewMode::Pan => "Pan",
-            ViewMode::Zoom => "Zoom",
-        }
     }
 }
 
@@ -315,11 +287,16 @@ impl Camera3D {
         self.elevation = (self.elevation + delta_el).clamp(-1.55, 1.55);
     }
 
-    /// Pan: move target in the camera plane.
+    /// Pan: slide the target in the camera plane so the **model follows the
+    /// cursor** (grab metaphor).
+    ///
+    /// `dx` / `dy` are screen-space drag deltas with egui's axis convention
+    /// (y grows *downward*): a rightward drag moves the target along `−right`
+    /// and a downward drag moves it along `+up`.
     pub fn pan(&mut self, dx: f64, dy: f64) {
         let (_, right, up) = self.basis();
         self.target = project::sub(self.target, project::scale(right, dx));
-        self.target = project::sub(self.target, project::scale(up, dy));
+        self.target = project::add(self.target, project::scale(up, dy));
     }
 
     /// Zoom: scale distance.
@@ -505,6 +482,54 @@ mod tests {
         assert!(project::sub(eye0, eye1) != [0.0; 3]);
     }
 
+    /// Both drag axes must follow the cursor (grab metaphor): a positive
+    /// azimuth drift moves geometry to the right on screen, a positive
+    /// elevation drift moves it down (`+Y` probe; screen y grows downward).
+    #[test]
+    fn orbit_moves_screen_with_the_cursor() {
+        let (w, h) = (800.0, 600.0);
+        let mut cam = Camera3D::default();
+        let fx = cam.project([0.0, 0.0, 1.0], w, h).unwrap();
+        cam.orbit(0.05, 0.0);
+        let after_az = cam.project([0.0, 0.0, 1.0], w, h).unwrap();
+        assert!(
+            after_az.x > fx.x,
+            "rightward orbit must move the model right: {} -> {}",
+            fx.x,
+            after_az.x
+        );
+
+        let mut cam = Camera3D::default();
+        let fy = cam.project([0.0, 1.0, 0.0], w, h).unwrap();
+        cam.orbit(0.0, 0.05);
+        let after_el = cam.project([0.0, 1.0, 0.0], w, h).unwrap();
+        assert!(
+            after_el.y > fy.y,
+            "downward orbit must move the model down: {} -> {}",
+            fy.y,
+            after_el.y
+        );
+    }
+
+    /// Pan uses egui's screen axes (y grows downward): a rightward drag moves
+    /// the target along `−right`, a downward drag along `+up`, so the model
+    /// tracks the cursor instead of sliding away from it.
+    #[test]
+    fn pan_moves_target_with_the_cursor() {
+        let mut cam = Camera3D::default();
+        let (_, right, up) = cam.basis();
+        cam.pan(1.0, 1.0);
+        let moved = cam.target;
+        assert!(
+            project::dot(moved, right) < 0.0,
+            "rightward drag should move target −right, got {moved:?}"
+        );
+        assert!(
+            project::dot(moved, up) > 0.0,
+            "downward drag should move target +up, got {moved:?}"
+        );
+    }
+
     #[test]
     fn zoom_changes_distance() {
         let mut cam = Camera3D::default();
@@ -645,7 +670,10 @@ mod tests {
         for view in StandardView::EDGES {
             let d = view.eye_dir();
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            assert!((len - 1.0).abs() < 1e-12, "{view:?} not a unit vector: {d:?}");
+            assert!(
+                (len - 1.0).abs() < 1e-12,
+                "{view:?} not a unit vector: {d:?}"
+            );
             let big = d.iter().filter(|c| c.abs() > 0.5).count();
             assert_eq!(big, 2, "{view:?} should have two non-zero axes: {d:?}");
             let zero = d.iter().filter(|c| c.abs() < 1e-9).count();
@@ -709,30 +737,6 @@ mod tests {
                 assert!(v.iter().all(|c| c.is_finite()), "{view:?} non-finite basis");
             }
         }
-    }
-
-    // ── ViewMode (Phase B2: ribbon Pan / Zoom wiring) ─────────────────────
-
-    #[test]
-    fn view_mode_defaults_to_orbit() {
-        assert_eq!(ViewMode::default(), ViewMode::Orbit);
-    }
-
-    #[test]
-    fn view_mode_labels_are_distinct_and_nonempty() {
-        let labels: Vec<&str> = ViewMode::ALL.iter().map(|m| m.label()).collect();
-        assert_eq!(labels, vec!["Orbit", "Pan", "Zoom"]);
-        for l in labels {
-            assert!(!l.is_empty());
-        }
-    }
-
-    #[test]
-    fn view_mode_all_covers_every_variant_once() {
-        assert_eq!(ViewMode::ALL.len(), 3);
-        assert!(ViewMode::ALL.contains(&ViewMode::Orbit));
-        assert!(ViewMode::ALL.contains(&ViewMode::Pan));
-        assert!(ViewMode::ALL.contains(&ViewMode::Zoom));
     }
 
     // ── View-projection matrix ──────────────────────────────────────────
@@ -803,7 +807,10 @@ mod tests {
             let mut cam = Camera3D::default();
             cam.set_view(view);
             let m = cam.view_projection(4.0 / 3.0);
-            assert!(m.iter().all(|v| v.is_finite()), "{view:?} produced non-finite");
+            assert!(
+                m.iter().all(|v| v.is_finite()),
+                "{view:?} produced non-finite"
+            );
         }
     }
 }

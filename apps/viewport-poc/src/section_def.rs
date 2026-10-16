@@ -52,12 +52,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use section_properties::material::{presets, Material};
+use section_properties::material::{Material, presets};
+use section_properties::section_library::ParametricSection;
 use section_properties::section_library::primitive::{
     CircularHollowSection, CircularSection, RectangularSection, TriangularSection,
 };
 use section_properties::section_library::steel::{ISection, RectangularHollowSection};
-use section_properties::section_library::ParametricSection;
 use section_properties::{Section, SectionProperties, WarpingProperties};
 
 /// Millimetre → metre conversion factor.
@@ -343,9 +343,7 @@ impl SectionDef {
         self.validate()?;
         let p = &self.params;
         let section = match self.kind {
-            SectionKind::Rectangle => {
-                RectangularSection::new(p.width * MM, p.height * MM).build()
-            }
+            SectionKind::Rectangle => RectangularSection::new(p.width * MM, p.height * MM).build(),
             SectionKind::Circle => CircularSection::new(p.diameter * MM / 2.0).build(),
             SectionKind::Tube => CircularHollowSection::new(
                 p.diameter * MM / 2.0,
@@ -479,9 +477,7 @@ impl SectionDef {
         } else {
             Err(format!(
                 "invalid material: E = {:.4e} Pa, ν = {:.4}, G = {:.4e} Pa",
-                material.youngs_modulus,
-                material.poissons_ratio,
-                material.shear_modulus
+                material.youngs_modulus, material.poissons_ratio, material.shear_modulus
             ))
         }
     }
@@ -952,11 +948,7 @@ mod tests {
 
     #[test]
     fn polygonal_shapes_build_and_compute_geometry() {
-        for kind in [
-            SectionKind::IBeam,
-            SectionKind::Box,
-            SectionKind::Triangle,
-        ] {
+        for kind in [SectionKind::IBeam, SectionKind::Box, SectionKind::Triangle] {
             let def = def_of(kind);
             let (_, p) = def
                 .compute_geometry()
@@ -1001,7 +993,10 @@ mod tests {
     #[test]
     fn designation_is_unit_aware() {
         assert_eq!(rect(100.0, 200.0).designation(), "RECT 100×200");
-        assert_eq!(def_of(SectionKind::IBeam).designation(), "I 300×150×7.0×10.0");
+        assert_eq!(
+            def_of(SectionKind::IBeam).designation(),
+            "I 300×150×7.0×10.0"
+        );
         assert_eq!(def_of(SectionKind::Tube).designation(), "CHS Ø100×5.0");
     }
 

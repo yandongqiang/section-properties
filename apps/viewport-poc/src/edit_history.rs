@@ -1,9 +1,20 @@
 //! Bounded undo/redo history for engineering model edits.
 //!
 //! Uses a snapshot-based approach: each committed edit stores a clone of
-//! the `EditModel` *before* the edit.  Undo restores the most recent
-//! snapshot; redo reverses the undo.  The history is bounded by a
-//! capacity (default 50); the oldest entry is discarded when full.
+//! the `EditModel` *before* the edit, tagged with a short human label
+//! describing the edit (e.g. `"Add node N5"`, `"Delete member M2"`).  Undo
+//! restores the most recent snapshot; redo reverses the undo.  The history is
+//! bounded by a capacity (default 50); the oldest entry is discarded when
+//! full.
+//!
+//! # Labels (Phase 159-B)
+//!
+//! The [`record_labeled`](EditHistory::record_labeled) entry point stores a
+//! per-edit short description used by the bottom **History** dock tab.  The
+//! legacy [`record`](EditHistory::record) keeps working (it records an empty
+//! label), so older call sites and tests are unaffected.  Labels ride along
+//! with their snapshots through undo/redo, so a redoable entry keeps the
+//! description of the edit it would re-apply.
 //!
 //! # Revision invariant
 //!
@@ -14,10 +25,17 @@
 
 use crate::edit_model::EditModel;
 
+/// One stored model transition: the model *before* the edit plus a short
+/// label describing the edit that followed it.
+struct Snapshot {
+    model: EditModel,
+    label: String,
+}
+
 /// Bounded snapshot-based edit history.
 pub struct EditHistory {
-    undo: Vec<EditModel>,
-    redo: Vec<EditModel>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     capacity: usize,
 }
 
@@ -40,36 +58,58 @@ impl EditHistory {
         }
     }
 
-    /// Record a model transition.
+    /// Record a model transition with no label (legacy entry point).
     ///
-    /// `previous` is the model state *before* the edit.  The redo stack
-    /// is cleared because the edit branch has diverged.
+    /// Kept for callers (and tests) that do not describe their edit; the
+    /// History dock shows such entries as `"(edit)"`.
     pub fn record(&mut self, previous: EditModel) {
-        if self.undo.len() >= self.capacity && self.capacity > 0 {
+        self.record_labeled(previous, String::new());
+    }
+
+    /// Record a model transition together with a short label describing the
+    /// edit (e.g. `"Add node N5"`).
+    ///
+    /// `previous` is the model state *before* the edit.  The redo stack is
+    /// cleared because the edit branch has diverged.
+    pub fn record_labeled(&mut self, previous: EditModel, label: impl Into<String>) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.undo.len() >= self.capacity {
             self.undo.remove(0);
         }
-        if self.capacity > 0 {
-            self.undo.push(previous);
-            self.redo.clear();
-        }
+        self.undo.push(Snapshot {
+            model: previous,
+            label: label.into(),
+        });
+        self.redo.clear();
     }
 
     /// Undo: pop the most recent snapshot from the undo stack and push
     /// `current` onto the redo stack.  Returns the model to restore, or
     /// `None` if there is nothing to undo.
+    ///
+    /// The popped snapshot's label is carried onto the redo entry, so the
+    /// edit can be described identically if it is re-applied.
     pub fn undo(&mut self, current: EditModel) -> Option<EditModel> {
-        let previous = self.undo.pop()?;
-        self.redo.push(current);
-        Some(previous)
+        let snapshot = self.undo.pop()?;
+        self.redo.push(Snapshot {
+            model: current,
+            label: snapshot.label,
+        });
+        Some(snapshot.model)
     }
 
     /// Redo: pop the most recent snapshot from the redo stack and push
     /// `current` onto the undo stack.  Returns the model to restore, or
     /// `None` if there is nothing to redo.
     pub fn redo(&mut self, current: EditModel) -> Option<EditModel> {
-        let next = self.redo.pop()?;
-        self.undo.push(current);
-        Some(next)
+        let snapshot = self.redo.pop()?;
+        self.undo.push(Snapshot {
+            model: current,
+            label: snapshot.label,
+        });
+        Some(snapshot.model)
     }
 
     /// `true` if undo is available.
@@ -101,6 +141,30 @@ impl EditHistory {
     /// Current capacity.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    // ── Label accessors (Phase 159-B) ───────────────────────────────────
+
+    /// Short descriptions of the committed edits on the undo stack, **newest
+    /// first**.
+    pub fn undo_labels(&self) -> Vec<&str> {
+        self.undo.iter().rev().map(|s| s.label.as_str()).collect()
+    }
+
+    /// Short descriptions of the undone edits available to redo, **most
+    /// recently undone first** (i.e. the next redo first).
+    pub fn redo_labels(&self) -> Vec<&str> {
+        self.redo.iter().rev().map(|s| s.label.as_str()).collect()
+    }
+
+    /// Label of the edit that Undo would revert (the top of the undo stack).
+    pub fn next_undo_label(&self) -> Option<&str> {
+        self.undo.last().map(|s| s.label.as_str())
+    }
+
+    /// Label of the edit that Redo would re-apply (the top of the redo stack).
+    pub fn next_redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|s| s.label.as_str())
     }
 }
 
@@ -199,5 +263,55 @@ mod tests {
         let mut h = EditHistory::new(0);
         h.record(make_model(0));
         assert!(!h.can_undo());
+    }
+
+    // ── Labels (Phase 159-B) ────────────────────────────────────────────
+
+    #[test]
+    fn labels_are_listed_newest_first() {
+        let mut h = EditHistory::default();
+        h.record_labeled(make_model(0), "Add node N5");
+        h.record_labeled(make_model(1), "Delete member M2");
+        h.record_labeled(make_model(2), "Apply section");
+        assert_eq!(
+            h.undo_labels(),
+            vec!["Apply section", "Delete member M2", "Add node N5"]
+        );
+        assert_eq!(h.next_undo_label(), Some("Apply section"));
+        assert_eq!(h.undo_depth(), 3);
+    }
+
+    #[test]
+    fn labels_ride_along_through_undo_and_redo() {
+        let mut h = EditHistory::default();
+        h.record_labeled(make_model(0), "Add node N5");
+        h.record_labeled(make_model(1), "Delete member M2");
+        // Undo the most recent edit: it moves to the redo stack with its label.
+        let _ = h.undo(make_model(2));
+        assert_eq!(h.undo_labels(), vec!["Add node N5"]);
+        assert_eq!(h.redo_labels(), vec!["Delete member M2"]);
+        assert_eq!(h.next_redo_label(), Some("Delete member M2"));
+        // Redo it: the label returns to the undo stack.
+        let _ = h.redo(make_model(1));
+        assert_eq!(h.undo_labels(), vec!["Delete member M2", "Add node N5"]);
+        assert!(h.redo_labels().is_empty());
+    }
+
+    #[test]
+    fn legacy_record_yields_an_empty_label() {
+        let mut h = EditHistory::default();
+        h.record(make_model(0));
+        assert_eq!(h.undo_labels(), vec![""]);
+        assert_eq!(h.next_undo_label(), Some(""));
+    }
+
+    #[test]
+    fn labels_are_dropped_with_the_capacity() {
+        let mut h = EditHistory::new(2);
+        h.record_labeled(make_model(0), "a");
+        h.record_labeled(make_model(1), "b");
+        h.record_labeled(make_model(2), "c");
+        // "a" (the oldest) is discarded.
+        assert_eq!(h.undo_labels(), vec!["c", "b"]);
     }
 }

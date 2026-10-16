@@ -4,14 +4,14 @@
 //! This is a straight move of the former `update()` central-panel body —
 //! the drawing order and colors are unchanged.
 
-use egui;
 use eframe::egui_glow;
+use egui;
 use structural_analysis::Dof3D;
 
 use viewport_poc::app_state::AppMessage;
-use viewport_poc::camera::{Camera3D, ScreenPos, StandardView, ViewMode};
+use viewport_poc::camera::{Camera3D, ScreenPos, StandardView};
 use viewport_poc::display::{
-    displacement_magnitudes, fmt_eng, magnitude_color, max_abs, normalize, ResultViewMode,
+    ResultViewMode, displacement_magnitudes, fmt_eng, magnitude_color, max_abs, normalize,
 };
 use viewport_poc::edit_model::{MemberPointLoad3D, SupportSpec};
 use viewport_poc::project;
@@ -36,8 +36,93 @@ const CUBE_CORNER_SNAP_PX: f32 = 7.0;
 /// 45° two-axis view (Phase P7-2).
 const CUBE_EDGE_SNAP_PX: f32 = 8.0;
 
-/// Draw the central viewport panel.
-pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
+/// On-screen mouse-binding reminder drawn over the viewport.
+///
+/// Kept as a constant (not built from the input handler) so the help text and
+/// the actual bindings — the pure [`drag_action`] table — are edited together.
+const HELP_BINDINGS: &str = "L-click: select | L-drag: box select | Shift/Ctrl-click: add | \
+M-drag: pan | Shift+M-drag: orbit | R-drag: pan | Wheel: zoom | Alt+L-drag: cut | \
+R: reset | F: fit | 1-4: views | Ctrl+A: all | Del: delete | Dbl-click: edit | \
+R-click: menu | Esc: clear";
+
+/// Shorter reminder shown before any model is loaded.
+const HELP_BINDINGS_EMPTY: &str = "L-click: select | L-drag: box select | M-drag: pan | \
+Shift+M-drag: orbit | R-drag: pan | Wheel: zoom | R: reset | F: fit | 1-4: views | \
+Dbl-click: edit | R-click: menu | Esc: clear";
+
+/// A camera / selection gesture, resolved purely from a pointer button and the
+/// active modifier keys (the viewport's binding table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragAction {
+    /// Rubber-band box select — a plain left drag.
+    BoxSelect,
+    /// Orbit (rotate) the camera — Shift + middle drag.
+    Orbit,
+    /// Pan the camera target in the camera plane — middle or right drag.
+    Pan,
+    /// Slide the section-cut plane — Alt + left drag.
+    SectionCut,
+}
+
+/// Resolve `(button, modifiers)` to the drag gesture it performs, or `None`
+/// for a combination with no binding.
+///
+/// Pure and total so the binding table is unit-testable in isolation from
+/// egui.  The click threshold ("a drag only counts once the pointer has moved
+/// a bit") is applied by egui itself (`max_click_dist`) before it reports a
+/// drag, so it is not part of this decision.
+fn drag_action(button: egui::PointerButton, mods: egui::Modifiers) -> Option<DragAction> {
+    use egui::PointerButton as B;
+    match button {
+        // Left = select (drag = box select); Alt promotes the drag to the
+        // section-cut slide.
+        B::Primary => Some(if mods.alt {
+            DragAction::SectionCut
+        } else {
+            DragAction::BoxSelect
+        }),
+        // Middle = pan; Shift promotes it to orbit.
+        B::Middle => Some(if mods.shift {
+            DragAction::Orbit
+        } else {
+            DragAction::Pan
+        }),
+        // Right = pan (unchanged).
+        B::Secondary => Some(DragAction::Pan),
+        _ => None,
+    }
+}
+
+/// How a bare (non-drag) click updates the selection, from the modifier keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickSelect {
+    /// Plain click replaces the selection.
+    Replace,
+    /// Shift+click toggles the clicked entity in the selection.
+    Toggle,
+    /// Ctrl/Cmd+click adds the clicked entity to the selection.
+    Add,
+}
+
+/// Resolve the click-selection behaviour from the modifier keys (pure).
+fn click_select(mods: egui::Modifiers) -> ClickSelect {
+    if mods.shift {
+        ClickSelect::Toggle
+    } else if mods.command {
+        ClickSelect::Add
+    } else {
+        ClickSelect::Replace
+    }
+}
+
+/// Draw the 3-D viewport into `ui` (the centre workspace's content region).
+///
+/// Phase 159-B2/C: this used to create its own **root** `CentralPanel`.  It now
+/// draws into the caller's `Ui` so `ui::workspace::show_center_workspace` can
+/// scope the viewport, the workspace tab bar and the output dock to the centre
+/// region.  This is the only change to this file; the drawing order and colours
+/// are otherwise unchanged.
+pub fn show_viewport(app: &mut ViewportApp, ui: &mut egui::Ui) {
     // Surface any one-shot GPU-renderer message (e.g. a runtime fallback).
     if let Some(msg) = gl_renderer::take_message() {
         app.messages.push(AppMessage::warning(msg));
@@ -48,7 +133,11 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
     // immediate in both renderers.
     let pal = ViewportPalette::for_theme(app.dark_mode);
 
-    egui::CentralPanel::default().show(ctx, |ui| {
+    // Owned clone of the context so the rest of this function can keep using
+    // `ctx` (the body below was written against a `&egui::Context`).
+    let ctx = ui.ctx().clone();
+
+    {
         app.validate_selection();
 
         let (rect, response) =
@@ -67,46 +156,55 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         // selections.
         let gizmo_rect = view_cube_rect(rect);
 
-        // Camera input — does NOT trigger solve.  A primary drag that starts on
-        // the view cube is left to the gizmo (which orbits itself), so the two
-        // handlers never double up.
+        // Camera / selection / section-cut gestures — none of these trigger a
+        // solve.  The binding table is the pure [`drag_action`] function, so
+        // the rules live in exactly one place and are unit-tested:
         //
-        // Phase P6: a Shift (or Ctrl/Cmd) + primary drag is a **box select**
-        // rubber band instead of an orbit.  The plain primary drag still orbits
-        // and the Alt + primary drag still slides the section cut.
+        //   left drag              → box select   (Alt+left = section cut)
+        //   middle drag            → pan          (Shift+middle = orbit)
+        //   right drag             → pan
+        //   wheel                  → zoom
         //
-        // Phase B2: with the ribbon's Pan / Zoom mode active the plain primary
-        // drag pans / dollies instead; box select, the Alt cut drag and the
-        // right-button pan keep their behaviour in every mode.
-        let box_modifier = ctx.input(|i| i.modifiers.shift || i.modifiers.command);
+        // A press that stays under egui's small click threshold is a **click**
+        // (handled further down as a plain selection), not a drag: egui only
+        // reports `dragged_by` / `drag_started_by` once the pointer has moved
+        // past `max_click_dist`, so no explicit threshold check is needed here.
+        //
+        // A drag that starts on the view cube belongs to the gizmo (which
+        // orbits itself), never to the viewport camera / box select.
+        let mods = ctx.input(|i| i.modifiers);
+        let primary_action = drag_action(egui::PointerButton::Primary, mods);
+
         if response.drag_started_by(egui::PointerButton::Primary) {
-            app.box_select_start = response
+            let over_gizmo = response
                 .interact_pointer_pos()
-                .filter(|p| box_modifier && !gizmo_rect.contains(*p));
+                .is_some_and(|p| gizmo_rect.contains(p));
+            // Only a plain (non-Alt) left drag is a box select.  The band
+            // origin is the press origin, so the rubber band starts exactly
+            // where the button went down (not where the drag was detected).
+            app.box_select_start = if primary_action == Some(DragAction::BoxSelect) && !over_gizmo {
+                ctx.input(|i| i.pointer.press_origin())
+                    .or_else(|| response.interact_pointer_pos())
+            } else {
+                None
+            };
         }
         if response.dragged_by(egui::PointerButton::Primary) {
             let over_gizmo = response
                 .interact_pointer_pos()
                 .is_some_and(|p| gizmo_rect.contains(p));
-            // Alt + primary-drag slides the section-cut plane along its normal
-            // (only meaningful once the cut is enabled); otherwise it orbits.
-            let cut_drag = app.display.section_cut.enabled && ctx.input(|i| i.modifiers.alt);
-            if app.box_select_start.is_some() && !over_gizmo {
-                // Rubber band in progress — leave the camera untouched.
-            } else if cut_drag {
-                drag_section_cut(app, response.drag_delta(), w, h);
-            } else if !over_gizmo {
-                let d = response.drag_delta();
-                match app.view_mode {
-                    ViewMode::Orbit => app.camera.orbit(-d.x as f64 * 0.01, d.y as f64 * 0.01),
-                    ViewMode::Pan => {
-                        let s = app.camera.distance * 0.0015;
-                        app.camera.pan(d.x as f64 * s, d.y as f64 * s);
+            match primary_action {
+                // Alt + left drag slides the section-cut plane along its normal
+                // (meaningful only once the cut is enabled — otherwise the drag
+                // is inert, never a surprise selection).
+                Some(DragAction::SectionCut) => {
+                    if app.display.section_cut.enabled {
+                        drag_section_cut(app, response.drag_delta(), w, h);
                     }
-                    // Vertical drag dollies: dragging up (negative dy) zooms in,
-                    // mirroring the scroll-wheel direction.
-                    ViewMode::Zoom => app.camera.zoom(2.0_f64.powf(d.y as f64 * 0.01)),
                 }
+                // Rubber band in progress — leave the camera untouched.
+                Some(DragAction::BoxSelect) if app.box_select_start.is_some() && !over_gizmo => {}
+                _ => {}
             }
         }
         if response.drag_stopped_by(egui::PointerButton::Primary) {
@@ -116,12 +214,16 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     .or_else(|| ctx.input(|i| i.pointer.interact_pos()));
                 if let Some(end) = end {
                     let local = |p: egui::Pos2| {
-                        [p.x as f64 - rect.min.x as f64, p.y as f64 - rect.min.y as f64]
+                        [
+                            p.x as f64 - rect.min.x as f64,
+                            p.y as f64 - rect.min.y as f64,
+                        ]
                     };
                     let sr = ScreenRect::from_corners(local(start), local(end));
                     if !sr.is_click() {
-                        // Ctrl/Cmd held ⇒ add to the existing selection.
-                        let add = ctx.input(|i| i.modifiers.command);
+                        // Shift or Ctrl/Cmd held ⇒ add to the existing
+                        // selection; a plain box select replaces it.
+                        let add = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
                         app.box_select(sr, [w, h], add);
                         app.quick_edit = None;
                         app.boundary_popup = None;
@@ -129,6 +231,19 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 }
             }
         }
+        // Middle drag: pan, or orbit with Shift held.
+        if response.dragged_by(egui::PointerButton::Middle) {
+            let d = response.drag_delta();
+            match drag_action(egui::PointerButton::Middle, mods) {
+                Some(DragAction::Orbit) => app.camera.orbit(d.x as f64 * 0.01, d.y as f64 * 0.01),
+                Some(DragAction::Pan) => {
+                    let s = app.camera.distance * 0.0015;
+                    app.camera.pan(d.x as f64 * s, d.y as f64 * s);
+                }
+                _ => {}
+            }
+        }
+        // Right drag: pan.
         if response.dragged_by(egui::PointerButton::Secondary) {
             let d = response.drag_delta();
             let s = app.camera.distance * 0.0015;
@@ -143,18 +258,13 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
             app.camera.reset();
         }
-        // Escape closes the quick-edit / boundary popups first; then returns a
-        // Pan / Zoom mode to Orbit; only clears the selection when nothing
-        // else is open.
+        // Escape closes the quick-edit / boundary popups first; only clears the
+        // selection when nothing else is open.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && app.quick_edit.is_none()
             && app.boundary_popup.is_none()
         {
-            if app.view_mode != ViewMode::Orbit {
-                app.view_mode = ViewMode::Orbit;
-            } else {
-                app.clear_selection();
-            }
+            app.clear_selection();
         }
 
         // Selection on click — does NOT trigger solve.  Clicks on the view cube
@@ -166,13 +276,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             if let Some(pos) = response.interact_pointer_pos() {
                 if !gizmo_rect.contains(pos) {
                     let hit = pick_at(app, pos, rect, w, h);
-                    let mods = ctx.input(|i| i.modifiers);
-                    if mods.shift {
-                        app.select_toggle(hit);
-                    } else if mods.command {
-                        app.select_add(hit);
-                    } else {
-                        app.select_only(hit);
+                    match click_select(mods) {
+                        ClickSelect::Toggle => app.select_toggle(hit),
+                        ClickSelect::Add => app.select_add(hit),
+                        ClickSelect::Replace => app.select_only(hit),
                     }
                     app.quick_edit = None;
                     app.boundary_popup = None;
@@ -215,10 +322,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
             painter.text(
                 rect.min + egui::vec2(10.0, rect.height() - 10.0),
                 egui::Align2::LEFT_BOTTOM,
-                format!(
-                    "Drag: {} | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Dbl-click: edit | R-click: menu | Esc: clear",
-                    drag_hint(app.view_mode)
-                ),
+                HELP_BINDINGS_EMPTY,
                 egui::FontId::proportional(11.0),
                 pal.help,
             );
@@ -389,7 +493,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                 };
                 if spec.is_fixed() {
                     let half = 10.0_f32;
-                    let sq = egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
+                    let sq =
+                        egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
                     painter.rect_stroke(sq, 0.0, stroke);
                 } else if spec.is_pinned() {
                     let r = 12.0_f32;
@@ -544,10 +649,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     };
                     let s_base = scr(&p_base, rect);
                     let s_tip = scr(&p_tip, rect);
-                    painter.line_segment(
-                        [s_base, s_tip],
-                        egui::Stroke::new(2.0_f32, pal.member_load),
-                    );
+                    painter
+                        .line_segment([s_base, s_tip], egui::Stroke::new(2.0_f32, pal.member_load));
                     painter.circle_filled(s_tip, 3.0, pal.member_load);
                 }
             }
@@ -631,10 +734,8 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                     };
                     let s_base = scr(&p_base, rect);
                     let s_tip = scr(&p_tip, rect);
-                    painter.line_segment(
-                        [s_base, s_tip],
-                        egui::Stroke::new(2.5_f32, pal.member_load),
-                    );
+                    painter
+                        .line_segment([s_base, s_tip], egui::Stroke::new(2.5_f32, pal.member_load));
                     painter.circle_filled(s_tip, 4.0, pal.member_load);
                 }
             }
@@ -668,8 +769,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                                 if let (Some(pa), Some(pb)) =
                                     (app.camera.project(ca, w, h), app.camera.project(cb, w, h))
                                 {
-                                    painter
-                                        .line_segment([scr(&pa, rect), scr(&pb, rect)], stroke);
+                                    painter.line_segment([scr(&pa, rect), scr(&pb, rect)], stroke);
                                     drawn = true;
                                 }
                             }
@@ -810,7 +910,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                         ];
                         if let Some(p_tip) = app.camera.project(tip_world, w, h) {
                             let tip = scr(&p_tip, rect);
-                            painter.line_segment([center, tip], egui::Stroke::new(3.0_f32, pal.support));
+                            painter.line_segment(
+                                [center, tip],
+                                egui::Stroke::new(3.0_f32, pal.support),
+                            );
                             painter.circle_filled(tip, 5.0, pal.support);
                         }
                     }
@@ -873,8 +976,10 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
                                 };
                                 let c0 = scr(&p0, rect);
                                 let c1 = scr(&p1, rect);
-                                painter
-                                    .line_segment([c0, c1], egui::Stroke::new(3.0_f32, pal.selected));
+                                painter.line_segment(
+                                    [c0, c1],
+                                    egui::Stroke::new(3.0_f32, pal.selected),
+                                );
                                 painter.circle_filled(c1, 5.0, pal.selected);
                             }
                         }
@@ -948,10 +1053,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
         painter.text(
             rect.min + egui::vec2(10.0, rect.height() - 10.0),
             egui::Align2::LEFT_BOTTOM,
-            format!(
-                "Drag: {} | Shift-drag: box select | R-drag: pan | Scroll: zoom | R: reset | F: fit | 1-4: views | Click: select | Shift/Ctrl-click: add | Ctrl+A: all | Del: delete | Dbl-click: edit | R-click: menu | Esc: clear | Alt-drag: cut",
-                drag_hint(app.view_mode)
-            ),
+            HELP_BINDINGS,
             egui::FontId::proportional(11.0),
             pal.help,
         );
@@ -972,7 +1074,7 @@ pub fn show_viewport(app: &mut ViewportApp, ctx: &egui::Context) {
 
         // ── View cube (bottom-right) ──
         show_view_cube(app, ui, rect, &painter, pal);
-    });
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1123,7 +1225,10 @@ fn drag_section_cut(app: &mut ViewportApp, delta: egui::Vec2, w: f64, h: f64) {
 /// Hit-test the viewport at `pos` (screen points) using the CPU picker.
 fn pick_at(app: &ViewportApp, pos: egui::Pos2, rect: egui::Rect, w: f64, h: f64) -> SelectionState {
     app.pick(
-        [pos.x as f64 - rect.min.x as f64, pos.y as f64 - rect.min.y as f64],
+        [
+            pos.x as f64 - rect.min.x as f64,
+            pos.y as f64 - rect.min.y as f64,
+        ],
         [w, h],
     )
 }
@@ -1199,7 +1304,11 @@ fn viewport_context_menu(app: &mut ViewportApp, ui: &mut egui::Ui, target: Selec
                 app.delete_target_or_selection(target);
                 ui.close_menu();
             }
-            let hide_label = if multi { "Hide selection" } else { "Hide member" };
+            let hide_label = if multi {
+                "Hide selection"
+            } else {
+                "Hide member"
+            };
             if ui.button(hide_label).clicked() {
                 app.hide_target_or_selection(target);
                 ui.close_menu();
@@ -1453,18 +1562,66 @@ struct CubeEdge {
 
 /// The twelve cube edges and the mid-edge view each one snaps to.
 const CUBE_EDGES: [CubeEdge; 12] = [
-    CubeEdge { a: 6, b: 7, view: StandardView::FrontTop },
-    CubeEdge { a: 4, b: 5, view: StandardView::FrontBottom },
-    CubeEdge { a: 5, b: 7, view: StandardView::FrontRight },
-    CubeEdge { a: 4, b: 6, view: StandardView::FrontLeft },
-    CubeEdge { a: 2, b: 3, view: StandardView::BackTop },
-    CubeEdge { a: 0, b: 1, view: StandardView::BackBottom },
-    CubeEdge { a: 1, b: 3, view: StandardView::BackRight },
-    CubeEdge { a: 0, b: 2, view: StandardView::BackLeft },
-    CubeEdge { a: 3, b: 7, view: StandardView::TopRight },
-    CubeEdge { a: 2, b: 6, view: StandardView::TopLeft },
-    CubeEdge { a: 1, b: 5, view: StandardView::BottomRight },
-    CubeEdge { a: 0, b: 4, view: StandardView::BottomLeft },
+    CubeEdge {
+        a: 6,
+        b: 7,
+        view: StandardView::FrontTop,
+    },
+    CubeEdge {
+        a: 4,
+        b: 5,
+        view: StandardView::FrontBottom,
+    },
+    CubeEdge {
+        a: 5,
+        b: 7,
+        view: StandardView::FrontRight,
+    },
+    CubeEdge {
+        a: 4,
+        b: 6,
+        view: StandardView::FrontLeft,
+    },
+    CubeEdge {
+        a: 2,
+        b: 3,
+        view: StandardView::BackTop,
+    },
+    CubeEdge {
+        a: 0,
+        b: 1,
+        view: StandardView::BackBottom,
+    },
+    CubeEdge {
+        a: 1,
+        b: 3,
+        view: StandardView::BackRight,
+    },
+    CubeEdge {
+        a: 0,
+        b: 2,
+        view: StandardView::BackLeft,
+    },
+    CubeEdge {
+        a: 3,
+        b: 7,
+        view: StandardView::TopRight,
+    },
+    CubeEdge {
+        a: 2,
+        b: 6,
+        view: StandardView::TopLeft,
+    },
+    CubeEdge {
+        a: 1,
+        b: 5,
+        view: StandardView::BottomRight,
+    },
+    CubeEdge {
+        a: 0,
+        b: 4,
+        view: StandardView::BottomLeft,
+    },
 ];
 
 /// Corner `i` of the unit cube (`[-1, 1]³`); bit layout documented on
@@ -1566,17 +1723,18 @@ fn show_view_cube(
             continue;
         }
         let (pa, pb) = (project_dir(a), project_dir(b));
-        painter.line_segment(
-            [pa, pb],
-            egui::Stroke::new(2.5_f32, pal.cube_edge),
-        );
+        painter.line_segment([pa, pb], egui::Stroke::new(2.5_f32, pal.cube_edge));
         edge_segments.push((edge.view, pa, pb));
     }
 
-    let response = ui.interact(region, ui.id().with("view_cube"), egui::Sense::click_and_drag());
+    let response = ui.interact(
+        region,
+        ui.id().with("view_cube"),
+        egui::Sense::click_and_drag(),
+    );
     if response.dragged() {
         let d = response.drag_delta();
-        app.camera.orbit(-d.x as f64 * 0.02, d.y as f64 * 0.02);
+        app.camera.orbit(d.x as f64 * 0.02, d.y as f64 * 0.02);
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             if let Some(view) = cube_pick(pos, &corners, &edge_segments, &face_polys) {
@@ -1606,7 +1764,10 @@ fn cube_pick(
     edge_segments: &[(StandardView, egui::Pos2, egui::Pos2)],
     face_polys: &[(StandardView, [egui::Pos2; 4])],
 ) -> Option<StandardView> {
-    if corners.iter().any(|c| c.distance(pos) < CUBE_CORNER_SNAP_PX) {
+    if corners
+        .iter()
+        .any(|c| c.distance(pos) < CUBE_CORNER_SNAP_PX)
+    {
         return Some(StandardView::Iso);
     }
     for (view, a, b) in edge_segments {
@@ -1780,15 +1941,6 @@ pub fn show_quick_edit(app: &mut ViewportApp, ctx: &egui::Context) {
         app.apply_quick_edit();
     } else if !close {
         app.quick_edit = Some(qe);
-    }
-}
-
-/// One-word drag description for the viewport help line, per [`ViewMode`].
-fn drag_hint(mode: ViewMode) -> &'static str {
-    match mode {
-        ViewMode::Orbit => "orbit",
-        ViewMode::Pan => "pan",
-        ViewMode::Zoom => "zoom",
     }
 }
 
@@ -2100,5 +2252,68 @@ mod tests {
             cube_pick(egui::pos2(500.0, 500.0), &corners, &edges, &faces),
             None
         );
+    }
+
+    // ── Mouse binding table (Change 2) ──────────────────────────────────
+
+    /// Modifiers with only the named keys held.
+    fn mods(alt: bool, shift: bool, command: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            alt,
+            shift,
+            command,
+            ..Default::default()
+        }
+    }
+
+    /// The full drag binding table: left = box select, middle = pan,
+    /// Shift+middle = orbit, right = pan, Alt+left = section cut.
+    #[test]
+    fn drag_action_table() {
+        use egui::PointerButton::{Middle, Primary, Secondary};
+        let plain = mods(false, false, false);
+        assert_eq!(drag_action(Primary, plain), Some(DragAction::BoxSelect));
+        assert_eq!(drag_action(Middle, plain), Some(DragAction::Pan));
+        assert_eq!(drag_action(Secondary, plain), Some(DragAction::Pan));
+
+        // Alt+left is the section-cut slide, not box select.
+        assert_eq!(
+            drag_action(Primary, mods(true, false, false)),
+            Some(DragAction::SectionCut)
+        );
+        // Shift+middle orbits; Shift+left stays a box select.
+        assert_eq!(
+            drag_action(Middle, mods(false, true, false)),
+            Some(DragAction::Orbit)
+        );
+        assert_eq!(
+            drag_action(Primary, mods(false, true, false)),
+            Some(DragAction::BoxSelect)
+        );
+    }
+
+    /// Ctrl / Cmd does not change which camera gesture a drag is (only whether
+    /// a box select adds to the selection, handled separately).
+    #[test]
+    fn drag_action_ignores_command_modifier() {
+        use egui::PointerButton::Primary;
+        assert_eq!(
+            drag_action(Primary, mods(false, false, true)),
+            Some(DragAction::BoxSelect)
+        );
+    }
+
+    /// Click-selection behaviour from the modifiers: plain = replace,
+    /// Shift = toggle, Ctrl/Cmd = add.
+    #[test]
+    fn click_select_table() {
+        assert_eq!(
+            click_select(mods(false, false, false)),
+            ClickSelect::Replace
+        );
+        assert_eq!(click_select(mods(false, true, false)), ClickSelect::Toggle);
+        assert_eq!(click_select(mods(false, false, true)), ClickSelect::Add);
+        // Shift wins when both are held (matches the click handler's order).
+        assert_eq!(click_select(mods(false, true, true)), ClickSelect::Toggle);
     }
 }

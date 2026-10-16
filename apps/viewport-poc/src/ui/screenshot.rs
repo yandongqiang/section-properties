@@ -210,7 +210,12 @@ mod tests {
         // Empty directory → 1.
         assert_eq!(next_capture_index(&dir), 1);
 
-        for name in ["capture-1.bmp", "capture-7.bmp", "capture-x.bmp", "notes.txt"] {
+        for name in [
+            "capture-1.bmp",
+            "capture-7.bmp",
+            "capture-x.bmp",
+            "notes.txt",
+        ] {
             std::fs::write(dir.join(name), b"junk").unwrap();
         }
         assert_eq!(next_capture_index(&dir), 8);

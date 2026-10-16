@@ -20,6 +20,7 @@ use viewport_poc::scene::ViewportScene;
 use viewport_poc::selection::{ScreenRect, SelectionSet, SelectionState};
 use viewport_poc::{model, persistence, project};
 
+use super::inspector::RightPanelMode;
 use super::module::WorkModule;
 use super::status::BottomTab;
 use crate::{BoundaryPopup, MemberEditBuffer, PendingAction, QuickEdit, ViewportApp};
@@ -53,15 +54,22 @@ impl ViewportApp {
             new_member_j: String::new(),
             member_edit: MemberEditBuffer::default(),
             project_path: None,
+            last_project_path: settings
+                .last_project_path
+                .as_deref()
+                .map(std::path::PathBuf::from),
             saved_fingerprint: None,
-            file_path_input: String::new(),
+            file_path_input: settings.last_project_path.clone().unwrap_or_default(),
+            focus_project_path: false,
             show_unsaved_dialog: false,
             pending_action: PendingAction::None,
             history: EditHistory::default(),
             module: WorkModule::Model,
-            bottom_tab: BottomTab::Messages,
+            bottom_tab: BottomTab::Problems,
             bottom_dock_collapsed: false,
             inspector_collapsed: false,
+            left_panel_collapsed: false,
+            right_panel_mode: RightPanelMode::default(),
             section_editor: super::section::SectionEditorState::default(),
             dark_mode: settings.dark_mode,
             settings_path,
@@ -71,7 +79,11 @@ impl ViewportApp {
             quick_edit: None,
             boundary_popup: None,
             box_select_start: None,
-            view_mode: viewport_poc::camera::ViewMode::default(),
+            palette: super::palette::PaletteState::default(),
+            new_case_name: String::new(),
+            new_combo_name: String::new(),
+            editing_combination: None,
+            combo_terms_buffer: Vec::new(),
         }
     }
 
@@ -85,6 +97,10 @@ impl ViewportApp {
             window: self
                 .window_size
                 .map(|[width, height]| persistence::WindowPrefs { width, height }),
+            last_project_path: self
+                .last_project_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
         };
         if let Err(e) = persistence::save_settings(&self.settings_path, &settings) {
             self.messages
@@ -110,27 +126,26 @@ impl ViewportApp {
     /// *and* contain at least one node: an empty model has nothing to solve,
     /// and [`Project::solve`] on it would only fail.
     pub(crate) fn can_run_analysis(&self) -> bool {
-        self.project
-            .model
-            .as_ref()
-            .is_some_and(|m| m.n_nodes() > 0)
+        self.project.model.as_ref().is_some_and(|m| m.n_nodes() > 0)
     }
 
     /// Commit a model transition as the result of an engineering edit.
     ///
-    /// Records the previous model in the undo history, replaces the
-    /// current model, clears the redo stack, invalidates analysis, and
-    /// rebuilds the viewport scene.  The caller must ensure the new model
-    /// differs from the old one (no-op edits should not call this).
+    /// Records the previous model in the undo history — tagged with a short
+    /// `label` describing the edit (e.g. `"Add node N5"`) so the bottom
+    /// History dock can list it — replaces the current model, clears the redo
+    /// stack, invalidates analysis, and rebuilds the viewport scene.  The
+    /// caller must ensure the new model differs from the old one (no-op edits
+    /// should not call this).
     ///
     /// Uses [`Project::replace_model_after_edit`] so a model that *was*
     /// solved is reported as `Stale` after the edit (its result is kept but
     /// hidden by Policy A), rather than falling back to `NeverSolved`.
     /// Undo/redo use the wholesale [`Project::replace_model`], which discards
     /// the result.
-    pub(crate) fn commit_edit(&mut self, new_model: EditModel) {
+    pub(crate) fn commit_edit(&mut self, new_model: EditModel, label: impl Into<String>) {
         if let Some(old_model) = self.project.model.take() {
-            self.history.record(old_model);
+            self.history.record_labeled(old_model, label);
         }
         self.project.replace_model_after_edit(new_model);
         self.rebuild_scene();
@@ -374,14 +389,15 @@ impl ViewportApp {
         self.set_selection(set);
     }
 
-    /// Rubber-band box select (Shift/Ctrl + primary drag).
+    /// Rubber-band box select (a plain primary drag in the viewport; Alt is the
+    /// section-cut slide instead).
     ///
     /// `box` is in **viewport-local points** (origin at the viewport's top-left,
     /// matching [`Camera3D::project`]); `screen` is `[w, h]`.  Every visible
     /// node whose projection falls inside the box is selected, and every
     /// visible member whose **both** projected endpoints fall inside it.  When
-    /// `add` is `true` the hits are added to the current selection, otherwise
-    /// they replace it.
+    /// `add` is `true` (Shift or Ctrl/Cmd held) the hits are added to the
+    /// current selection, otherwise they replace it.
     pub(crate) fn box_select(&mut self, box_: ScreenRect, screen: [f64; 2], add: bool) {
         let (w, h) = (screen[0], screen[1]);
         let mut set = if add {
@@ -417,19 +433,17 @@ impl ViewportApp {
                 let Some(&(ni, nj)) = scene.member_nodes.get(mi) else {
                     continue;
                 };
-                let (Some(&pi), Some(&pj)) = (
-                    scene.node_positions.get(ni),
-                    scene.node_positions.get(nj),
-                ) else {
+                let (Some(&pi), Some(&pj)) =
+                    (scene.node_positions.get(ni), scene.node_positions.get(nj))
+                else {
                     continue;
                 };
                 let Some((ca, cb)) = self.display.section_cut.clip_segment(pi, pj) else {
                     continue;
                 };
-                if let (Some(pa), Some(pb)) = (
-                    self.camera.project(ca, w, h),
-                    self.camera.project(cb, w, h),
-                ) {
+                if let (Some(pa), Some(pb)) =
+                    (self.camera.project(ca, w, h), self.camera.project(cb, w, h))
+                {
                     if box_.hits_segment([pa.x, pa.y], [pb.x, pb.y]) {
                         set.add_member(id);
                     }
@@ -523,11 +537,13 @@ impl ViewportApp {
             return;
         };
         let (a, b) = scene.member_nodes[mi];
-        let keep_nodes: Vec<NodeId> =
-            [scene.node_ids.get(a).copied(), scene.node_ids.get(b).copied()]
-                .into_iter()
-                .flatten()
-                .collect();
+        let keep_nodes: Vec<NodeId> = [
+            scene.node_ids.get(a).copied(),
+            scene.node_ids.get(b).copied(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         self.display
             .isolate_member(&all_nodes, &all_members, keep, &keep_nodes);
     }
@@ -547,7 +563,7 @@ impl ViewportApp {
         match candidate.update_node(id, x, y, z) {
             Ok(()) => {
                 if candidate.revision() != model.revision() {
-                    self.commit_edit(candidate);
+                    self.commit_edit(candidate, format!("Move node N{}", id.0));
                     self.messages
                         .push(AppMessage::info(format!("Updated node N{}", id.0)));
                 }
@@ -594,7 +610,10 @@ impl ViewportApp {
         if n_nodes == 0 && n_members == 0 {
             return false;
         }
-        self.commit_edit(candidate);
+        self.commit_edit(
+            candidate,
+            format!("Delete {n_nodes} node(s), {n_members} member(s)"),
+        );
         self.clear_selection();
         self.messages.push(AppMessage::info(format!(
             "Deleted {n_nodes} node(s) and {n_members} member(s)"
@@ -681,8 +700,8 @@ impl ViewportApp {
 
     // ── Phase B1: Boundary quick-add popups ─────────────────────────────
 
-    /// Screen anchor for a ribbon-opened popup: the pointer position when
-    /// the cursor is available, else the centre of the screen.
+    /// Screen anchor for a menu / palette-opened popup: the pointer position
+    /// when the cursor is available, else the centre of the screen.
     fn popup_anchor(ctx: &egui::Context) -> egui::Pos2 {
         ctx.input(|i| i.pointer.interact_pos())
             .unwrap_or_else(|| ctx.screen_rect().center())
@@ -691,7 +710,7 @@ impl ViewportApp {
     /// Open the Support popup for the primary selected node.
     ///
     /// No-op (and no popup) when the primary selection is not a node — the
-    /// ribbon button is disabled in that case, so this is a defensive guard.
+    /// menu entry / command is disabled in that case, so this is a guard.
     pub(crate) fn open_support_popup(&mut self, ctx: &egui::Context) {
         let Some(id) = self.selected.primary().node_id() else {
             return;
@@ -785,7 +804,12 @@ impl ViewportApp {
         match result {
             Ok(()) => {
                 if candidate.revision() != model.revision() {
-                    self.commit_edit(candidate);
+                    let label = if spec.is_free() {
+                        format!("Clear support N{}", id.0)
+                    } else {
+                        format!("Support N{}", id.0)
+                    };
+                    self.commit_edit(candidate, label);
                     let msg = if spec.is_free() {
                         format!("Cleared support at node N{}", id.0)
                     } else {
@@ -827,7 +851,12 @@ impl ViewportApp {
         match result {
             Ok(()) => {
                 if candidate.revision() != model.revision() {
-                    self.commit_edit(candidate);
+                    let label = if load.is_zero() {
+                        format!("Clear load N{}", id.0)
+                    } else {
+                        format!("Load N{}", id.0)
+                    };
+                    self.commit_edit(candidate, label);
                     let msg = if load.is_zero() {
                         format!("Cleared load at node N{}", id.0)
                     } else {
@@ -887,9 +916,11 @@ impl ViewportApp {
             }
         }
         if candidate.revision() != model.revision() {
-            self.commit_edit(candidate);
-            self.messages
-                .push(AppMessage::info(format!("Applied member load to M{}", id.0)));
+            self.commit_edit(candidate, format!("Member load M{}", id.0));
+            self.messages.push(AppMessage::info(format!(
+                "Applied member load to M{}",
+                id.0
+            )));
         } else {
             self.messages.push(AppMessage::info("No changes to apply."));
         }
@@ -916,7 +947,7 @@ impl ViewportApp {
             Ok(()) => {
                 let changed = candidate.revision() != model.revision();
                 if changed {
-                    self.commit_edit(candidate);
+                    self.commit_edit(candidate, format!("Reconnect member M{}", id.0));
                 }
             }
             Err(e) => self.messages.push(AppMessage::error(e.message())),
@@ -1018,7 +1049,7 @@ impl ViewportApp {
         }
 
         if candidate.revision() != model.revision() {
-            self.commit_edit(candidate);
+            self.commit_edit(candidate, format!("Edit member M{}", id.0));
             self.messages
                 .push(AppMessage::info(format!("Applied changes to M{}", id.0)));
         } else {
@@ -1077,16 +1108,66 @@ impl ViewportApp {
         self.messages.push(AppMessage::info("Created empty model."));
     }
 
-    /// Open a project from the file path input.
-    ///
-    /// On failure, the current model/path/dirty state are preserved.
-    pub(crate) fn do_open(&mut self) {
-        let path = std::path::PathBuf::from(self.file_path_input.trim());
-        if path.as_os_str().is_empty() {
-            self.messages
-                .push(AppMessage::error("No file path specified."));
+    /// The most recently known project path: the current one if set, else the
+    /// path remembered from a previous session (`None` if neither).
+    pub(crate) fn known_project_path(&self) -> Option<std::path::PathBuf> {
+        self.project_path
+            .clone()
+            .or_else(|| self.last_project_path.clone())
+    }
+
+    /// Ask the left panel's "Project file" section to expand and focus its path
+    /// field on the next frame.  Raised when **Open** / **Save** has no usable
+    /// path, so the command guides the user instead of dead-ending.
+    pub(crate) fn reveal_project_path(&mut self) {
+        self.focus_project_path = true;
+    }
+
+    /// Remember `path` as the last opened / saved project and persist it, so
+    /// the next Open / Save works immediately (even after a restart).  A no-op
+    /// when the path is already remembered, to avoid redundant writes.
+    fn remember_last_path(&mut self, path: &std::path::Path) {
+        if self.last_project_path.as_deref() == Some(path) {
             return;
         }
+        self.last_project_path = Some(path.to_path_buf());
+        self.persist_settings();
+    }
+
+    /// The message shown when Open / Save has no path to work with.  It names
+    /// the action so the guidance matches the command the user picked.
+    fn no_path_message(action: &str) -> String {
+        format!(
+            "No file path set \u{2014} enter a project file path in the \
+             \u{201c}Project file\u{201d} section of the left panel, then choose {action}."
+        )
+    }
+
+    /// Open a project chosen in the native **Open** dialog.
+    ///
+    /// The dialog is shown on the UI thread inside the update loop and no
+    /// borrow of `self` is held across the call (the start directory is copied
+    /// out first).  Cancelling it is a no-op; when no dialog is available at
+    /// all (headless / CI / test builds) the app falls back to the typed-path
+    /// field, so Open never dead-ends.
+    pub(crate) fn do_open(&mut self) {
+        let start_dir = self.dialog_start_dir();
+        match pick_open_file(start_dir.as_deref()) {
+            DialogOutcome::Picked(path) => self.open_from_path(&path),
+            DialogOutcome::Cancelled => {}
+            DialogOutcome::Unavailable => self.open_from_field(),
+        }
+    }
+
+    /// Load a project from an explicit `path` — the shared load path used by
+    /// both the native dialog and the typed-path fallback.
+    ///
+    /// On failure the current model/path/dirty state are preserved and the
+    /// "Project file" field is revealed with the error surfaced.
+    pub(crate) fn open_from_path(&mut self, path_in: &std::path::Path) {
+        let path = path_in.to_path_buf();
+        // Mirror the chosen path into the field so the user sees what was used.
+        self.file_path_input = path.to_string_lossy().to_string();
         match persistence::load_project_with_section(&path) {
             Ok(loaded) => {
                 let name = path
@@ -1102,48 +1183,106 @@ impl ViewportApp {
                 }
                 self.rebuild_scene();
                 self.clear_selection();
-                self.project_path = Some(path);
+                self.project_path = Some(path.clone());
                 self.saved_fingerprint = Some(fp);
                 self.history.clear();
-                self.messages
-                    .push(AppMessage::info("Project loaded successfully."));
+                self.remember_last_path(&path);
+                self.messages.push(AppMessage::info(format!(
+                    "Project loaded from {}",
+                    path.display()
+                )));
             }
             Err(e) => {
+                // Guide the user back to the field so a bad/stale path can be
+                // corrected rather than dead-ending.
+                self.reveal_project_path();
                 self.messages
                     .push(AppMessage::error(format!("Load failed: {e}")));
             }
         }
     }
 
-    /// Save the project to the current path (or the file path input if no
-    /// current path is set).  On failure, `saved_revision` is not updated.
-    /// Returns `true` on success.
+    /// Save the project.
+    ///
+    /// With a current file path this writes straight to it (no dialog —
+    /// today's behaviour).  Otherwise it behaves exactly like **Save As**
+    /// (native dialog, or the typed-path fallback when no dialog is
+    /// available).  On failure `saved_fingerprint` is not updated.  Returns
+    /// `true` on success.
     pub(crate) fn do_save(&mut self) -> bool {
-        let path = match &self.project_path {
-            Some(p) => p.clone(),
-            None => {
-                let p = std::path::PathBuf::from(self.file_path_input.trim());
-                if p.as_os_str().is_empty() {
-                    self.messages.push(AppMessage::error(
-                        "No file path. Use \u{201c}Save As\u{201d} to specify one.",
-                    ));
-                    return false;
-                }
-                p
-            }
-        };
-        self.save_to_path(&path)
+        if let Some(path) = self.project_path.clone() {
+            return self.save_to_path(&path);
+        }
+        self.do_save_as()
     }
 
-    /// Save the project to the path in the file path input.
-    /// Returns `true` on success.
+    /// Save the project to a path chosen in the native **Save As** dialog.
+    ///
+    /// The dialog runs on the UI thread inside the update loop, with no borrow
+    /// held across it.  Cancelling it is a no-op; when no dialog is available
+    /// (headless / CI / test builds) it falls back to the typed-path field, so
+    /// Save As never dead-ends.  Returns `true` on success.
     pub(crate) fn do_save_as(&mut self) -> bool {
-        let path = std::path::PathBuf::from(self.file_path_input.trim());
-        if path.as_os_str().is_empty() {
-            self.messages
-                .push(AppMessage::error("No file path specified."));
-            return false;
+        let start_dir = self.dialog_start_dir();
+        let default_name = self.default_save_name();
+        match pick_save_file(start_dir.as_deref(), default_name.as_deref()) {
+            DialogOutcome::Picked(path) => self.save_to_path(&path),
+            DialogOutcome::Cancelled => false,
+            DialogOutcome::Unavailable => self.save_as_from_field(),
         }
+    }
+
+    /// Directory a file dialog should open in: the parent of the most recently
+    /// known project path, when there is one.
+    fn dialog_start_dir(&self) -> Option<std::path::PathBuf> {
+        self.known_project_path()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .filter(|dir| !dir.as_os_str().is_empty())
+    }
+
+    /// Dependency-free Open fallback: resolve the path from the typed field /
+    /// last known path, else reveal and focus the field with a guiding warning.
+    fn open_from_field(&mut self) {
+        let known = self.known_project_path();
+        let Some(path) = persistence::choose_project_path(&self.file_path_input, known.as_deref())
+        else {
+            self.reveal_project_path();
+            self.messages
+                .push(AppMessage::warning(Self::no_path_message("Open")));
+            return;
+        };
+        self.open_from_path(&path);
+    }
+
+    /// Default file name offered by the Save As dialog: the last known file
+    /// name, else `<project name>.saproject`.
+    fn default_save_name(&self) -> Option<String> {
+        if let Some(name) = self
+            .known_project_path()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        {
+            return Some(name);
+        }
+        let name = self.project.name.trim();
+        if name.is_empty() {
+            Some(format!("project.{PROJECT_EXTENSION}"))
+        } else {
+            Some(format!("{name}.{PROJECT_EXTENSION}"))
+        }
+    }
+
+    /// Dependency-free Save As fallback: resolve the path from the typed field /
+    /// last known path, else reveal and focus the field with a guiding warning.
+    fn save_as_from_field(&mut self) -> bool {
+        let known = self.known_project_path();
+        let Some(path) = persistence::choose_project_path(&self.file_path_input, known.as_deref())
+        else {
+            self.reveal_project_path();
+            self.messages
+                .push(AppMessage::warning(Self::no_path_message("Save As")));
+            return false;
+        };
+        self.file_path_input = path.to_string_lossy().to_string();
         self.save_to_path(&path)
     }
 
@@ -1163,6 +1302,7 @@ impl ViewportApp {
                 self.project_path = Some(path.to_path_buf());
                 self.saved_fingerprint = Some(fp);
                 self.file_path_input = path.to_string_lossy().to_string();
+                self.remember_last_path(path);
                 self.messages
                     .push(AppMessage::info(format!("Saved to {}", path.display())));
                 true
@@ -1303,7 +1443,7 @@ impl ViewportApp {
         let mut candidate = model.clone();
         match candidate.add_node(x, y, z) {
             Ok(id) => {
-                self.commit_edit(candidate);
+                self.commit_edit(candidate, format!("Add node N{}", id.0));
                 self.messages.push(AppMessage::info(format!(
                     "Added node N{} at ({}, {}, {})",
                     id.0, x, y, z
@@ -1339,7 +1479,7 @@ impl ViewportApp {
         let mut candidate = model.clone();
         match candidate.add_member(NodeId(ni), NodeId(nj)) {
             Ok(id) => {
-                self.commit_edit(candidate);
+                self.commit_edit(candidate, format!("Add member M{}", id.0));
                 self.messages.push(AppMessage::info(format!(
                     "Added member M{} (N{} \u{2192} N{})",
                     id.0, ni, nj
@@ -1443,6 +1583,83 @@ impl ViewportApp {
                 self.set_standard_view(StandardView::Right);
             }
         }
+    }
+}
+
+// ── Native file dialogs (rfd) ────────────────────────────────────────
+
+/// Extension of a project file (no leading dot).
+const PROJECT_EXTENSION: &str = "saproject";
+
+/// Outcome of a native file dialog request.
+///
+/// `Unavailable` is what keeps the dependency-free fallback working: on a
+/// headless / CI / test build no dialog is shown, so `do_open` / `do_save_as`
+/// fall back to the "Project file" path field instead of blocking on a modal.
+enum DialogOutcome {
+    /// The user chose a path.
+    Picked(std::path::PathBuf),
+    /// The dialog was shown and dismissed: leave the app state untouched.
+    Cancelled,
+    /// No native dialog is available in this build / context.
+    Unavailable,
+}
+
+/// Whether a native dialog may be shown.
+///
+/// Test builds never pop a modal (it would block the harness and hang CI), so
+/// they deterministically take the fallback path.  The check is a compile-time
+/// constant, so the rfd calls below still compile — and are therefore
+/// type-checked by `cargo check` — while being skipped at run time.
+fn native_dialogs_available() -> bool {
+    !cfg!(test)
+}
+
+/// Build the shared Open / Save dialog: the `.saproject` filter plus
+/// "All files", opening in `start_dir` when one is known.
+fn project_dialog(start_dir: Option<&std::path::Path>) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("Section Properties project", &[PROJECT_EXTENSION])
+        .add_filter("All files", &["*"]);
+    if let Some(dir) = start_dir {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog
+}
+
+/// Show the native **Open** dialog.  The caller copies the start directory out
+/// first, so no borrow of the app is alive while the dialog runs.
+fn pick_open_file(start_dir: Option<&std::path::Path>) -> DialogOutcome {
+    if !native_dialogs_available() {
+        return DialogOutcome::Unavailable;
+    }
+    match project_dialog(start_dir).pick_file() {
+        Some(path) => DialogOutcome::Picked(path),
+        None => DialogOutcome::Cancelled,
+    }
+}
+
+/// Show the native **Save As** dialog, defaulting to `default_name`.  A chosen
+/// path without an extension gets `.saproject` appended.
+fn pick_save_file(
+    start_dir: Option<&std::path::Path>,
+    default_name: Option<&str>,
+) -> DialogOutcome {
+    if !native_dialogs_available() {
+        return DialogOutcome::Unavailable;
+    }
+    let mut dialog = project_dialog(start_dir);
+    if let Some(name) = default_name {
+        dialog = dialog.set_file_name(name);
+    }
+    match dialog.save_file() {
+        Some(mut path) => {
+            if path.extension().is_none() {
+                path.set_extension(PROJECT_EXTENSION);
+            }
+            DialogOutcome::Picked(path)
+        }
+        None => DialogOutcome::Cancelled,
     }
 }
 
@@ -1667,5 +1884,113 @@ mod tests {
             }
             _ => panic!("expected a MemLoad popup"),
         }
+    }
+
+    // ── Native-dialog wiring: fallback + direct-save rules ──────────────
+
+    #[test]
+    fn do_save_with_a_current_path_writes_without_a_dialog() {
+        let path = std::env::temp_dir().join("viewport_poc_save_direct.saproject");
+        let _ = std::fs::remove_file(&path);
+        let (mut app, _a, _mid) = beam_app();
+        // A live current path makes Save write straight to it — no dialog.
+        app.project_path = Some(path.clone());
+        assert!(app.do_save(), "{}", last_message(&app));
+        assert!(path.exists());
+        assert_eq!(
+            app.saved_fingerprint,
+            app.project.model.as_ref().map(|m| m.fingerprint())
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn do_save_as_without_a_dialog_falls_back_to_the_path_field() {
+        // Test builds report no native dialog, so Save As uses the typed path.
+        let path = std::env::temp_dir().join("viewport_poc_save_as_field.saproject");
+        let _ = std::fs::remove_file(&path);
+        let (mut app, _a, _mid) = beam_app();
+        app.file_path_input = path.to_string_lossy().to_string();
+        assert!(app.do_save_as(), "{}", last_message(&app));
+        assert!(path.exists());
+        assert_eq!(app.project_path.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn do_open_without_a_dialog_uses_the_typed_path_field() {
+        let path = std::env::temp_dir().join("viewport_poc_open_field.saproject");
+        let _ = std::fs::remove_file(&path);
+        let mut model = EditModel::new();
+        let a = model.add_node(0.0, 0.0, 0.0).unwrap();
+        let b = model.add_node(2.0, 0.0, 0.0).unwrap();
+        model.add_member(a, b).unwrap();
+        persistence::save_project(&path, &model).unwrap();
+
+        let mut app = empty_app();
+        app.file_path_input = path.to_string_lossy().to_string();
+        app.do_open();
+        assert!(app.project.model.is_some(), "{}", last_message(&app));
+        assert_eq!(app.project_path.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Phase 159-D sweep: the core editing workflow (add node → add member →
+    /// apply section) still works through the shared handlers and is fully
+    /// undoable / redoable as one labelled edit sequence.
+    #[test]
+    fn editing_workflow_add_member_apply_section_is_undoable() {
+        let mut app = empty_app();
+        app.project.load_model("edit".to_string(), EditModel::new());
+        app.rebuild_scene();
+
+        // Two nodes from the text inputs.
+        for (x, y, z) in [("0", "0", "0"), ("2", "0", "0")] {
+            app.new_node_x = x.into();
+            app.new_node_y = y.into();
+            app.new_node_z = z.into();
+            app.add_node_from_input();
+        }
+        assert_eq!(app.project.model.as_ref().unwrap().n_nodes(), 2);
+
+        // One member from the text inputs.
+        app.new_member_i = "0".into();
+        app.new_member_j = "1".into();
+        app.add_member_from_input();
+        let mid = app.project.model.as_ref().unwrap().members()[0].id;
+        assert_eq!(app.project.model.as_ref().unwrap().n_members(), 1);
+
+        // Apply a new section through the member-edit buffer.
+        app.member_edit.e = 210e9;
+        app.member_edit.area = 5e-3;
+        app.apply_member_edit(mid);
+        let area = app
+            .project
+            .model
+            .as_ref()
+            .unwrap()
+            .member(mid)
+            .unwrap()
+            .section
+            .area();
+        assert!((area - 5e-3).abs() < 1e-12, "section apply took: {area}");
+
+        // Four labelled edits → four undos return to the empty model.
+        assert_eq!(app.history.undo_depth(), 4);
+        for _ in 0..4 {
+            app.do_undo();
+        }
+        let m = app.project.model.as_ref().unwrap();
+        assert_eq!(m.n_nodes(), 0);
+        assert_eq!(m.n_members(), 0);
+
+        // Redo restores the whole sequence.
+        for _ in 0..4 {
+            app.do_redo();
+        }
+        let m = app.project.model.as_ref().unwrap();
+        assert_eq!(m.n_nodes(), 2);
+        assert_eq!(m.n_members(), 1);
+        assert!((m.member(mid).unwrap().section.area() - 5e-3).abs() < 1e-12);
     }
 }

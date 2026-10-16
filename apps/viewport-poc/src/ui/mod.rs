@@ -1,11 +1,12 @@
 //! egui application shell.
 //!
 //! All rendering lives here, split into focused modules (menu bar, module
-//! tabs, model tree, viewport, inspector, bottom dock, dialogs, theme).
+//! strip, model tree, viewport, inspector, bottom dock, dialogs, theme).
 //! `main.rs` keeps the [`ViewportApp`](crate::ViewportApp) state and its
 //! command logic, and orchestrates these panels.
 
 pub mod actions;
+pub mod commands;
 pub mod diagrams;
 pub mod dialogs;
 pub mod gl_renderer;
@@ -14,13 +15,15 @@ pub mod inspector;
 pub mod layout;
 pub mod menu;
 pub mod module;
-pub mod ribbon;
+pub mod palette;
 pub mod screenshot;
 pub mod section;
 pub mod status;
 pub mod theme;
+pub mod titlebar;
 pub mod tree;
 pub mod viewport;
+pub mod workspace;
 
 pub use module::WorkModule;
 

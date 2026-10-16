@@ -18,7 +18,9 @@
 //! - **Analysis**: linear static
 //! - **Supports**: fixed, pinned, roller (x/y), inclined roller, spring,
 //!   arbitrary DOF restraint
-//! - **End releases**: hinge (rotation release) at either or both member ends
+//! - **End releases**: hinge (rotation release) at either or both member
+//!   ends — `EndRelease` for the 2-D beam and `EndReleases3D` (per-axis
+//!   `rx`/`ry`/`rz` at each end) for the 3-D frame
 //! - **Loads**: nodal forces, nodal moments, uniform distributed loads,
 //!   trapezoidal distributed loads, member point loads, applied moments
 //! - **Load cases & combinations**: named load cases with linear combination
@@ -136,8 +138,8 @@ pub use crate::frame::{
     PreparedFrameAnalysis, StructuralDiagnostic,
 };
 pub use crate::frame3d::{
-    Dof3D, FrameAnalysisResult3D, FrameElement3D, FrameMemberLoad, FrameModel3D, FrameNode3D,
-    FrameSection3D, FrameSolver3D,
+    Dof3D, EndReleases3D, FrameAnalysisResult3D, FrameElement3D, FrameMemberLoad, FrameModel3D,
+    FrameNode3D, FrameSection3D, FrameSolver3D,
 };
 pub use crate::load::{LoadCase, LoadCombination, LoadCombinationTerm, LoadSource};
 pub use crate::postprocessing::{

@@ -357,12 +357,12 @@ fn v3_round_trip_point_loads() {
 }
 
 #[test]
-fn v3_format_version_in_json() {
+fn v4_format_version_in_json() {
     let m = EditModel::new();
     let json = persistence::serialize_project(&m).unwrap();
     assert!(
-        json.contains("\"format_version\": 3"),
-        "should contain format_version 3, got: {json}"
+        json.contains("\"format_version\": 4"),
+        "should contain format_version 4, got: {json}"
     );
 }
 

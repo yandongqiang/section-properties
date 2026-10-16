@@ -6,6 +6,7 @@
 
 pub mod app_state;
 pub mod camera;
+pub mod commands;
 pub mod display;
 pub mod edit_history;
 pub mod edit_model;

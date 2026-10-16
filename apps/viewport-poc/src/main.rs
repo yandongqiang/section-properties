@@ -13,7 +13,7 @@ mod ui;
 
 use viewport_poc::{
     app_state::{AppMessage, Project},
-    camera::{Camera3D, ViewMode},
+    camera::Camera3D,
     display::ResultDisplayState,
     edit_history::EditHistory,
     edit_model::{MemberId, MemberPointLoad3D, NodalLoadSpec, NodeId, SupportSpec},
@@ -22,8 +22,21 @@ use viewport_poc::{
     selection::{SelectionSet, SelectionState},
 };
 
-use ui::status::BottomTab;
 use ui::WorkModule;
+use ui::inspector::RightPanelMode;
+use ui::status::BottomTab;
+
+/// Minimum inner window size (points).
+///
+/// The window is undecorated and its chrome (title bar, module strip, status
+/// line) is drawn by the app, so it must not be squeezable into a size where
+/// the custom title bar and resize grips become unusable.
+const MIN_INNER_SIZE: [f32; 2] = [700.0, 450.0];
+
+/// The window title.  Taskbar / OS text and the handle `ui::titlebar` uses to
+/// ask Windows for rounded corners — a single constant so the two can never
+/// drift apart.  The string itself is unchanged.
+const WINDOW_TITLE: &str = "Section Properties & Frame Analysis";
 
 // ── App state ───────────────────────────────────────────────────────────
 struct ViewportApp {
@@ -47,12 +60,23 @@ struct ViewportApp {
     new_member_j: String,
     member_edit: MemberEditBuffer,
     project_path: Option<std::path::PathBuf>,
+    /// Path of the last successfully opened / saved project.  Restored from
+    /// settings at startup and re-persisted on every successful open / save, so
+    /// **Open** / **Save** work immediately without re-typing a path.
+    last_project_path: Option<std::path::PathBuf>,
     saved_fingerprint: Option<u64>,
     file_path_input: String,
+    /// One-shot request raised when Open / Save has no usable path: the left
+    /// panel's "Project file" section expands and focuses its path field on the
+    /// next frame, guiding the user instead of dead-ending.  In-memory only.
+    focus_project_path: bool,
     show_unsaved_dialog: bool,
     pending_action: PendingAction,
     history: EditHistory,
-    /// Active MIDAS-style work module.
+    /// Active MIDAS-style work module.  The top module strip is the **single**
+    /// switcher: it selects both the inspector sections and the centre
+    /// workspace content (`ui::workspace::CentreContent::for_module`).  Pure
+    /// view state — it never changes the model.
     module: WorkModule,
     /// Active bottom-dock tab.
     bottom_tab: BottomTab,
@@ -63,6 +87,10 @@ struct ViewportApp {
     /// only (not persisted): a collapsed panel is not created at all, so the
     /// viewport reclaims its space.
     inspector_collapsed: bool,
+    /// Whether the left Project panel is collapsed (Phase 159-B).
+    left_panel_collapsed: bool,
+    /// Active right-panel mode (Inspector / Agent / Outline, Phase 159-B).
+    right_panel_mode: RightPanelMode,
     /// Section-module builder state (definition + cached properties).
     section_editor: ui::section::SectionEditorState,
     /// egui chrome theme (true = dark).
@@ -79,14 +107,22 @@ struct ViewportApp {
     /// Double-click quick-edit popup state; `None` = closed.
     quick_edit: Option<QuickEdit>,
     /// Boundary quick-add popup state (Support / Node Load / Mem Load,
-    /// opened from the ribbon); `None` = closed.
+    /// opened from the Boundary menu or the command palette); `None` = closed.
     boundary_popup: Option<BoundaryPopup>,
     /// Screen position where a rubber-band box-select drag began
-    /// (Shift/Ctrl + primary drag), or `None` when no box select is active.
+    /// (a plain primary drag), or `None` when no box select is active.
     box_select_start: Option<egui::Pos2>,
-    /// Primary-drag interaction mode (Orbit / Pan / Zoom), driven by the
-    /// ribbon's View group.  Camera-only state — never persisted.
-    view_mode: ViewMode,
+    /// Command Palette state (Phase 159-A, Ctrl+Shift+P); in-memory only.
+    palette: ui::palette::PaletteState,
+    /// Load-module view state: staging buffer for a new load case's name.
+    new_case_name: String,
+    /// Load-module view state: staging buffer for a new combination's name.
+    new_combo_name: String,
+    /// Combination currently open in the combination term editor.
+    editing_combination: Option<viewport_poc::edit_model::LoadCaseId>,
+    /// Staged combination terms `(case, factor)` for the term editor; the
+    /// model is updated only when the user applies.
+    combo_terms_buffer: Vec<(viewport_poc::edit_model::LoadCaseId, f64)>,
 }
 
 /// Action waiting for unsaved-changes confirmation.
@@ -162,7 +198,7 @@ struct QuickEdit {
     node_j: String,
 }
 
-/// Transient state for the Boundary quick-add popups (ribbon group).
+/// Transient state for the Boundary quick-add popups.
 ///
 /// Each variant targets the **primary** selected entity (a node for Support /
 /// Node Load, a member for Mem Load) and carries the values being edited plus
@@ -247,21 +283,32 @@ impl eframe::App for ViewportApp {
         // view keys) with the same no-text-focus guard, so the chord does
         // not fire while a DragValue / TextEdit has focus.
         if ctx.memory(|m| m.focused().is_none())
-            && ctx.input(|i| {
-                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S)
-            })
+            && ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::S))
         {
             ui::screenshot::request(ctx);
         }
 
+        // Phase 159-A: Ctrl+Shift+P toggles the command palette.  Same
+        // no-text-focus guard as the screenshot chord (and no clash with
+        // Ctrl+Shift+S); while the palette is open its search field holds
+        // focus, so this cannot re-trigger — Esc closes the palette.
+        if ctx.memory(|m| m.focused().is_none())
+            && ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::P))
+        {
+            ui::palette::toggle(self);
+        }
+
         self.handle_shortcuts(ctx);
 
-        // ── Top: menu bar + module tabs ─────────────────────────────────
+        // ── Top: title bar + menu bar + module strip ────────────────────
+        ui::titlebar::show_title_bar(self, ctx);
         ui::menu::show_menu_bar(self, ctx);
         ui::module::show_module_tabs(self, ctx);
 
-        // ── Bottom: messages / results dock ─────────────────────────────
-        ui::status::show_bottom_dock(self, ctx);
+        // ── Bottom: full-width status line (outside the main workspace) ──
+        // Added *before* the side panels so it spans the whole window width;
+        // the main workspace (left + centre + right) is laid out above it.
+        ui::status::show_status_line(self, ctx);
 
         // ── Left: model browser tree ────────────────────────────────────
         ui::tree::show_model_tree(self, ctx);
@@ -272,14 +319,27 @@ impl eframe::App for ViewportApp {
         // ── Modal dialogs ───────────────────────────────────────────────
         ui::dialogs::show_unsaved_dialog(self, ctx);
 
-        // ── Center: 3D viewport (must be last) ──────────────────────────
-        ui::viewport::show_viewport(self, ctx);
+        // ── Centre: active module content + centre-scoped dock ───────────
+        // Must be last: the root `CentralPanel` claims the remaining region
+        // (the centre workspace), inside which the module's content and the
+        // output dock are laid out with nested `show_inside` panels.
+        ui::workspace::show_center_workspace(self, ctx);
+
+        // ── Custom window chrome: resize grips (undecorated window) ─────
+        // With the OS decorations off there are no native resize borders, so
+        // the app lays its own thin grips along the window edges (suppressed
+        // while maximized).  Drawn on a foreground layer so they sit above the
+        // panels' outer pixels.
+        ui::titlebar::show_resize_grips(ctx, self.dark_mode);
 
         // ── Double-click quick-edit popup (floats over the viewport) ────
         ui::viewport::show_quick_edit(self, ctx);
 
         // ── Boundary quick-add popup (floats over the viewport) ─────────
         ui::viewport::show_boundary_popup(self, ctx);
+
+        // ── Command Palette (Phase 159-A; modal overlay, Ctrl+Shift+P) ───
+        ui::palette::show(self, ctx);
 
         // ── Screenshot reply (Phase P7-3 C1) ────────────────────────────
         // `ViewportCommand::Screenshot` is answered by eframe *after* the
@@ -304,12 +364,12 @@ impl eframe::App for ViewportApp {
                         path.display()
                     )));
                     // Make sure the path is seen even when the dock sits on
-                    // the Results tab.
-                    self.bottom_tab = BottomTab::Messages;
+                    // another tab (the screenshot note is informational).
+                    self.bottom_tab = BottomTab::SolverLog;
                 }
-                Err(e) => self
-                    .messages
-                    .push(AppMessage::error(format!("Viewport screenshot failed: {e}"))),
+                Err(e) => self.messages.push(AppMessage::error(format!(
+                    "Viewport screenshot failed: {e}"
+                ))),
             }
         }
 
@@ -324,8 +384,15 @@ impl eframe::App for ViewportApp {
         // ── Persist the layout preset (Phase P7-3 C2) ───────────────────
         // The panels publish their live sizes while drawing (above), so the
         // capture is fresh here; persist whenever it changes, and on exit.
-        let layout =
-            ui::layout::capture(ctx, self.inspector_collapsed, self.bottom_dock_collapsed);
+        let mut layout = ui::layout::capture(
+            ctx,
+            self.left_panel_collapsed,
+            self.inspector_collapsed,
+            self.bottom_dock_collapsed,
+        );
+        // Phase 159-D: also persist the right-panel mode (pure view state
+        // carried on the same additive layout preset).
+        layout.right_panel_mode = Some(self.right_panel_mode.index());
         if closing || Some(layout) != ui::layout::last_saved(ctx) {
             // Record the attempted value either way so a permanently failing
             // save does not retry (and re-warn) on every subsequent frame —
@@ -348,13 +415,24 @@ fn main() -> eframe::Result {
     let (layout, layout_warning) = persistence::load_layout_or_default(&settings_path);
     let inner_size = settings
         .window
-        .map(|w| [w.width.max(320.0), w.height.max(240.0)])
+        .map(|w| {
+            [
+                w.width.max(MIN_INNER_SIZE[0]),
+                w.height.max(MIN_INNER_SIZE[1]),
+            ]
+        })
         .unwrap_or([1200.0, 800.0]);
 
+    // Zed-style custom window chrome: an undecorated (borderless) window whose
+    // title bar and resize grips the app draws itself (`ui::titlebar`).  The
+    // title string is unchanged — it is still what the taskbar / OS show — and
+    // the persisted window size still drives the initial inner size.
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(inner_size)
-            .with_title("Section Properties & Frame Analysis"),
+            .with_min_inner_size(MIN_INNER_SIZE)
+            .with_decorations(false)
+            .with_title(WINDOW_TITLE),
         ..Default::default()
     };
     eframe::run_native(
@@ -362,11 +440,21 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             ui::theme::apply_theme(&cc.egui_ctx, settings.dark_mode);
+            // Change 1: round the borderless window's corners natively via DWM
+            // (Windows 11).  The window exists by the time the app creator runs,
+            // so its handle is looked up here; a failure is only cosmetic and is
+            // reported in the Messages dock rather than being swallowed.
+            let corners = ui::titlebar::apply_rounded_corners(WINDOW_TITLE);
             // Phase P1: try to bring up the GPU (glow) viewport renderer.  Any
             // failure leaves the software renderer active and is reported in
             // the Messages dock.
             let gl_status = ui::gl_renderer::init(cc.gl.clone());
             let mut app = ViewportApp::new(settings, settings_path, settings_warning);
+            if let Err(e) = corners {
+                app.messages.push(AppMessage::warning(format!(
+                    "Rounded window corners unavailable ({e}); using square corners."
+                )));
+            }
             // Phase P7-3 C2: restore the persisted layout preset.  The panel
             // widths are installed into egui's data map for the panels to
             // read back; the collapsed flags apply to the app directly.  The
@@ -374,6 +462,11 @@ fn main() -> eframe::Result {
             // above) so there is a single source of truth.
             app.inspector_collapsed = layout.inspector_collapsed;
             app.bottom_dock_collapsed = layout.dock_collapsed;
+            app.left_panel_collapsed = layout.tree_collapsed;
+            // Phase 159-D: the right panel reopens on the mode the user left
+            // it on (an additive layout field; absent → default).  The centre
+            // is driven by the work module, which is not persisted.
+            app.right_panel_mode = RightPanelMode::from_index(layout.right_panel_mode);
             if let Some(warning) = layout_warning {
                 app.messages
                     .push(AppMessage::warning(format!("Settings: {warning}")));

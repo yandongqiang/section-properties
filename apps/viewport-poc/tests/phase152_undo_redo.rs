@@ -396,7 +396,7 @@ fn undo_does_not_make_stale_result_current() {
     let mut c = make_portal_controller();
     c.project.solve().unwrap();
     assert!(c.project.has_results());
-    let solved_rev = c.project.analysis.as_ref().unwrap().solved_revision;
+    let solved_rev = c.project.analysis.as_ref().unwrap().solved_revision();
 
     c.edit(|m| {
         let id = m.nodes()[0].id;
@@ -767,7 +767,7 @@ fn scenario_b_solve_edit_undo_result_not_current() {
     let mut c = make_portal_controller();
     c.project.solve().unwrap();
     assert!(c.project.has_results());
-    let solved_rev = c.project.analysis.as_ref().unwrap().solved_revision;
+    let solved_rev = c.project.analysis.as_ref().unwrap().solved_revision();
 
     c.edit(|m| {
         let id = m.nodes()[0].id;

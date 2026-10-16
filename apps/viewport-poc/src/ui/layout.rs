@@ -72,19 +72,24 @@ pub fn restored_dock_height(ctx: &egui::Context) -> Option<f32> {
 /// publishes nothing), plus the live collapsed flags.
 pub fn capture(
     ctx: &egui::Context,
+    tree_collapsed: bool,
     inspector_collapsed: bool,
     dock_collapsed: bool,
 ) -> LayoutPrefs {
     let restored = restored(ctx);
     let published = |key: &str| ctx.data_mut(|d| d.get_persisted::<f32>(egui::Id::new(key)));
     LayoutPrefs {
-        tree_width: published(KEY_TREE_W)
-            .or_else(|| restored.and_then(|l| l.tree_width)),
+        tree_width: published(KEY_TREE_W).or_else(|| restored.and_then(|l| l.tree_width)),
         inspector_width: published(KEY_INSPECTOR_W)
             .or_else(|| restored.and_then(|l| l.inspector_width)),
         dock_height: published(KEY_DOCK_H).or_else(|| restored.and_then(|l| l.dock_height)),
+        tree_collapsed,
         inspector_collapsed,
         dock_collapsed,
+        // The active workspace tab / right-panel mode are *view state* owned by
+        // `ViewportApp`; the app loop writes them onto the captured preset (see
+        // `main.rs`) before persisting, so they default to "unset" here.
+        ..LayoutPrefs::default()
     }
 }
 
@@ -114,7 +119,7 @@ mod tests {
         egui::__run_test_ctx(|ctx| {
             install_restored(ctx, LayoutPrefs::default());
             assert_eq!(
-                capture(ctx, false, false),
+                capture(ctx, false, false, false),
                 LayoutPrefs::default(),
                 "nothing published yet → capture equals the restored (empty) preset"
             );
@@ -122,10 +127,11 @@ mod tests {
             publish_tree_width(ctx, 240.0);
             publish_inspector_width(ctx, 300.0);
             publish_dock_height(ctx, 130.0);
-            let captured = capture(ctx, true, false);
+            let captured = capture(ctx, true, true, false);
             assert_eq!(captured.tree_width, Some(240.0));
             assert_eq!(captured.inspector_width, Some(300.0));
             assert_eq!(captured.dock_height, Some(130.0));
+            assert!(captured.tree_collapsed);
             assert!(captured.inspector_collapsed);
             assert!(!captured.dock_collapsed);
 
@@ -143,14 +149,16 @@ mod tests {
                 tree_width: Some(220.0),
                 inspector_width: Some(310.0),
                 dock_height: Some(120.0),
+                tree_collapsed: false,
                 inspector_collapsed: true,
                 dock_collapsed: true,
+                ..LayoutPrefs::default()
             };
             install_restored(ctx, restored_layout);
 
             // Only the tree publishes (the inspector / dock are collapsed).
             publish_tree_width(ctx, 260.0);
-            let captured = capture(ctx, true, true);
+            let captured = capture(ctx, true, true, true);
             assert_eq!(captured.tree_width, Some(260.0), "live value wins");
             assert_eq!(
                 captured.inspector_width,
@@ -158,6 +166,7 @@ mod tests {
                 "collapsed panel keeps its restored width"
             );
             assert_eq!(captured.dock_height, Some(120.0));
+            assert!(captured.tree_collapsed);
         });
     }
 
@@ -172,8 +181,10 @@ mod tests {
                     tree_width: Some(200.0),
                     inspector_width: None,
                     dock_height: Some(150.0),
+                    tree_collapsed: false,
                     inspector_collapsed: false,
                     dock_collapsed: false,
+                    ..LayoutPrefs::default()
                 },
             );
             assert_eq!(restored_tree_width(ctx), Some(200.0));

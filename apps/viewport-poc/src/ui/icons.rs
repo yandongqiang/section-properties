@@ -1,10 +1,20 @@
-//! Hand-painted line-art icons for the ribbon toolbar.
+//! Hand-painted line-art icons for the application chrome.
 //!
 //! Deliberately dependency-free: every glyph is drawn with
 //! [`egui::Painter`] primitives inside a caller-supplied [`egui::Rect`], so no
 //! icon-font crate or `egui_extras` feature is required.  All icons share one
 //! stroke width and take their colour from the caller (normally
-//! `ui.visuals`), which keeps them visually consistent across the ribbon.
+//! `ui.visuals`), which keeps them visually consistent.
+//!
+//! The set is curated as a small **glyph library**: the title-bar panel
+//! toggles, the right-panel mode switcher and the bottom dock tabs draw the
+//! `panel_*` / `search` / `agent` / `outline` / `problems` / `history` glyphs,
+//! while the earlier geometry / boundary / view glyphs are kept for the
+//! planned centre-workspace toolbars (Phase 159-C/D).  Because a binary crate
+//! has no public API, a glyph that no surface draws yet would otherwise trip
+//! the `dead_code` lint, so the module opts out of that lint — the library is
+//! intentionally larger than any single frame's usage.
+#![allow(dead_code)]
 
 use egui::{Color32, Painter, Pos2, Rect, Stroke};
 
@@ -141,7 +151,12 @@ pub fn redo(pa: &Painter, r: Rect, c: Color32) {
 /// A waste basket — "Delete".
 pub fn trash(pa: &Painter, r: Rect, c: Color32) {
     seg(pa, r, c, (0.24, 0.28), (0.76, 0.28));
-    poly(pa, r, c, &[(0.42, 0.28), (0.42, 0.18), (0.58, 0.18), (0.58, 0.28)]);
+    poly(
+        pa,
+        r,
+        c,
+        &[(0.42, 0.28), (0.42, 0.18), (0.58, 0.18), (0.58, 0.28)],
+    );
     closed(
         pa,
         r,
@@ -377,5 +392,365 @@ pub fn sun(pa: &Painter, r: Rect, c: Color32) {
             (0.50 + dx * 0.26, 0.50 + dy * 0.26),
             (0.50 + dx * 0.40, 0.50 + dy * 0.40),
         );
+    }
+}
+
+// ── Chrome / workspace (Phase 159-B) ─────────────────────────────────────
+
+/// A magnifier without a plus — "Search / command palette".
+pub fn search(pa: &Painter, r: Rect, c: Color32) {
+    circle(pa, r, c, 0.42, 0.42, 0.24, false);
+    seg(pa, r, c, (0.60, 0.60), (0.84, 0.84));
+}
+
+/// A rectangle with its left strip filled — "Project panel".
+pub fn panel_left(pa: &Painter, r: Rect, c: Color32) {
+    closed(
+        pa,
+        r,
+        c,
+        &[(0.16, 0.22), (0.84, 0.22), (0.84, 0.78), (0.16, 0.78)],
+    );
+    pa.rect_filled(
+        Rect::from_min_max(p(r, 0.16, 0.22), p(r, 0.38, 0.78)),
+        0.0,
+        c,
+    );
+}
+
+/// A rectangle with its right strip filled — "Inspector panel".
+pub fn panel_right(pa: &Painter, r: Rect, c: Color32) {
+    closed(
+        pa,
+        r,
+        c,
+        &[(0.16, 0.22), (0.84, 0.22), (0.84, 0.78), (0.16, 0.78)],
+    );
+    pa.rect_filled(
+        Rect::from_min_max(p(r, 0.62, 0.22), p(r, 0.84, 0.78)),
+        0.0,
+        c,
+    );
+}
+
+/// A rectangle with its bottom strip filled — "Bottom dock".
+pub fn panel_bottom(pa: &Painter, r: Rect, c: Color32) {
+    closed(
+        pa,
+        r,
+        c,
+        &[(0.16, 0.22), (0.84, 0.22), (0.84, 0.78), (0.16, 0.78)],
+    );
+    pa.rect_filled(
+        Rect::from_min_max(p(r, 0.16, 0.60), p(r, 0.84, 0.78)),
+        0.0,
+        c,
+    );
+}
+
+/// A four-point sparkle — "Agent" (reserved AI surface).
+pub fn agent(pa: &Painter, r: Rect, c: Color32) {
+    poly(
+        pa,
+        r,
+        c,
+        &[
+            (0.46, 0.14),
+            (0.55, 0.41),
+            (0.82, 0.50),
+            (0.55, 0.59),
+            (0.46, 0.86),
+            (0.37, 0.59),
+            (0.10, 0.50),
+            (0.37, 0.41),
+            (0.46, 0.14),
+        ],
+    );
+    circle(pa, r, c, 0.78, 0.76, 0.06, true);
+}
+
+/// An indented hierarchy list — "Outline".
+pub fn outline(pa: &Painter, r: Rect, c: Color32) {
+    seg(pa, r, c, (0.18, 0.26), (0.84, 0.26));
+    seg(pa, r, c, (0.36, 0.50), (0.84, 0.50));
+    seg(pa, r, c, (0.36, 0.74), (0.84, 0.74));
+    // Parent stem linking the top row to the indented children.
+    seg(pa, r, c, (0.26, 0.26), (0.26, 0.62));
+    seg(pa, r, c, (0.26, 0.62), (0.36, 0.62));
+}
+
+/// A warning triangle with an exclamation — "Problems".
+pub fn problems(pa: &Painter, r: Rect, c: Color32) {
+    closed(pa, r, c, &[(0.50, 0.14), (0.88, 0.82), (0.12, 0.82)]);
+    seg(pa, r, c, (0.50, 0.40), (0.50, 0.62));
+    circle(pa, r, c, 0.50, 0.72, 0.05, true);
+}
+
+/// A clock with a rewind arrow — "History".
+pub fn history(pa: &Painter, r: Rect, c: Color32) {
+    circle(pa, r, c, 0.54, 0.54, 0.30, false);
+    seg(pa, r, c, (0.54, 0.54), (0.54, 0.34));
+    seg(pa, r, c, (0.54, 0.54), (0.68, 0.62));
+    // Rewind arrow tucked into the top-left.
+    seg(pa, r, c, (0.20, 0.40), (0.20, 0.18));
+    seg(pa, r, c, (0.20, 0.18), (0.40, 0.26));
+}
+
+// ── Window controls (custom, undecorated chrome) ─────────────────────────
+
+/// A single horizontal bar — "Minimize".
+pub fn window_minimize(pa: &Painter, r: Rect, c: Color32) {
+    seg(pa, r, c, (0.28, 0.52), (0.72, 0.52));
+}
+
+/// A square outline — "Maximize".
+pub fn window_maximize(pa: &Painter, r: Rect, c: Color32) {
+    closed(
+        pa,
+        r,
+        c,
+        &[(0.26, 0.26), (0.74, 0.26), (0.74, 0.74), (0.26, 0.74)],
+    );
+}
+
+/// A front square with a second square peeking out behind — "Restore".
+pub fn window_restore(pa: &Painter, r: Rect, c: Color32) {
+    // Back square (only its top and right edges show).
+    poly(
+        pa,
+        r,
+        c,
+        &[
+            (0.36, 0.36),
+            (0.36, 0.20),
+            (0.80, 0.20),
+            (0.80, 0.64),
+            (0.64, 0.64),
+        ],
+    );
+    // Front square.
+    closed(
+        pa,
+        r,
+        c,
+        &[(0.20, 0.36), (0.64, 0.36), (0.64, 0.80), (0.20, 0.80)],
+    );
+}
+
+/// A cross — "Close".
+pub fn window_close(pa: &Painter, r: Rect, c: Color32) {
+    seg(pa, r, c, (0.30, 0.30), (0.70, 0.70));
+    seg(pa, r, c, (0.70, 0.30), (0.30, 0.70));
+}
+
+// ── Chrome button helpers ────────────────────────────────────────────────
+
+/// Size of an icon-only toggle button (points).
+const TOGGLE_W: f32 = 26.0;
+/// Icon box size inside a chrome button.
+const BTN_ICON: f32 = super::theme::ICON_SIZE;
+
+/// Paint a compact icon-only toggle button and return its interaction
+/// response.
+///
+/// `active` highlights the button (used by the title-bar panel toggles to
+/// show a panel that is currently visible); the caller supplies the tooltip
+/// and handles the click.
+pub fn icon_toggle(ui: &mut egui::Ui, icon: IconFn, active: bool, tooltip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(TOGGLE_W, super::theme::ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals().clone();
+        let bg = if active {
+            visuals.selection.bg_fill
+        } else if response.hovered() {
+            visuals.widgets.hovered.weak_bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        if bg != egui::Color32::TRANSPARENT {
+            painter.rect_filled(rect, 4.0, bg);
+        }
+        let fg = if active {
+            visuals.selection.stroke.color
+        } else {
+            visuals.text_color()
+        };
+        let icon_rect = egui::Rect::from_center_size(
+            rect.center(),
+            egui::vec2(rect.width() - 8.0, rect.height() - 6.0),
+        );
+        icon(painter, icon_rect, fg);
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// Paint a compact window-control button (minimize / maximize / close) and
+/// return its interaction response.
+///
+/// Mirrors [`icon_toggle`]'s sizing and icon box so the custom title bar reads
+/// as one row, but with window-control semantics: `close` swaps the hover
+/// highlight for the theme's warning red — the standard "this closes the app"
+/// affordance — while the others use the shared accent hover tint.
+pub fn window_control_button(
+    ui: &mut egui::Ui,
+    icon: IconFn,
+    tooltip: &str,
+    close: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(TOGGLE_W, super::theme::ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals().clone();
+        let dark = visuals.dark_mode;
+        let hovered = response.hovered();
+        let bg = if !hovered {
+            egui::Color32::TRANSPARENT
+        } else if close {
+            super::theme::close_hover(dark)
+        } else {
+            visuals.widgets.hovered.weak_bg_fill
+        };
+        let painter = ui.painter();
+        if bg != egui::Color32::TRANSPARENT {
+            painter.rect_filled(rect, 4.0, bg);
+        }
+        let fg = if hovered && close {
+            super::theme::close_hover_fg(dark)
+        } else {
+            visuals.text_color()
+        };
+        let icon_rect = egui::Rect::from_center_size(
+            rect.center(),
+            egui::vec2(rect.width() - 10.0, rect.height() - 8.0),
+        );
+        icon(painter, icon_rect, fg);
+    }
+    response.on_hover_text(tooltip)
+}
+
+/// Paint a compact button with a leading icon and a text label, returning its
+/// interaction response.
+///
+/// `selected` gives the segmented-control highlight; `enabled == false`
+/// dims the button and disables clicks.
+pub fn icon_text_button(
+    ui: &mut egui::Ui,
+    icon: IconFn,
+    text: &str,
+    selected: bool,
+    enabled: bool,
+) -> egui::Response {
+    let font = super::theme::body_font();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, ui.visuals().text_color());
+    let pad_x = 7.0;
+    let gap = 5.0;
+    let width = pad_x * 2.0 + BTN_ICON + gap + galley.size().x;
+    let height = super::theme::ROW_HEIGHT;
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), sense);
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals().clone();
+        let bg = if !enabled {
+            egui::Color32::TRANSPARENT
+        } else if selected {
+            visuals.selection.bg_fill
+        } else if response.hovered() {
+            visuals.widgets.hovered.weak_bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let painter = ui.painter();
+        if bg != egui::Color32::TRANSPARENT {
+            painter.rect_filled(rect, 4.0, bg);
+        }
+        let fg = if !enabled {
+            visuals.weak_text_color()
+        } else if selected {
+            visuals.selection.stroke.color
+        } else {
+            visuals.text_color()
+        };
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + pad_x, rect.center().y - BTN_ICON * 0.5),
+            egui::vec2(BTN_ICON, BTN_ICON),
+        );
+        icon(painter, icon_rect, fg);
+        let text_pos = egui::pos2(
+            icon_rect.right() + gap,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        painter.galley(text_pos, galley, fg);
+    }
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every chrome glyph must paint without panicking on a real painter, and
+    /// the button helpers must be usable headlessly (a disabled button is
+    /// never clickable).
+    #[test]
+    fn chrome_glyphs_and_helpers_paint_headlessly() {
+        egui::__run_test_ctx(|ctx| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 200.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    for glyph in [
+                        search,
+                        panel_left,
+                        panel_right,
+                        panel_bottom,
+                        agent,
+                        outline,
+                        problems,
+                        history,
+                        window_minimize,
+                        window_maximize,
+                        window_restore,
+                        window_close,
+                    ] {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                        glyph(ui.painter(), rect, egui::Color32::WHITE);
+                    }
+                    let _ = icon_toggle(ui, panel_left, true, "left");
+                    let _ = icon_toggle(ui, panel_right, false, "right");
+                    let _ = icon_text_button(ui, outline, "Outline", true, true);
+                    let disabled = icon_text_button(ui, problems, "Problems", false, false);
+                    assert!(!disabled.clicked(), "a disabled button cannot be clicked");
+                    // The window-control buttons are freshly drawn here, so
+                    // none of them may report a click in this frame.
+                    for close in [false, true] {
+                        let r = window_control_button(
+                            ui,
+                            if close { window_close } else { window_minimize },
+                            "control",
+                            close,
+                        );
+                        assert!(!r.clicked(), "a freshly drawn control is not clicked");
+                    }
+                });
+            });
+        });
     }
 }
